@@ -108,15 +108,15 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 | 模块 | 职责 |
 | --- | --- |
 | src/cli.ts | CLI 命令解析与配置向导；只在 run 时动态加载后台业务入口 |
-| src/background.ts | systemd 用户服务、linger、启停、状态与日志 |
+| src/systemd.ts | systemd 用户服务、linger、启停、状态与日志 |
 | src/main.ts | 组装组件、状态加载、启动和退出；只在这里选择具体 IM 与 Agent |
 | src/config.ts、src/logger.ts | Telegram 凭据与本人身份校验、结构化日志 |
 | src/im/telegram.ts | grammY 接入、本人验证、入站标准化、回复与连接生命周期 |
 | src/agents/codex.ts | Codex app-server 连接、协议校验、会话创建或恢复、执行与中断 |
-| src/core/service.ts | 平台无关的命令处理、单会话协调和串行任务执行 |
+| src/core/relay.ts | 平台无关的命令处理、单会话协调和串行任务执行 |
 | src/core/types.ts | 实际跨模块复用的来源、消息、Agent 接口和执行结果 |
-| src/storage/index.ts、src/storage/schema.ts | JSON 状态读写、结构校验、业务操作和单实例锁 |
-| src/storage/file.ts | 配置与状态共用的 JSON 原子写入 |
+| src/storage/store.ts、src/storage/schema.ts | JSON 状态读写、结构校验、业务操作和单实例锁 |
+| src/storage/json.ts | 配置与状态共用的 JSON 原子写入 |
 
 Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent 模块使用。核心层只处理应用自己的消息与回复，通过存储模块暴露的操作读写状态；不直接使用 grammY 或 Codex 协议。IM 来源标识统一为字符串，避免把 Telegram 数字 ID 的假设带到其他平台。
 

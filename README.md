@@ -51,7 +51,7 @@ Node.js 24 + TypeScript（ESM）；grammY 接入 Telegram；Node.js 文件接口
 ```text
 src/
 ├── cli.ts               # 全局命令与交互配置向导
-├── background.ts        # systemd 用户服务的启停、状态和日志
+├── systemd.ts           # systemd 用户服务的启停、状态和日志
 ├── main.ts              # 组件组装、启动和退出
 ├── config.ts            # 用户配置、环境变量覆盖与校验
 ├── logger.ts            # 结构化日志与敏感字段隐藏
@@ -60,12 +60,12 @@ src/
 ├── im/
 │   └── telegram.ts      # Telegram 鉴权、消息转换和发送
 ├── core/
-│   ├── service.ts       # 命令处理与单任务执行
+│   ├── relay.ts         # 命令处理与单任务执行
 │   └── types.ts         # 跨模块共用的消息与 Agent 接口
 └── storage/
-    ├── index.ts         # 状态读写、恢复和单实例锁
+    ├── store.ts         # 状态读写、恢复和单实例锁
     ├── schema.ts        # JSON 状态结构校验
-    └── file.ts          # 配置与状态共用的原子写入
+    └── json.ts          # 配置与状态共用的原子写入
 ```
 
 新增 IM 时，在 `im/` 添加连接器，把授权后的消息转换为 `IncomingMessage` 并调用核心入口。新增 Agent 时，在 `agents/` 实现 `Agent` 的执行和停止接口；审批接口随实际交互能力扩展。核心层不使用 grammY 或 Codex 协议类型，不引入插件注册器、基类或依赖注入框架。

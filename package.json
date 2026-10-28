@@ -15,7 +15,7 @@
   },
   "scripts": {
     "dev": "node --env-file-if-exists=.env --import tsx --watch src/cli.ts run",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "start": "node --env-file-if-exists=.env dist/cli.js run",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",

@@ -2,10 +2,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createCodexAgent } from "./agents/codex.js";
 import { loadConfig } from "./config.js";
-import { createRelayService } from "./core/service.js";
+import { createRelayService } from "./core/relay.js";
 import { createTelegramConnection } from "./im/telegram.js";
 import { createLogger } from "./logger.js";
-import { openStore, type Store } from "./storage/index.js";
+import { openStore, type Store } from "./storage/store.js";
 
 /** 启动日志在配置校验前可用，避免将无效配置直接输出。 */
 const logger = createLogger();

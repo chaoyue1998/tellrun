@@ -5,7 +5,7 @@ import { Bot, BotError, GrammyError, HttpError } from "grammy";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import type { MessageHandler } from "../core/types.js";
-import type { Store } from "../storage/index.js";
+import type { Store } from "../storage/store.js";
 
 /** Telegram 连接器负责鉴权、消息转换与发送，业务逻辑交给统一处理入口。 */
 export function createTelegramConnection(

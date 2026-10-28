@@ -2,7 +2,7 @@ import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import type { Logger } from "pino";
-import type { Store } from "../storage/index.js";
+import type { Store } from "../storage/store.js";
 import type { Agent, ChannelIdentity, IncomingMessage } from "./types.js";
 
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */

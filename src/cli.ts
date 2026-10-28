@@ -14,9 +14,9 @@ import * as p from "@clack/prompts";
 import { Command, CommanderError } from "commander";
 import { ZodError } from "zod";
 import { createCodexAgent } from "./agents/codex.js";
-import { manageService } from "./background.js";
 import { appDirectory, type Config, configSchema, loadConfig } from "./config.js";
-import { writeJson } from "./storage/file.js";
+import { writeJson } from "./storage/json.js";
+import { manageService } from "./systemd.js";
 
 /** 全局入口只注册命令；业务入口仅在 run 时动态加载。 */
 const program = new Command()

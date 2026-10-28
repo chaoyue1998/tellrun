@@ -13,7 +13,7 @@ import {
 import { dirname, join } from "node:path";
 import { appDirectory } from "../config.js";
 import type { AgentResult, ChannelIdentity, IncomingMessage } from "../core/types.js";
-import { writeJson } from "./file.js";
+import { writeJson } from "./json.js";
 import { activeTaskStatuses, type State, stateSchema } from "./schema.js";
 
 /** 打开文件状态并取得单实例锁；所有业务写入统一替换 state.json。 */
