@@ -1,17 +1,9 @@
 #!/usr/bin/env node
-import {
-  accessSync,
-  chmodSync,
-  constants,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import * as p from "@clack/prompts";
 import { Command, CommanderError } from "commander";
+import which from "which";
 import { ZodError } from "zod";
 import { createCodexAgent } from "./agents/codex.js";
 import { appDirectory, type Config, configSchema, loadConfig } from "./config.js";
@@ -96,22 +88,8 @@ program
       },
     );
 
-    const command = answers.codexPath.trim();
-    const executable = (
-      isAbsolute(command) || command.includes("/")
-        ? [resolve(command)]
-        : (process.env.PATH ?? "")
-            .split(delimiter)
-            .filter(isAbsolute)
-            .map((directory) => join(directory, command))
-    ).find((path) => {
-      try {
-        accessSync(path, constants.X_OK);
-        return statSync(path).isFile();
-      } catch {
-        return false;
-      }
-    });
+    /** 命令名按 PATH 查找，指定路径直接检查可执行性。 */
+    const executable = await which(answers.codexPath.trim(), { nothrow: true });
     if (!executable)
       throw new Error("未找到可执行的 Codex，请先安装 Codex 或填写正确路径；原配置保持不变。");
     const config = configSchema.parse({

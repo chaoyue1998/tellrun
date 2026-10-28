@@ -88,7 +88,7 @@ cp .env.example .env
 
 编辑 `.env`，填写 `TELEGRAM_BOT_TOKEN` 和本人 `TELEGRAM_OWNER_ID`；用户 ID 必须是十进制正整数。`.env` 已加入 Git 忽略规则。
 
-当前只有以上两项必填配置，也可运行 `node dist/cli.js setup` 写入用户配置。配置与状态分别放在 `~/.agent-relay/config.json`、`~/.agent-relay/state.json`，开发运行与全局安装使用同一目录和单实例锁。Codex 优先使用 `CODEX_PATH`，其次使用配置文件路径，均未设置时通过 PATH 查找。日志级别固定为 `info`。无需项目清单；在 Telegram 中用 `/cwd` 指定目录，不设置目录白名单。
+当前只有以上两项必填配置，也可运行 `node dist/cli.js setup` 写入用户配置。配置与状态分别放在 `~/.agent-relay/config.json`、`~/.agent-relay/state.json`，开发运行与全局安装使用同一目录和单实例锁。Codex 优先使用 `CODEX_PATH`，其次使用配置文件路径，均未设置时通过 PATH 查找。日志级别固定为 `info`。无需项目清单；会话默认使用服务启动目录，可在 Telegram 中用 `/cwd` 切换，不设置目录白名单。
 
 `telegram.proxyUrl` 为可选配置，由用户按需填写。Telegram 代理优先使用非空 `TELEGRAM_PROXY_URL`，其次使用配置文件中的 `telegram.proxyUrl`；配置文件中空字符串表示明确直连。两处均未指定时，读取运行环境的 `HTTPS_PROXY` / `https_proxy`；使用代理时遵循 `NO_PROXY` / `no_proxy`（小写优先）。代理 URL 不写入服务定义或命令行参数。
 
@@ -98,14 +98,13 @@ npm run dev
 
 启动时会取得单实例锁、加载并校验状态文件、检查 Codex CLI，再核实 Telegram 身份并启动轮询。仅响应配置的本人私聊；发给其他机器人的命令会被忽略，不支持的媒体会收到提示。若已有 Webhook 或出现轮询冲突，服务退出并给出诊断，不自动接管其他部署。
 
-在 Telegram 中依次发送以下两条消息，将示例目录换成实际项目的绝对路径：
+在 Telegram 中直接发送消息即可：
 
 ```text
-/cwd /你的项目绝对路径
 hi
 ```
 
-后续文本沿用当前 Codex 会话。`/new` 新建会话并保留目录，`/status` 查看状态，`/last` 查看最近结果；`/stop` 停止当前任务并暂停接收，确认结果后用 `/resume` 恢复。当前全局只接受一个未结束任务，忙碌时新消息会明确提示未提交。切换目录会开始新会话。
+未指定工作目录的会话会记住服务启动目录；systemd 服务默认使用当前用户的主目录。需要切换时发送 `/cwd /你的项目绝对路径`，目录变化会开始新会话。后续文本沿用当前 Codex 会话。`/new` 新建会话并保留目录，`/status` 查看状态，`/last` 查看最近结果；`/stop` 停止当前任务并暂停接收，确认结果后用 `/resume` 恢复。当前全局只接受一个未结束任务，忙碌时新消息会明确提示未提交。
 
 Codex 沿用本机登录、模型配置和终端代理；默认使用工作区写入与按需审批。尚未支持的审批或结构化提问会中断任务并说明原因。CLI 版本检查不代表模型可用，实际调用失败会保存状态并回复。
 
@@ -114,6 +113,39 @@ Codex 沿用本机登录、模型配置和终端代理；默认使用工作区�
 普通 Telegram 请求连同重试最多等待 15 秒，长轮询最多 40 秒。可恢复的发送失败会保留 outbox 并退避重试，429 遵守服务端等待时间；永久拒绝会记录日志并将回复移出队列，任务结果仍可用 `/last` 查看。发送成功但响应丢失时可能重复通知，但不会重跑任务。轮询或存储故障会停止服务，待人工或进程管理器重启。
 
 开发服务本身时使用 `npm run dev`。让 Agent 修改代码时可用 `npm run build && npm start`，避免源码监听重启打断正在执行的任务。
+
+## 本地开发
+
+在项目目录执行：
+
+```sh
+npm ci                     # 首次安装依赖
+npm run build              # 生成 CLI 入口并设置执行权限
+npm link
+agent-relay --help
+agent-relay setup
+agent-relay run
+```
+
+Linux 下本地调试时，在 `setup` 中选择仅保存配置，再通过 `agent-relay run` 前台运行。
+
+修改 TypeScript 后，重新执行 `npm run build`，再运行命令即可，不用重复 `npm link`。完成首次构建后，也可以单独开一个终端自动编译：
+
+```sh
+npx tsc -p tsconfig.build.json --watch
+```
+
+自动编译不会重启正在运行的进程，修改后需要手动重启 `agent-relay run`。如果只调试业务逻辑，可以直接使用现有的 `npm run dev`，它会监听源码并自动重启。
+
+发布前，使用实际安装包验证文件是否齐全：
+
+```sh
+npm pack                         # 已配置自动构建
+npm install -g ./agent-relay-1.0.0.tgz
+agent-relay --help
+```
+
+压缩包文件名随版本号变化，以 `npm pack` 输出为准。安装压缩包后，全局命令会改用安装包中的代码；继续通过源码调试时，在项目目录重新执行 `npm link`。
 
 ## 开发命令
 
@@ -124,6 +156,7 @@ Codex 沿用本机登录、模型配置和终端代理；默认使用工作区�
 | `npm run format` | 格式化并应用安全修复     |
 | `npm run build`  | 编译到 `dist/`           |
 | `npm start`      | 运行编译产物             |
+
 
 上述源码开发命令从项目根目录运行，用户配置和运行状态始终保存在用户目录。
 
