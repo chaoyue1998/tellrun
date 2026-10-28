@@ -1,5 +1,6 @@
+import { Agent } from "node:https";
 import { autoRetry } from "@grammyjs/auto-retry";
-import { Bot, BotError, GrammyError } from "grammy";
+import { Bot, BotError, GrammyError, HttpError } from "grammy";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import type { MessageHandler } from "../core/types.js";
@@ -10,7 +11,14 @@ export function createTelegramConnection(
   handleMessage: MessageHandler,
   logger: Logger,
 ) {
-  const bot = new Bot(config.token, { client: { timeoutSeconds: 35 } });
+  /** 默认继承终端代理；显式配置使用优先级更高的小写变量，保留 NO_PROXY 规则。 */
+  const agent = new Agent({
+    keepAlive: true,
+    proxyEnv: config.proxyUrl ? { ...process.env, https_proxy: config.proxyUrl } : process.env,
+  });
+  const bot = new Bot(config.token, {
+    client: { timeoutSeconds: 35, baseFetchConfig: { agent } },
+  });
   /** 只中断初始化和拉取；正在处理的消息由 start 等待完成。 */
   const polling = new AbortController();
   bot.api.config.use(
@@ -111,12 +119,19 @@ export function createTelegramConnection(
       } catch (error) {
         /** 关停只忽略被取消的读取；业务错误即使发生在退出期间也必须上报。 */
         if (polling.signal.aborted && !(error instanceof BotError)) return;
-        const cause = error instanceof BotError ? error.error : error;
+        let cause = error instanceof BotError ? error.error : error;
+        /** 网络错误仅记录类型和错误码，原始消息中的 URL 可能包含 Bot Token。 */
+        if (cause instanceof HttpError) cause = cause.error;
         logger.error(
           {
             updateId: error instanceof BotError ? error.ctx.update.update_id : undefined,
             errorType: cause instanceof Error ? cause.name : "UnknownError",
-            errorCode: cause instanceof GrammyError ? cause.error_code : undefined,
+            errorCode:
+              cause instanceof GrammyError
+                ? cause.error_code
+                : cause instanceof Error && "code" in cause && typeof cause.code === "string"
+                  ? cause.code
+                  : undefined,
           },
           cause instanceof GrammyError && cause.error_code === 409
             ? "Telegram 轮询冲突，请检查其他实例或 Webhook"
@@ -125,6 +140,8 @@ export function createTelegramConnection(
               : "Telegram 启动或消息处理失败，停止轮询以便恢复",
         );
         throw error;
+      } finally {
+        agent.destroy();
       }
     },
     /** 停止拉取，不额外发送确认请求；未确认更新允许在重启后重投。 */

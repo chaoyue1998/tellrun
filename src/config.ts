@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** 校验 Telegram 凭据和本人身份；错误信息不包含配置值。 */
+/** 校验 Telegram 凭据、本人身份和可选代理；错误信息不包含配置值。 */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const environment = z
     .object({
@@ -14,6 +14,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         .regex(/^[1-9]\d*$/)
         .transform(Number)
         .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER)),
+      TELEGRAM_PROXY_URL: z
+        .url({ protocol: /^https?$/ })
+        .or(z.literal(""))
+        .optional(),
     })
     .safeParse(env);
 
@@ -27,6 +31,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     telegram: {
       token: environment.data.TELEGRAM_BOT_TOKEN,
       ownerId: environment.data.TELEGRAM_OWNER_ID,
+      proxyUrl: environment.data.TELEGRAM_PROXY_URL,
     },
   };
 }

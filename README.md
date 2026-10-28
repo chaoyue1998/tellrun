@@ -2,7 +2,7 @@
 
 通过 IM 与服务器上的编码 Agent 对话，提交开发任务、查看进度、处理审批并继续会话。
 
-## 首版范围
+## 首版目标
 
 - 个人使用，仅授权本人操作。
 - Telegram 私聊接入，采用长轮询。
@@ -20,9 +20,9 @@
 
 ## 技术方案
 
-Node.js 24 + TypeScript（ESM）；grammY 接入 Telegram；SQLite、better-sqlite3 和 Drizzle 保存动态状态；Zod 校验配置，Pino 输出日志，Biome 负责格式与静态检查。本轮暂不加入测试框架和测试文件。
+Node.js 24 + TypeScript（ESM）；grammY 接入 Telegram；SQLite、better-sqlite3 和 Drizzle 保存动态状态；Zod 校验配置，Pino 输出日志，Biome 负责格式与静态检查。按当前要求，不添加测试文件、测试命令或测试依赖。
 
-使用 Node.js 自带的 npm 管理依赖，提交 `package-lock.json`，通过 `npm ci` 安装。`.nvmrc` 指定 Node.js 24.22.1，使用现有 nvm 切换运行时。
+使用 Node.js 自带的 npm 管理依赖，提交 `package-lock.json`，通过 `npm ci` 安装。需要 Node.js 24.5.0 或更高版本，以使用[内置代理支持](https://nodejs.org/docs/latest-v24.x/api/http.html#built-in-proxy-support)；`.nvmrc` 固定开发环境为 Node.js 24.22.1，使用现有 nvm 切换运行时。
 
 ## 目录与扩展
 
@@ -47,7 +47,7 @@ migrations/              # SQL 迁移及 Drizzle 元数据
 
 新增 IM 时，在 `im/` 添加连接器，把授权后的消息转换为 `IncomingMessage` 并调用核心入口。新增 Agent 时，在 `agents/` 添加对应模块；执行与审批接口在 M0 验证后按实际能力补充。核心层不使用 grammY 或 Codex 协议类型，不引入插件注册器、基类或依赖注入框架。
 
-当前 SQLite 只有 `channels` 业务表，保存平台、机器人账号、聊天 ID、用户 ID 和时间戳，不保存聊天正文。会话、任务、审批、入站去重与发送记录随对应功能再添加。
+当前 SQLite 只有 `channels` 业务表，保存平台、机器人账号、聊天 ID、用户 ID 和时间戳，不保存聊天正文。接入真实任务时，必须同时实现入站去重、任务持久化和发送记录，避免消息重投导致重复执行。
 
 ## 本地启动
 
@@ -60,15 +60,21 @@ npm ci
 cp .env.example .env
 ```
 
-编辑 `.env`，填写 `TELEGRAM_BOT_TOKEN` 和本人 `TELEGRAM_OWNER_ID`。`.env` 已加入 Git 忽略规则。
+编辑 `.env`，填写 `TELEGRAM_BOT_TOKEN` 和本人 `TELEGRAM_OWNER_ID`；用户 ID 必须是十进制正整数。`.env` 已加入 Git 忽略规则。
 
-当前只需要 `.env` 中的两项配置。数据库固定放在 `data/agent-relay.db`，通过 PATH 调用 `codex`，日志级别固定为 `info`。无需项目清单；后续任务执行直接使用指定的工作目录。
+当前只有以上两项必填配置。数据库固定放在 `data/agent-relay.db`，通过 PATH 调用 `codex`，日志级别固定为 `info`。无需项目清单；后续任务执行直接使用指定的工作目录。
+
+Telegram 默认读取启动终端的 `HTTPS_PROXY` / `https_proxy` 和 `NO_PROXY` / `no_proxy`（小写优先）。如需单独指定，在 `.env` 设置 `TELEGRAM_PROXY_URL=http://127.0.0.1:7897`，优先于终端代理，仍遵循 `NO_PROXY` 规则。支持 HTTP/HTTPS 代理；未设置或留空时沿用终端配置，两处均未配置时直连。
 
 ```sh
 npm run dev
 ```
 
-启动时会自动迁移数据库、检查 Codex CLI，然后启动 Telegram 长轮询。支持 `/start`、`/help` 和 `/status`，仅响应配置的本人私聊。若已有 Webhook，启动会失败并提示手动处理。
+启动时会自动迁移数据库、检查 Codex CLI，然后启动 Telegram 长轮询。CLI 版本检查不代表认证、模型或 app-server 协议已经可用。支持 `/start`、`/help` 和 `/status`，仅响应配置的本人私聊；发给其他机器人的命令会被忽略，不支持的媒体会收到提示。若已有 Webhook 或出现轮询冲突，服务退出并给出诊断，不自动接管其他部署。
+
+轮询仅在消息处理成功后推进确认位置。关停会取消初始化或拉取请求，等待当前消息处理结束后关闭数据库，不额外确认未完成的更新。重启时可能重新收到上一批未确认消息；当前会话写入幂等，但回复可能重复，尚未提供任务级去重。
+
+普通 Telegram 请求连同重试最多等待 15 秒，长轮询请求最多 40 秒。429 和 5xx 最多重试两次；429 要求等待超过 5 秒时直接报错，网络错误直接向上传递。不可恢复的调用失败以非零状态退出；当前版本的断线恢复依赖人工或进程管理器重启，尚未实现 outbox 补发。
 
 ## 开发命令
 
