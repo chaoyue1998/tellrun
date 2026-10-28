@@ -1,10 +1,10 @@
 {
-  "name": "agent-relay",
+  "name": "tellrun",
   "version": "1.0.0",
   "description": "通过 IM 与服务器上的编码 Agent 对话，提交开发任务、查看进度、处理审批并继续会话。",
   "type": "module",
   "bin": {
-    "agent-relay": "dist/cli.js"
+    "tellrun": "dist/cli.js"
   },
   "files": [
     "dist",

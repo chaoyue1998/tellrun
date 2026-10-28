@@ -12,7 +12,7 @@ import { manageService } from "./systemd.js";
 
 /** 全局入口只注册命令；业务入口仅在 run 时动态加载。 */
 const program = new Command()
-  .name("agent-relay")
+  .name("tellrun")
   .description("通过 Telegram 与服务器上的 Codex 对话")
   .version(
     JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version,
@@ -29,9 +29,9 @@ program
   .description("交互配置并启动后台服务")
   .action(async () => {
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
-      throw new Error("setup 需要交互终端，请直接在终端运行 agent-relay setup。");
+      throw new Error("setup 需要交互终端，请直接在终端运行 tellrun setup。");
     }
-    p.intro("Agent Relay 配置");
+    p.intro("Tellrun 配置");
     let current: Config | undefined;
     try {
       current = loadConfig();
@@ -40,7 +40,7 @@ program
         p.log.warn("现有配置无法加载，需要重新填写；完成前保留原文件。");
       }
     }
-    p.log.info("配置保存到 ~/.agent-relay/config.json。");
+    p.log.info("配置保存到 ~/.tellrun/config.json。");
     const answers = await p.group(
       {
         token: () =>
@@ -112,14 +112,14 @@ program
     mkdirSync(appDirectory, { recursive: true, mode: 0o700 });
     chmodSync(appDirectory, 0o700);
     writeJson(join(appDirectory, "config.json"), config);
-    p.outro("配置已保存；如已有服务运行，请用 agent-relay restart 加载新配置。");
+    p.outro("配置已保存；如已有服务运行，请用 tellrun restart 加载新配置。");
     if (answers.launch !== "later")
       await manageService("restart", { enable: answers.launch === "boot" });
     else
       console.log(
         process.platform === "linux"
-          ? "运行 agent-relay start 启动后台服务。"
-          : "运行 agent-relay run 前台启动；后台管理支持 Linux systemd。",
+          ? "运行 tellrun start 启动后台服务。"
+          : "运行 tellrun run 前台启动；后台管理支持 Linux systemd。",
       );
   });
 

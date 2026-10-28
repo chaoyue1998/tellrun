@@ -1,15 +1,17 @@
-# Agent Relay
+# Tellrun
 
 通过 IM 与服务器上的编码 Agent 对话，提交开发任务、查看进度、处理审批并继续会话。
+
+Tellrun 取自 Tell + Run，意为说出需求、交给 Agent 执行，npm 包名与 CLI 命令均为 `tellrun`。
 
 ## 首版目标
 
 - 个人使用，仅授权本人操作。
-- 通过 `npm install -g agent-relay` 安装，命令行交互配置后在服务器后台运行。
+- 通过 `npm install -g tellrun` 安装，命令行交互配置后在服务器后台运行。
 - Telegram 私聊接入，采用长轮询。
 - Codex 通过 `app-server` 接入。
 - 支持多会话、任务排队、审批、停止和异常恢复。
-- 暂不提供项目选择，Relay 不设置项目目录白名单。
+- 暂不提供项目选择，Tellrun 不设置项目目录白名单。
 - 后续逐步接入其他 IM、Claude 等 Agent。
 
 ## 文档
@@ -24,21 +26,21 @@
 先安装 Node.js 24.5.0 或更高版本、Codex，并完成 Codex 登录。CLI、配置向导和 Linux systemd 用户服务管理已接入；本轮未执行 npm 发布，发布后可按以下流程使用。
 
 ```sh
-npm install -g agent-relay
-agent-relay setup       # 交互配置 Telegram 和 Codex，完成后可直接启动后台服务
-agent-relay start       # 后续启动
-agent-relay status      # 查看后台服务状态
-agent-relay logs        # 查看日志
-agent-relay logs -f     # 持续跟随日志
-agent-relay restart     # 重启服务
-agent-relay stop        # 停止后台服务
+npm install -g tellrun
+tellrun setup       # 交互配置 Telegram 和 Codex，完成后可直接启动后台服务
+tellrun start       # 后续启动
+tellrun status      # 查看后台服务状态
+tellrun logs        # 查看日志
+tellrun logs -f     # 持续跟随日志
+tellrun restart     # 重启服务
+tellrun stop        # 停止后台服务
 ```
 
-CLI 采用 Commander，配置向导采用 Clack。Bot Token 使用明文输入，已有配置时留空保留原值。`setup` 校验配置与 Codex 可执行文件后原子保存，取消时保留原配置；可选择立即启动或重启后台服务，并启用开机自启。后续也可使用 `agent-relay start --enable` 启用自启。配置、运行状态、单实例锁和服务定义都保存在当前用户的 `~/.agent-relay/`，全局 npm 包升级保留这些数据。
+CLI 采用 Commander，配置向导采用 Clack。Bot Token 使用明文输入，已有配置时留空保留原值。`setup` 校验配置与 Codex 可执行文件后原子保存，取消时保留原配置；可选择立即启动或重启后台服务，并启用开机自启。后续也可使用 `tellrun start --enable` 启用自启。配置、运行状态、单实例锁和服务定义都保存在当前用户的 `~/.tellrun/`，全局 npm 包升级保留这些数据。
 
-后台运行需要 Linux systemd 用户服务。启动时检查并启用用户 linger，确保退出 SSH 后继续运行；权限不足会给出需要在服务器执行的命令。`agent-relay run` 提供前台运行，适用于本地调试或外部进程管理器。`agent-relay service uninstall` 停止并移除服务，保留配置、状态文件和用户 linger 设置。
+后台运行需要 Linux systemd 用户服务。启动时检查并启用用户 linger，确保退出 SSH 后继续运行；权限不足会给出需要在服务器执行的命令。`tellrun run` 提供前台运行，适用于本地调试或外部进程管理器。`tellrun service uninstall` 停止并移除服务，保留配置、状态文件和用户 linger 设置。
 
-尚未发布时，可在源码目录执行 `npm ci`、`npm pack`，再通过 `npm install -g ./agent-relay-1.0.0.tgz` 安装本地包。打包自动构建并包含运行依赖声明。升级前停止服务并备份数据，升级后运行 `agent-relay restart` 更新 Node 与 CLI 入口路径。具体布局和生命周期见[架构文档](docs/architecture.md#分发与命令行入口)。
+尚未发布时，可在源码目录执行 `npm ci`、`npm pack`，再通过 `npm install -g ./tellrun-1.0.0.tgz` 安装本地包。打包自动构建并包含运行依赖声明。升级前停止服务并备份数据，升级后运行 `tellrun restart` 更新 Node 与 CLI 入口路径。具体布局和生命周期见[架构文档](docs/architecture.md#分发与命令行入口)。
 
 ## 技术方案
 
@@ -71,7 +73,7 @@ src/
 新增 IM 时，在 `im/` 添加连接器，把授权后的消息转换为 `IncomingMessage` 并调用核心入口。新增 Agent 时，在 `agents/` 实现 `Agent` 的执行和停止接口；审批接口随实际交互能力扩展。核心层不使用 grammY 或 Codex 协议类型，不引入插件注册器、基类或依赖注入框架。
 
 `config.json` 保存 Telegram 凭据、本人 ID、Codex 路径和可选的 `telegram.proxyUrl`。
-`state.json` 保存聊天与当前会话、工作目录、任务输入与最终结果、入站去重标识和待发送回复；发送成功或被永久拒绝后移除回复副本。Codex 自己管理完整会话历史，Relay 不保存流式文本、思考过程、工具原始输出或 RPC 等待状态。
+`state.json` 保存聊天与当前会话、工作目录、任务输入与最终结果、入站去重标识和待发送回复；发送成功或被永久拒绝后移除回复副本。Codex 自己管理完整会话历史，Tellrun 不保存流式文本、思考过程、工具原始输出或 RPC 等待状态。
 
 JSON 更新先写同目录临时文件，刷盘后原子替换。`state.json.lock/` 是临时单实例锁目录；正常退出清理，崩溃后检查原进程已退出再回收。文件损坏或写入失败会停止服务，不自动覆盖成空状态。
 
@@ -88,7 +90,7 @@ cp .env.example .env
 
 编辑 `.env`，填写 `TELEGRAM_BOT_TOKEN` 和本人 `TELEGRAM_OWNER_ID`；用户 ID 必须是十进制正整数。`.env` 已加入 Git 忽略规则。
 
-当前只有以上两项必填配置，也可运行 `node dist/cli.js setup` 写入用户配置。配置与状态分别放在 `~/.agent-relay/config.json`、`~/.agent-relay/state.json`，开发运行与全局安装使用同一目录和单实例锁。Codex 优先使用 `CODEX_PATH`，其次使用配置文件路径，均未设置时通过 PATH 查找。日志级别固定为 `info`。无需项目清单；会话默认使用服务启动目录，可在 Telegram 中用 `/cwd` 切换，不设置目录白名单。
+当前只有以上两项必填配置，也可运行 `node dist/cli.js setup` 写入用户配置。配置与状态分别放在 `~/.tellrun/config.json`、`~/.tellrun/state.json`，开发运行与全局安装使用同一目录和单实例锁。Codex 优先使用 `CODEX_PATH`，其次使用配置文件路径，均未设置时通过 PATH 查找。日志级别固定为 `info`。无需项目清单；会话默认使用服务启动目录，可在 Telegram 中用 `/cwd` 切换，不设置目录白名单。
 
 `telegram.proxyUrl` 为可选配置，由用户按需填写。Telegram 代理优先使用非空 `TELEGRAM_PROXY_URL`，其次使用配置文件中的 `telegram.proxyUrl`；配置文件中空字符串表示明确直连。两处均未指定时，读取运行环境的 `HTTPS_PROXY` / `https_proxy`；使用代理时遵循 `NO_PROXY` / `no_proxy`（小写优先）。代理 URL 不写入服务定义或命令行参数。
 
@@ -122,12 +124,12 @@ Codex 沿用本机登录、模型配置和终端代理；默认使用工作区�
 npm ci                     # 首次安装依赖
 npm run build              # 生成 CLI 入口并设置执行权限
 npm link
-agent-relay --help
-agent-relay setup
-agent-relay run
+tellrun --help
+tellrun setup
+tellrun run
 ```
 
-Linux 下本地调试时，在 `setup` 中选择仅保存配置，再通过 `agent-relay run` 前台运行。
+Linux 下本地调试时，在 `setup` 中选择仅保存配置，再通过 `tellrun run` 前台运行。
 
 修改 TypeScript 后，重新执行 `npm run build`，再运行命令即可，不用重复 `npm link`。完成首次构建后，也可以单独开一个终端自动编译：
 
@@ -135,14 +137,14 @@ Linux 下本地调试时，在 `setup` 中选择仅保存配置，再通过 `age
 npx tsc -p tsconfig.build.json --watch
 ```
 
-自动编译不会重启正在运行的进程，修改后需要手动重启 `agent-relay run`。如果只调试业务逻辑，可以直接使用现有的 `npm run dev`，它会监听源码并自动重启。
+自动编译不会重启正在运行的进程，修改后需要手动重启 `tellrun run`。如果只调试业务逻辑，可以直接使用现有的 `npm run dev`，它会监听源码并自动重启。
 
 发布前，使用实际安装包验证文件是否齐全：
 
 ```sh
 npm pack                         # 已配置自动构建
-npm install -g ./agent-relay-1.0.0.tgz
-agent-relay --help
+npm install -g ./tellrun-1.0.0.tgz
+tellrun --help
 ```
 
 压缩包文件名随版本号变化，以 `npm pack` 输出为准。安装压缩包后，全局命令会改用安装包中的代码；继续通过源码调试时，在项目目录重新执行 `npm link`。
@@ -164,4 +166,4 @@ agent-relay --help
 
 ## 文档位置
 
-本地项目目录为 `/Users/sc/Code/agent-relay`，设计文档保存在 `docs/`。原始 [产品 Pages 草案](https://chatgpt.com/space/page_8cd777a7402c8191aa928ab888cb8df8) 和 [架构 Pages 草案](https://chatgpt.com/space/page_c0f7aa829c508191b8712e93ee49b06c) 保留，后续本地修改不会自动同步到 Pages。
+设计文档保存在项目的 `docs/` 目录。原始 [产品 Pages 草案](https://chatgpt.com/space/page_8cd777a7402c8191aa928ab888cb8df8) 和 [架构 Pages 草案](https://chatgpt.com/space/page_c0f7aa829c508191b8712e93ee49b06c) 保留，后续本地修改不会自动同步到 Pages。

@@ -252,7 +252,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
       try {
         await request("initialize", {
-          clientInfo: { name: "agent-relay", title: "Agent Relay", version: "1.0.0" },
+          clientInfo: { name: "tellrun", title: "Tellrun", version: "1.0.0" },
           capabilities: null,
         });
         child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);

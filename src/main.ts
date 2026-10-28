@@ -76,5 +76,5 @@ try {
   store?.close();
   process.removeListener("SIGINT", stop);
   process.removeListener("SIGTERM", stop);
-  logger.info("Agent Relay 已退出");
+  logger.info("Tellrun 已退出");
 }

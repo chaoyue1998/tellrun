@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { appDirectory, loadConfig } from "./config.js";
 
 /** 所有后台命令使用同一个用户服务名，服务定义与配置一起保存。 */
-const unit = "agent-relay.service";
+const unit = "tellrun.service";
 
 /** 调用用户服务管理器；只输出固定诊断，避免转发可能包含凭据的原始错误。 */
 async function systemctl(...args: string[]) {
@@ -27,7 +27,7 @@ async function systemctl(...args: string[]) {
       return error.stdout.trim();
     }
     throw new Error(
-      `systemctl --user ${args[0]} 失败；请确认当前用户可访问 systemd 用户服务，并用 agent-relay logs 查看启动错误。不支持用户服务的环境可用 agent-relay run 前台运行。`,
+      `systemctl --user ${args[0]} 失败；请确认当前用户可访问 systemd 用户服务，并用 tellrun logs 查看启动错误。不支持用户服务的环境可用 tellrun run 前台运行。`,
     );
   }
 }
@@ -43,7 +43,7 @@ export async function manageService(
     );
   }
   if (process.platform !== "linux") {
-    throw new Error("后台管理需要 Linux systemd 用户服务；当前系统可运行 agent-relay run。");
+    throw new Error("后台管理需要 Linux systemd 用户服务；当前系统可运行 tellrun run。");
   }
 
   if (action === "logs") {
@@ -85,7 +85,7 @@ export async function manageService(
   );
   if (action === "status") {
     if (state.LoadState === "not-found")
-      console.log("后台服务尚未安装，请运行 agent-relay setup 或 start。");
+      console.log("后台服务尚未安装，请运行 tellrun setup 或 start。");
     else
       console.log(
         `服务：${state.ActiveState} / ${state.SubState}\nPID：${state.MainPID}\n自启状态：${state.UnitFileState}`,
@@ -107,7 +107,7 @@ export async function manageService(
   /** 服务不能依赖当前终端临时提供的凭据或相对 Codex 路径。 */
   const config = loadConfig({});
   if (!isAbsolute(config.codexPath) || !existsSync(config.codexPath)) {
-    throw new Error("后台运行需要有效的 Codex 绝对路径，请重新运行 agent-relay setup。");
+    throw new Error("后台运行需要有效的 Codex 绝对路径，请重新运行 tellrun setup。");
   }
   const entry = fileURLToPath(new URL("./cli.js", import.meta.url));
   if (!existsSync(entry))
@@ -133,7 +133,7 @@ export async function manageService(
     }
   } catch {
     throw new Error(
-      `无法启用退出 SSH 后持续运行；请在服务器执行 sudo loginctl enable-linger ${process.getuid?.()}，然后重试 agent-relay ${action}。配置已保留。`,
+      `无法启用退出 SSH 后持续运行；请在服务器执行 sudo loginctl enable-linger ${process.getuid?.()}，然后重试 tellrun ${action}。配置已保留。`,
     );
   }
 
@@ -146,7 +146,7 @@ export async function manageService(
       temporary,
       [
         "[Unit]",
-        "Description=Agent Relay",
+        "Description=Tellrun",
         "StartLimitIntervalSec=60",
         "StartLimitBurst=5",
         "",
@@ -163,7 +163,7 @@ export async function manageService(
         "TimeoutStopSec=45",
         "StandardOutput=journal",
         "StandardError=journal",
-        "SyslogIdentifier=agent-relay",
+        "SyslogIdentifier=tellrun",
         "",
         "[Install]",
         "WantedBy=default.target",
@@ -181,9 +181,9 @@ export async function manageService(
   await systemctl("reset-failed", unit);
   await systemctl(action, unit);
   if ((await systemctl("is-active", unit)) !== "active") {
-    throw new Error("后台服务未能保持运行，请用 agent-relay logs 查看原因。");
+    throw new Error("后台服务未能保持运行，请用 tellrun logs 查看原因。");
   }
   console.log(action === "restart" ? "后台服务已重启。" : "后台服务已启动。");
   if (options.enable) console.log("已启用开机自启。");
-  console.log("退出 SSH 后服务会继续运行；可用 agent-relay status / logs 查看状态与日志。");
+  console.log("退出 SSH 后服务会继续运行；可用 tellrun status / logs 查看状态与日志。");
 }

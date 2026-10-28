@@ -1,4 +1,4 @@
-# Agent Relay 架构与技术选型
+# Tellrun 架构与技术选型
 
 首版采用 Node.js 常驻服务，使用 grammY 接入 Telegram，使用 Codex app-server 执行任务，以 JSON 文件保存配置、会话、任务和待发送回复。编码任务默认全局串行；状态、审批、补充输入和停止通过独立控制路径处理。
 
@@ -84,22 +84,22 @@ Node.js 24 当前列为 LTS；grammY 提供 Node.js / TypeScript 开发路径。
 
 ## 分发与命令行入口
 
-CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装。本轮不执行 npm 发布；发布后通过 `npm install -g agent-relay` 安装，再运行 CLI 完成交互配置和后台启动。以下命令已实现，Linux systemd 的真实服务验收仍需在服务器完成。
+CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装。本轮不执行 npm 发布；发布后通过 `npm install -g tellrun` 安装，再运行 CLI 完成交互配置和后台启动。以下命令已实现，Linux systemd 的真实服务验收仍需在服务器完成。
 
 | 命令                          | 目标行为                                                                                    |
 | ----------------------------- | ------------------------------------------------------------------------------------------- |
-| agent-relay setup             | 交互填写 Bot Token、本人 ID，检查 Codex 路径与运行环境；保存后可启动后台服务并设置开机自启  |
-| agent-relay start             | 检查配置、创建或更新本用户的服务定义并启动；重复调用不创建第二个实例；--enable 启用开机自启 |
-| agent-relay stop              | 停止后台服务及受管理子进程，等待实际结束后报告结果                                          |
-| agent-relay restart           | 完成停止后重新启动；用于配置变更或 npm 升级后加载新版本                                     |
-| agent-relay status            | 查询服务管理器状态并展示配置、数据目录；不启动第二个业务进程                                |
-| agent-relay logs              | 展示最近 100 条后台日志；-f 持续跟随，凭据不进入命令行参数                                  |
-| agent-relay run               | 前台运行服务，供 systemd 和本地诊断使用；不进行交互配置                                     |
-| agent-relay service uninstall | 停用并移除本应用的用户服务，保留配置和状态文件；之后可通过 npm 卸载程序包                   |
+| tellrun setup             | 交互填写 Bot Token、本人 ID，检查 Codex 路径与运行环境；保存后可启动后台服务并设置开机自启  |
+| tellrun start             | 检查配置、创建或更新本用户的服务定义并启动；重复调用不创建第二个实例；--enable 启用开机自启 |
+| tellrun stop              | 停止后台服务及受管理子进程，等待实际结束后报告结果                                          |
+| tellrun restart           | 完成停止后重新启动；用于配置变更或 npm 升级后加载新版本                                     |
+| tellrun status            | 查询服务管理器状态并展示配置、数据目录；不启动第二个业务进程                                |
+| tellrun logs              | 展示最近 100 条后台日志；-f 持续跟随，凭据不进入命令行参数                                  |
+| tellrun run               | 前台运行服务，供 systemd 和本地诊断使用；不进行交互配置                                     |
+| tellrun service uninstall | 停用并移除本应用的用户服务，保留配置和状态文件；之后可通过 npm 卸载程序包                   |
 
 `setup` 由用户显式执行，npm 安装脚本仅承担包安装所需工作。交互取消时保留原配置，Token 使用明文输入，已有配置时留空保留原值；校验成功后再原子写入配置。CLI 的帮助、版本和状态命令不加载会加载运行状态或启动轮询的业务入口。
 
-包已移除 `private: true`，通过 `bin` 暴露带 Node shebang 的 CLI；`files` 白名单包含编译产物和文档，`prepack` 在打包前完成构建。安装用户不需要源码仓库、TypeScript 或 tsx。用户配置与数据统一定位到当前用户的 `~/.agent-relay/`，任何命令均可从任意目录执行。[npm 包字段](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
+包已移除 `private: true`，通过 `bin` 暴露带 Node shebang 的 CLI；`files` 白名单包含编译产物和文档，`prepack` 在打包前完成构建。安装用户不需要源码仓库、TypeScript 或 tsx。用户配置与数据统一定位到当前用户的 `~/.tellrun/`，任何命令均可从任意目录执行。[npm 包字段](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
 
 发布验收使用实际 `npm pack` 产物，在临时安装前缀全局安装后，从包外目录调用 CLI；检查 bin、运行依赖和配置、状态文件的读写。升级前停止服务并备份数据，升级后重新解析 Node 与包入口路径、更新服务定义并启动；状态文件损坏或写入失败时停止服务并保留原文件。
 
@@ -148,13 +148,13 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 控制路径包括 /status、/stop、审批回调、明确回复补充问题。它们不进入编码任务队列。等待审批占用当前编码任务槽，但不会占用 Node.js 事件循环。入站处理只保存必要状态并派发控制指令，不等待 Codex 完成或普通 Telegram 消息发送，避免慢请求把后续停止指令堵在同一批次中。
 
-未指定目录的会话默认使用 Relay 服务启动目录，规范化真实路径后随消息一起保存，用户可直接发送任务；systemd 服务的启动目录默认为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录或 `/new`，目录变化会开始新会话。后续多会话模型再引入独立 conversation_id，不增加目录白名单。
+未指定目录的会话默认使用 Tellrun 服务启动目录，规范化真实路径后随消息一起保存，用户可直接发送任务；systemd 服务的启动目录默认为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录或 `/new`，目录变化会开始新会话。后续多会话模型再引入独立 conversation_id，不增加目录白名单。
 
 当前全局最多一个未结束任务，由单实例写入与状态校验约束；忙碌时新消息明确提示未提交。待执行队列留到后续，建议上限 20。未来开启并行时，必须增加按可写工作区的互斥；有多个 thread 并不意味着可以同时修改同一目录。
 
 ## 会话与数据模型
 
-当前不实现项目列表或项目选择，也不要求 `projects.json`。Relay 不设置项目目录白名单；任务执行使用用户指定并由当前会话沿用的工作目录。
+当前不实现项目列表或项目选择，也不要求 `projects.json`。Tellrun 不设置项目目录白名单；任务执行使用用户指定并由当前会话沿用的工作目录。
 
 配置与运行状态分开保存：`config.json` 包含凭据和启动设置；`state.json` 是完整的运行状态快照，包含以下四组记录。
 
@@ -169,7 +169,7 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 启动时校验 JSON 结构、标识唯一性、关联关系与活动任务数量；无效文件直接报错，不覆盖为空状态。空闲查询不写文件。每次变更保存整份状态，适用于当前个人使用规模，不预建日志分段或数据迁移框架。
 
-完整 Agent 上下文继续由 Codex 管理。Relay 不重复保存思考过程、流式文本、工具原始输出或 RPC 等待状态。多会话与审批记录在对应功能接入时再加入文件结构。
+完整 Agent 上下文继续由 Codex 管理。Tellrun 不重复保存思考过程、流式文本、工具原始输出或 RPC 等待状态。多会话与审批记录在对应功能接入时再加入文件结构。
 
 ## Codex 协议与生命周期
 
@@ -238,7 +238,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 一致性目标是：同一入站事件只创建一个任务，明确的终态只生效一次，结果不确定的执行不自动重放。Telegram、状态文件和 Codex 的变更无法一次原子提交，因此不宣称端到端 exactly-once。
 
-尤其在“Codex 已收到 turn/start，但 Relay 尚未收到响应”这一窗口崩溃时，必须保留不确定状态，不能因为没拿到响应就自动重发。持久化的 dispatching 状态用于识别这种情况，turnId 无需跨进程保存。
+尤其在“Codex 已收到 turn/start，但 Tellrun 尚未收到响应”这一窗口崩溃时，必须保留不确定状态，不能因为没拿到响应就自动重发。持久化的 dispatching 状态用于识别这种情况，turnId 无需跨进程保存。
 
 ## Telegram 输出与故障恢复
 
@@ -254,24 +254,24 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 
 ## 配置与部署
 
-配置、运行状态、锁和服务定义统一保存在当前用户主目录下的 `.agent-relay/`；源码开发与全局安装共用同一布局。源码 npm scripts 仍可读取 `.env` 覆盖 Telegram 凭据和 Codex 路径；后台启动要求向导已保存完整配置，不依赖 CLI 的临时环境。
+配置、运行状态、锁和服务定义统一保存在当前用户主目录下的 `.tellrun/`；源码开发与全局安装共用同一布局。源码 npm scripts 仍可读取 `.env` 覆盖 Telegram 凭据和 Codex 路径；后台启动要求向导已保存完整配置，不依赖 CLI 的临时环境。
 
 | 配置项                       | 保存位置与约束                                                                                      |
 | ---------------------------- | --------------------------------------------------------------------------------------------------- |
-| 用户配置                     | `~/.agent-relay/config.json`；目录权限 0700，文件权限 0600                                          |
+| 用户配置                     | `~/.tellrun/config.json`；目录权限 0700，文件权限 0600                                          |
 | Telegram Bot Token 与本人 ID | 由 setup 写入配置，保留环境变量覆盖能力；不依赖可修改的 username                                    |
 | Telegram 代理                | `telegram.proxyUrl` 可选，由用户自行配置；未指定时继承运行环境的代理，setup 保留已有显式配置        |
 | 工作目录                     | 后续由任务或会话指定，不设置目录白名单                                                              |
 | Codex 命令                   | 配置时解析可执行文件的绝对路径；与后台服务使用同一 OS 用户，沿用其认证与配置                        |
 | 后台运行环境                 | 由用户配置 systemd 服务环境；config.json 不保存 PATH、CODEX_HOME 或代理环境，启动时直接继承进程环境 |
-| 运行状态                     | `~/.agent-relay/state.json`；临时单实例锁为同目录的 `state.json.lock/`                              |
-| 服务定义                     | `~/.agent-relay/agent-relay.service`，通过 systemctl --user link 注册；日志保存在系统 journal       |
+| 运行状态                     | `~/.tellrun/state.json`；临时单实例锁为同目录的 `state.json.lock/`                              |
+| 服务定义                     | `~/.tellrun/tellrun.service`，通过 systemctl --user link 注册；日志保存在系统 journal       |
 | 日志级别                     | 当前固定为 info                                                                                     |
 | 队列与交互设置               | 规划默认并发 1、队列上限 20、审批 10 分钟、进度间隔 2 秒；当前未实现，不预建配置项                  |
 
-`~/.agent-relay/` 按当前运行用户的主目录解析为绝对路径；CLI 与后台服务使用同一用户和同一目录，不受执行命令时的 cwd 影响。状态、锁和配置不得写到全局 npm 包目录，避免升级覆盖、权限问题和从不同 cwd 启动产生多份数据。
+`~/.tellrun/` 按当前运行用户的主目录解析为绝对路径；CLI 与后台服务使用同一用户和同一目录，不受执行命令时的 cwd 影响。状态、锁和配置不得写到全局 npm 包目录，避免升级覆盖、权限问题和从不同 cwd 启动产生多份数据。
 
-后台方案以支持 systemd 用户服务的 Linux 为目标，CLI 生成本用户的服务定义，通过 `systemctl --user` 管理，日志交给 journal。ExecStart 使用解析后的 Node 和 CLI 绝对路径执行 `agent-relay run`；后台任务的 cwd 由会话单独指定。Type=notify 在 Telegram 初始化成功后通过 systemd-notify 报告就绪；Restart=on-failure、5 秒重启间隔与启动频率限制负责故障重启，KillMode=control-group 和 45 秒停止期限约束残留子进程。[systemd 服务](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
+后台方案以支持 systemd 用户服务的 Linux 为目标，CLI 生成本用户的服务定义，通过 `systemctl --user` 管理，日志交给 journal。ExecStart 使用解析后的 Node 和 CLI 绝对路径执行 `tellrun run`；后台任务的 cwd 由会话单独指定。Type=notify 在 Telegram 初始化成功后通过 systemd-notify 报告就绪；Restart=on-failure、5 秒重启间隔与启动频率限制负责故障重启，KillMode=control-group 和 45 秒停止期限约束残留子进程。[systemd 服务](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 
 退出 SSH 后继续运行或开机自启需要检查用户 linger 状态。向导说明设置并在系统权限允许时完成；权限不足时给出所需命令，不能报告后台持久运行已配置成功。不支持 systemd 用户服务的环境仍可使用前台 run，由外部进程管理器托管；首版不自行实现通用守护进程管理器。[loginctl linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)
 
@@ -279,7 +279,7 @@ M1 启动 Worker 前必须取得同一状态文件对应的排他运行锁，取
 
 当前通过原子创建 `state.json.lock/` 目录争取单实例写入权，目录内记录 PID 与随机所有权标识。正常退出仅清理自己的锁；异常退出后确认旧 PID 不存在才回收。尚未写入所有权的空锁目录保留 30 秒，避免抢占正在初始化的实例。状态加载和恢复在取得锁后进行。发送与任务领取按机器人账号和授权用户过滤。
 
-Codex 子进程只接收必要环境与运行时凭据，不默认继承 Telegram Token。Relay 直接向 Agent 传递任务工作目录，不通过项目清单限制目录；实际文件访问仍沿用 Codex 与 OS 的权限配置。
+Codex 子进程只接收必要环境与运行时凭据，不默认继承 Telegram Token。Tellrun 直接向 Agent 传递任务工作目录，不通过项目清单限制目录；实际文件访问仍沿用 Codex 与 OS 的权限配置。
 
 当前启动检查包括 Telegram 配置、单实例锁、状态文件校验、Codex CLI 版本格式、Telegram 连接和 Webhook 状态；认证与模型访问在实际任务调用时验证，失败会保存并回复。已在本机通过真实 Codex 调用，目标 Linux 的 M0 仍待验证。遇到 Webhook 或另一轮询实例时给出明确错误，不自动接管其他部署；日志不记录原始凭据或网络 URL。
 

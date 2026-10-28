@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { z } from "zod";
 
 /** CLI 与后台服务共用的用户数据目录，不依赖当前工作目录。 */
-export const appDirectory = join(homedir(), ".agent-relay");
+export const appDirectory = join(homedir(), ".tellrun");
 
 /** 配置向导与运行入口共用校验，不保存终端环境。 */
 export const configSchema = z.object({
@@ -43,8 +43,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
       throw new Error(
         error instanceof SyntaxError
-          ? "~/.agent-relay/config.json 不是有效的配置对象，请运行 agent-relay setup 重新配置"
-          : "无法读取 ~/.agent-relay/config.json，请检查文件权限",
+          ? "~/.tellrun/config.json 不是有效的配置对象，请运行 tellrun setup 重新配置"
+          : "无法读取 ~/.tellrun/config.json，请检查文件权限",
       );
     }
   }
@@ -60,7 +60,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   });
   if (!config.success) {
     throw new Error(
-      `配置无效：${[...new Set(config.error.issues.map((issue) => issue.path.join(".")))].join("、")}；请运行 agent-relay setup 或检查环境变量`,
+      `配置无效：${[...new Set(config.error.issues.map((issue) => issue.path.join(".")))].join("、")}；请运行 tellrun setup 或检查环境变量`,
     );
   }
   return config.data;

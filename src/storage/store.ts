@@ -75,7 +75,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             rmdirSync(lock);
             continue;
           }
-          throw new Error("已有 Agent Relay 实例正在使用状态文件，请先停止该实例");
+          throw new Error("已有 Tellrun 实例正在使用状态文件，请先停止该实例");
         } catch (error) {
           if (
             !(
