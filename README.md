@@ -5,6 +5,7 @@
 ## 首版目标
 
 - 个人使用，仅授权本人操作。
+- 通过 `npm install -g agent-relay` 安装，命令行交互配置后在服务器后台运行。
 - Telegram 私聊接入，采用长轮询。
 - Codex 通过 `app-server` 接入。
 - 支持多会话、任务排队、审批、停止和异常恢复。
@@ -16,7 +17,23 @@
 - [产品需求文档](docs/prd.md)：范围、交互流程、命令、功能和验收要求。
 - [架构与技术选型](docs/architecture.md)：架构图、框架与库、模块、数据模型、协议、恢复和部署方案。
 
-当前已搭建基础框架：配置校验、结构化日志、SQLite 迁移、Telegram 私聊授权和状态命令，以及 Codex CLI 可用性检查。任务执行、会话、队列与审批尚未接入；普通消息会明确提示未提交执行。
+当前已接通 Telegram → Codex app-server → 结果回复，支持指定工作目录、单会话续聊、新建会话、停止、任务去重和重启恢复。任务与待发送回复保存在 SQLite；多会话选择、任务排队、进度推送和审批界面尚未接入。
+
+## 安装与使用目标
+
+计划提供以下流程；全局 CLI、配置向导和后台服务管理尚未实现，当前开发运行方式见下文。
+
+```sh
+npm install -g agent-relay
+agent-relay setup       # 交互配置 Telegram、代理和 Codex，完成后可直接启动后台服务
+agent-relay start       # 后续启动
+agent-relay status      # 查看后台服务状态
+agent-relay logs        # 查看日志
+agent-relay restart     # 重启服务
+agent-relay stop        # 停止后台服务
+```
+
+CLI 计划采用 Commander，配置向导采用 Clack；Linux 后台运行采用 systemd 用户服务。用户配置和数据库统一保存到当前用户的 `~/.agent-relay/`，分别为 `config.json` 和 `agent-relay.db`；全局 npm 包升级不会覆盖这些数据。退出 SSH 后持续运行与开机自启由配置向导检查并引导设置。具体目录、发布规则及服务生命周期见[架构文档](docs/architecture.md#分发与命令行入口)。
 
 ## 技术方案
 
@@ -32,12 +49,12 @@ src/
 ├── config.ts            # Telegram 凭据与本人身份校验
 ├── logger.ts            # 结构化日志与敏感字段隐藏
 ├── agents/
-│   └── codex.ts         # Codex 接入，目前只检查 CLI 版本
+│   └── codex.ts         # Codex app-server 连接、续聊、执行和中断
 ├── im/
 │   └── telegram.ts      # Telegram 鉴权、消息转换和发送
 ├── core/
-│   ├── service.ts       # 平台无关的命令与业务处理
-│   └── types.ts         # 跨模块共用的消息与回复类型
+│   ├── service.ts       # 命令处理与单任务执行
+│   └── types.ts         # 跨模块共用的消息与 Agent 接口
 └── storage/
     ├── index.ts         # SQLite 连接、迁移和存储操作
     ├── schema.ts        # 实际使用的数据表
@@ -45,11 +62,11 @@ src/
 migrations/              # SQL 迁移及 Drizzle 元数据
 ```
 
-新增 IM 时，在 `im/` 添加连接器，把授权后的消息转换为 `IncomingMessage` 并调用核心入口。新增 Agent 时，在 `agents/` 添加对应模块；执行与审批接口在 M0 验证后按实际能力补充。核心层不使用 grammY 或 Codex 协议类型，不引入插件注册器、基类或依赖注入框架。
+新增 IM 时，在 `im/` 添加连接器，把授权后的消息转换为 `IncomingMessage` 并调用核心入口。新增 Agent 时，在 `agents/` 实现 `Agent` 的执行和停止接口；审批接口随实际交互能力扩展。核心层不使用 grammY 或 Codex 协议类型，不引入插件注册器、基类或依赖注入框架。
 
-当前 SQLite 只有 `channels` 业务表，保存平台、机器人账号、聊天 ID、用户 ID 和时间戳，不保存聊天正文。接入真实任务时，必须同时实现入站去重、任务持久化和发送记录，避免消息重投导致重复执行。
+SQLite 保存聊天与当前会话（`channels`）、入站去重标识（`inbound_updates`）、任务输入与最终结果（`tasks`）、待发送回复（`outbox`）。Codex 自己管理完整会话历史。数据库旁的 `.lock` 文件用于单实例锁，进程退出后锁自动释放。
 
-## 本地启动
+## 当前源码开发启动
 
 先安装 nvm，并确保 `codex --version` 可以运行。
 
@@ -62,7 +79,7 @@ cp .env.example .env
 
 编辑 `.env`，填写 `TELEGRAM_BOT_TOKEN` 和本人 `TELEGRAM_OWNER_ID`；用户 ID 必须是十进制正整数。`.env` 已加入 Git 忽略规则。
 
-当前只有以上两项必填配置。数据库固定放在 `data/agent-relay.db`，通过 PATH 调用 `codex`，日志级别固定为 `info`。无需项目清单；后续任务执行直接使用指定的工作目录。
+当前只有以上两项必填配置。数据库固定放在 `data/agent-relay.db`，通过 PATH 调用 `codex`，日志级别固定为 `info`。无需项目清单；在 Telegram 中用 `/cwd` 指定目录，不设置目录白名单。
 
 Telegram 默认读取启动终端的 `HTTPS_PROXY` / `https_proxy` 和 `NO_PROXY` / `no_proxy`（小写优先）。如需单独指定，在 `.env` 设置 `TELEGRAM_PROXY_URL=http://127.0.0.1:7897`，优先于终端代理，仍遵循 `NO_PROXY` 规则。支持 HTTP/HTTPS 代理；未设置或留空时沿用终端配置，两处均未配置时直连。
 
@@ -70,11 +87,24 @@ Telegram 默认读取启动终端的 `HTTPS_PROXY` / `https_proxy` 和 `NO_PROXY
 npm run dev
 ```
 
-启动时会自动迁移数据库、检查 Codex CLI，然后启动 Telegram 长轮询。CLI 版本检查不代表认证、模型或 app-server 协议已经可用。支持 `/start`、`/help` 和 `/status`，仅响应配置的本人私聊；发给其他机器人的命令会被忽略，不支持的媒体会收到提示。若已有 Webhook 或出现轮询冲突，服务退出并给出诊断，不自动接管其他部署。
+启动时会取得单实例锁、自动迁移数据库、检查 Codex CLI，再核实 Telegram 身份并启动轮询。仅响应配置的本人私聊；发给其他机器人的命令会被忽略，不支持的媒体会收到提示。若已有 Webhook 或出现轮询冲突，服务退出并给出诊断，不自动接管其他部署。
 
-轮询仅在消息处理成功后推进确认位置。关停会取消初始化或拉取请求，等待当前消息处理结束后关闭数据库，不额外确认未完成的更新。重启时可能重新收到上一批未确认消息；当前会话写入幂等，但回复可能重复，尚未提供任务级去重。
+在 Telegram 中依次发送以下两条消息，将示例目录换成实际项目的绝对路径：
 
-普通 Telegram 请求连同重试最多等待 15 秒，长轮询请求最多 40 秒。429 和 5xx 最多重试两次；429 要求等待超过 5 秒时直接报错，网络错误直接向上传递。不可恢复的调用失败以非零状态退出；当前版本的断线恢复依赖人工或进程管理器重启，尚未实现 outbox 补发。
+```text
+/cwd /你的项目绝对路径
+hi
+```
+
+后续文本沿用当前 Codex 会话。`/new` 新建会话并保留目录，`/status` 查看状态，`/last` 查看最近结果；`/stop` 停止当前任务并暂停接收，确认结果后用 `/resume` 恢复。当前全局只接受一个未结束任务，忙碌时新消息会明确提示未提交。切换目录会开始新会话。
+
+Codex 沿用本机登录、模型配置和终端代理；默认使用工作区写入与按需审批。尚未支持的审批或结构化提问会中断任务并说明原因。CLI 版本检查不代表模型可用，实际调用失败会保存状态并回复。
+
+入站消息、任务和回执在同一事务保存，重复 Update 不会再次执行。重启会保留尚未派发的任务；执行中断且结果不确定的任务不会自动重跑，需检查后 `/resume`。关停等待 Agent 结束后关闭存储。
+
+普通 Telegram 请求连同重试最多等待 15 秒，长轮询最多 40 秒。发送失败会保留 outbox 并退避重试，429 遵守服务端等待时间；永久拒绝会记录发送失败，结果仍可用 `/last` 查看。发送成功但响应丢失时可能重复通知，但不会重跑任务。轮询或存储故障会停止服务，待人工或进程管理器重启。
+
+开发服务本身时使用 `npm run dev`。让 Agent 修改代码时可用 `npm run build && npm start`，避免源码监听重启打断正在执行的任务。
 
 ## 开发命令
 
@@ -88,9 +118,9 @@ npm run dev
 | `npm run db:generate -- --name=描述` | 根据表结构生成迁移 |
 | `npm run db:migrate` | 应用迁移，无需 Telegram 凭据 |
 
-所有命令从项目根目录运行。运行编译产物时仍需保留项目根目录下的 `migrations/`；生产环境不使用 `drizzle-kit push` 代替迁移。
+上述源码开发命令从项目根目录运行。运行编译产物时仍需保留项目根目录下的 `migrations/`；生产环境不使用 `drizzle-kit push` 代替迁移。
 
-本轮完成框架与依赖安装；下一步是在目标 Linux 环境完成 Codex app-server 的 M0 协议验证，再接入任务执行链路。[Codex app-server 官方文档](https://learn.chatgpt.com/docs/app-server)
+已在本机 Node.js 24.22.1、Codex CLI 0.165.0 验证真实回复、跨进程续聊与中断；临时存储验证覆盖去重、并发控制、单实例锁与重启恢复。目标 Linux 的完整 M0 验证、审批交互和后台部署仍待完成。[Codex app-server 官方文档](https://learn.chatgpt.com/docs/app-server)
 
 ## 文档位置
 
