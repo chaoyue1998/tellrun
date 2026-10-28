@@ -250,6 +250,8 @@ Telegram 429 按 retry_after 等待；其他可恢复的网络错误使用有限
 
 auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询为 40 秒；单次调用中 429、5xx 最多重试两次，长等待或网络错误交给外层处理。发送失败由 outbox 持久化退避时间，429 遵守 retry_after；永久拒绝记录日志并移出队列，任务结果仍保留。401、轮询或存储故障退出服务。接收与发送循环独立，等待发送不会阻塞控制消息。Codex turn/start 不自动重试。
 
+当前实例已派发或正在执行任务时，独立循环每 4 秒向本人私聊发送 `sendChatAction(typing)`，在 Telegram 客户端显示“正在输入…”。输入提示不写入 outbox，单次最多等待 4 秒，不经过 auto-retry；429 延后下一次刷新，其他错误仅记录安全诊断。任务结束或请求停止后不再刷新，服务关停会中断在途请求；该循环不阻塞入站处理、任务执行或结果发送。[Telegram 输入状态](https://core.telegram.org/bots/api#sendchataction)
+
 进度发送积压不能阻塞 Codex 事件读取。等待审批时遇到 Telegram 断线，保留请求至有效期；恢复后只重发仍有效的交互，不复活过期按钮。
 
 ## 配置与部署

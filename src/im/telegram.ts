@@ -27,11 +27,19 @@ export function createTelegramConnection(
   const bot = new Bot(config.token, {
     client: { timeoutSeconds: 35, baseFetchConfig: { agent } },
   });
-  /** 只中断初始化和拉取；正在处理的消息由 start 等待完成。 */
+  /** 中断初始化、拉取和输入提示；正在处理的消息由 start 等待完成。 */
   const polling = new AbortController();
   let started = false;
-  bot.api.config.use(
-    autoRetry({ maxRetryAttempts: 2, maxDelaySeconds: 5, rethrowHttpErrors: true }),
+  /** 输入提示由刷新循环处理失败，避免自动重发已经过期的状态。 */
+  bot.api.config.use((prev, method, payload, signal) =>
+    method === "sendChatAction"
+      ? prev(method, payload, signal)
+      : autoRetry({ maxRetryAttempts: 2, maxDelaySeconds: 5, rethrowHttpErrors: true })(
+          prev,
+          method,
+          payload,
+          signal,
+        ),
   );
   /** 超时覆盖整次调用及重试；grammY 的旧 signal 类型与 Node 原生接口兼容。 */
   bot.api.config.use((prev, method, payload, signal) =>
@@ -40,8 +48,12 @@ export function createTelegramConnection(
       payload,
       signal ??
         (AbortSignal.any([
-          AbortSignal.timeout(method === "getUpdates" ? 40_000 : 15_000),
-          ...(["getMe", "getWebhookInfo", "getUpdates"].includes(method) ? [polling.signal] : []),
+          AbortSignal.timeout(
+            method === "getUpdates" ? 40_000 : method === "sendChatAction" ? 4_000 : 15_000,
+          ),
+          ...(["getMe", "getWebhookInfo", "getUpdates", "sendChatAction"].includes(method)
+            ? [polling.signal]
+            : []),
         ]) as Parameters<typeof prev>[2]),
     ),
   );
@@ -129,7 +141,7 @@ export function createTelegramConnection(
         throw error;
       }
     },
-    /** 接收与发送独立运行，慢回复不会阻塞 /stop 的入站处理。 */
+    /** 接收、回复与输入提示独立运行，慢请求不会阻塞 /stop 的入站处理。 */
     async start() {
       started = true;
       const workers: Promise<void>[] = [];
@@ -185,6 +197,36 @@ export function createTelegramConnection(
                     : "Telegram 回复发送失败，已保留并安排重试",
                 );
               }
+            }
+          })(),
+          (async () => {
+            /** 输入提示最多持续 5 秒，每 4 秒刷新；仅当前实例已派发的任务显示。 */
+            let nextTypingAt = 0;
+            while (!polling.signal.aborted) {
+              if (
+                Date.now() >= nextTypingAt &&
+                ["dispatching", "running"].includes(store.activeTask()?.status ?? "")
+              ) {
+                nextTypingAt = Date.now() + 4_000;
+                try {
+                  await bot.api.sendChatAction(config.ownerId, "typing");
+                } catch (error) {
+                  if (polling.signal.aborted) return;
+                  if (error instanceof GrammyError && error.parameters.retry_after !== undefined)
+                    nextTypingAt = Math.max(
+                      nextTypingAt,
+                      Date.now() + error.parameters.retry_after * 1_000,
+                    );
+                  logger.warn(
+                    {
+                      errorType: error instanceof Error ? error.name : "UnknownError",
+                      errorCode: error instanceof GrammyError ? error.error_code : undefined,
+                    },
+                    "Telegram 输入状态更新失败，任务继续执行",
+                  );
+                }
+              }
+              await setTimeout(250);
             }
           })(),
         );
