@@ -5,7 +5,7 @@ import type { Logger } from "pino";
 import type { Store } from "../storage/index.js";
 import type { Agent, ChannelIdentity, IncomingMessage } from "./types.js";
 
-/** 接收消息只做短事务；任务执行独立串行运行，控制命令始终可用。 */
+/** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
 export function createRelayService(options: { store: Store; agent: Agent; logger: Logger }) {
   let stopping = false;
   /** 状态查询与历史结果共用面向用户的状态名称。 */
@@ -40,14 +40,15 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
               if (task) return "请等待当前任务结束，或先用 /stop 停止后再切换目录。";
               if (!isAbsolute(message.content.args))
                 return "请提供绝对目录，例如 /cwd /Users/你的用户名/Code/项目名。";
+              let cwd: string;
               try {
-                const cwd = realpathSync(message.content.args);
+                cwd = realpathSync(message.content.args);
                 if (!statSync(cwd).isDirectory()) return "指定路径不是目录。";
-                if (cwd !== channel.cwd) options.store.setSession(channel.id, cwd);
-                return `工作目录：${cwd}\n${channel.paused ? "当前已暂停，发送 /resume 后可提交任务。" : "现在可以发送消息给 Codex。"}`;
               } catch {
                 return "无法访问该目录，请检查路径是否存在及访问权限。";
               }
+              if (cwd !== channel.cwd) options.store.setSession(channel.id, cwd);
+              return `工作目录：${cwd}\n${channel.paused ? "当前已暂停，发送 /resume 后可提交任务。" : "现在可以发送消息给 Codex。"}`;
             }
             case "new":
               if (task) return "请等待当前任务结束，或先用 /stop 停止后再新建会话。";
@@ -85,7 +86,7 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
         return `已接收任务 #${options.store.createTask(channel, inboundId, message.content.text).id}\n工作目录：${channel.cwd}\n可用 /status 查看状态或 /stop 停止。`;
       });
     },
-    /** 领取任务后再次检查目录；运行结果与最终回复由同一事务保存。 */
+    /** 领取任务后再次检查目录；运行结果与最终回复在同一个快照中保存。 */
     async run(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       while (!stopping) {
         const task = options.store.claimTask(source);

@@ -1,106 +1,101 @@
-import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { z } from "zod";
 
-/** 每个授权聊天保留一个当前 Agent 会话及工作目录。 */
-export const channels = sqliteTable(
-  "channels",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    platform: text("platform").notNull(),
-    accountId: text("account_id").notNull(),
-    chatId: text("chat_id").notNull(),
-    userId: text("user_id").notNull(),
-    cwd: text("cwd"),
-    sessionId: text("session_id"),
-    paused: integer("paused", { mode: "boolean" }).notNull().default(false),
-    createdAt: integer("created_at", { mode: "timestamp_ms" })
-      .notNull()
-      .default(sql`(unixepoch() * 1000)`),
-    updatedAt: integer("updated_at", { mode: "timestamp_ms" })
-      .notNull()
-      .default(sql`(unixepoch() * 1000)`),
-  },
-  (table) => [
-    uniqueIndex("channels_source_unique").on(table.platform, table.accountId, table.chatId),
-  ],
-);
+/** 文件中的标识与时间统一使用安全整数，避免恢复时隐式转换。 */
+const id = z.number().int().positive();
+const timestamp = z.number().int().nonnegative();
 
-/** 消息唯一标识与任务在同一事务内保存，重投不会重复执行。 */
-export const inboundUpdates = sqliteTable(
-  "inbound_updates",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    channelId: integer("channel_id")
-      .notNull()
-      .references(() => channels.id),
-    eventId: text("event_id").notNull(),
-    messageId: text("message_id").notNull(),
-    createdAt: integer("created_at", { mode: "timestamp_ms" })
-      .notNull()
-      .default(sql`(unixepoch() * 1000)`),
-  },
-  (table) => [uniqueIndex("inbound_source_unique").on(table.channelId, table.eventId)],
-);
+/** 只保存重启所需的业务状态；文件损坏时拒绝启动，不重置为空状态。 */
+export const stateSchema = z
+  .strictObject({
+    channels: z.array(
+      z.strictObject({
+        id,
+        platform: z.string(),
+        accountId: z.string(),
+        chatId: z.string(),
+        userId: z.string(),
+        cwd: z.string().nullable(),
+        sessionId: z.string().nullable(),
+        paused: z.boolean(),
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }),
+    ),
+    inboundUpdates: z.array(
+      z.strictObject({
+        id,
+        channelId: id,
+        eventId: z.string(),
+        messageId: z.string(),
+        createdAt: timestamp,
+      }),
+    ),
+    tasks: z.array(
+      z.strictObject({
+        id,
+        channelId: id,
+        inboundId: id,
+        cwd: z.string(),
+        sessionId: z.string().nullable(),
+        runId: z.string().nullable(),
+        prompt: z.string(),
+        status: z.enum([
+          "queued",
+          "dispatching",
+          "running",
+          "cancelling",
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted",
+        ]),
+        result: z.string().nullable(),
+        createdAt: timestamp,
+        finishedAt: timestamp.nullable(),
+      }),
+    ),
+    outbox: z.array(
+      z.strictObject({
+        id,
+        channelId: id,
+        taskId: id.nullable(),
+        key: z.string(),
+        text: z.string(),
+        status: z.enum(["pending", "failed"]),
+        attempts: timestamp,
+        retryAt: timestamp,
+      }),
+    ),
+  })
+  .refine((state) => {
+    const channels = new Set(state.channels.map((row) => row.id));
+    const updates = new Map(state.inboundUpdates.map((row) => [row.id, row.channelId]));
+    const tasks = new Set(state.tasks.map((row) => row.id));
+    return (
+      [state.channels, state.inboundUpdates, state.tasks, state.outbox].every(
+        (rows) => new Set(rows.map((row) => row.id)).size === rows.length,
+      ) &&
+      new Set(
+        state.channels.map((row) => JSON.stringify([row.platform, row.accountId, row.chatId])),
+      ).size === state.channels.length &&
+      new Set(state.inboundUpdates.map((row) => JSON.stringify([row.channelId, row.eventId])))
+        .size === state.inboundUpdates.length &&
+      new Set(state.tasks.map((row) => row.inboundId)).size === state.tasks.length &&
+      new Set(state.outbox.map((row) => row.key)).size === state.outbox.length &&
+      state.inboundUpdates.every((row) => channels.has(row.channelId)) &&
+      state.tasks.every(
+        (row) =>
+          channels.has(row.channelId) &&
+          updates.get(row.inboundId) === row.channelId &&
+          (row.finishedAt === null) ===
+            ["queued", "dispatching", "running", "cancelling"].includes(row.status),
+      ) &&
+      state.outbox.every(
+        (row) => channels.has(row.channelId) && (row.taskId === null || tasks.has(row.taskId)),
+      ) &&
+      state.tasks.filter((row) => row.finishedAt === null).length <= 1
+    );
+  }, "状态标识、引用关系或活动任务数量无效");
 
-/** 任务保存提交时的目录、会话与输入；全局同时只有一个未结束任务。 */
-export const tasks = sqliteTable(
-  "tasks",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    channelId: integer("channel_id")
-      .notNull()
-      .references(() => channels.id),
-    inboundId: integer("inbound_id")
-      .notNull()
-      .unique()
-      .references(() => inboundUpdates.id),
-    cwd: text("cwd").notNull(),
-    sessionId: text("session_id"),
-    runId: text("run_id"),
-    prompt: text("prompt").notNull(),
-    status: text("status", {
-      enum: [
-        "queued",
-        "dispatching",
-        "running",
-        "cancelling",
-        "completed",
-        "failed",
-        "cancelled",
-        "interrupted",
-      ],
-    }).notNull(),
-    result: text("result"),
-    createdAt: integer("created_at", { mode: "timestamp_ms" })
-      .notNull()
-      .default(sql`(unixepoch() * 1000)`),
-    finishedAt: integer("finished_at", { mode: "timestamp_ms" }),
-  },
-  (table) => [
-    uniqueIndex("tasks_single_active").on(sql`(1)`).where(sql`${table.finishedAt} is null`),
-    index("tasks_channel_created").on(table.channelId, table.id),
-  ],
-);
-
-/** 回复先持久化，再由 IM 连接层发送；重试发送不会重新执行任务。 */
-export const outbox = sqliteTable(
-  "outbox",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    channelId: integer("channel_id")
-      .notNull()
-      .references(() => channels.id),
-    taskId: integer("task_id").references(() => tasks.id),
-    key: text("key").notNull().unique(),
-    text: text("text").notNull(),
-    status: text("status", { enum: ["pending", "sent", "failed"] })
-      .notNull()
-      .default("pending"),
-    attempts: integer("attempts").notNull().default(0),
-    retryAt: integer("retry_at", { mode: "timestamp_ms" })
-      .notNull()
-      .default(sql`(unixepoch() * 1000)`),
-    messageId: text("message_id"),
-  },
-  (table) => [index("outbox_pending").on(table.status, table.retryAt, table.id)],
-);
+/** 存储操作共用的文件结构，由运行时校验规则推导。 */
+export type State = z.infer<typeof stateSchema>;

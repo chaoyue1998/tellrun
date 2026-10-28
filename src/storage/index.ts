@@ -1,41 +1,138 @@
-import { chmodSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
-import { and, asc, desc, eq, isNull, ne, sql } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/better-sqlite3";
-import { migrate } from "drizzle-orm/better-sqlite3/migrator";
 import { appDirectory } from "../config.js";
 import type { AgentResult, ChannelIdentity, IncomingMessage } from "../core/types.js";
-import * as schema from "./schema.js";
+import { writeJson } from "./file.js";
+import { type State, stateSchema } from "./schema.js";
 
-/** 打开 SQLite 并应用已提交的迁移；初始化失败时释放连接。 */
-export function openStore(path = join(appDirectory, "agent-relay.db")) {
-  if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    if (dirname(path) === appDirectory) chmodSync(appDirectory, 0o700);
+/** 打开文件状态并取得单实例锁；所有业务写入统一替换 state.json。 */
+export function openStore(path = join(appDirectory, "state.json")) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  if (dirname(path) === appDirectory) chmodSync(appDirectory, 0o700);
+  const lock = `${path}.lock`;
+  const owner = `${process.pid}-${randomUUID()}`;
+  let owned = false;
+  let usable = true;
+  let updating = false;
+
+  /** 只删除本实例的所有权文件；非空目录不能被另一个退出中的实例移除。 */
+  function release() {
+    if (!owned) return;
+    rmSync(join(lock, owner), { force: true });
+    owned = false;
+    try {
+      rmdirSync(lock);
+    } catch (error) {
+      if (
+        !(
+          error instanceof Error &&
+          "code" in error &&
+          ["ENOENT", "ENOTEMPTY"].includes(String(error.code))
+        )
+      )
+        throw error;
+    }
   }
 
-  const sqlite = new Database(path);
-  let lock: Database.Database | undefined;
   try {
-    /** 独立 SQLite 写锁约束单实例；进程退出会释放锁，不依赖清理 PID 文件。 */
-    if (path !== ":memory:") {
-      lock = new Database(`${path}.lock`, { timeout: 0 });
-      chmodSync(path, 0o600);
-      chmodSync(`${path}.lock`, 0o600);
-      lock.exec("BEGIN EXCLUSIVE");
+    /** mkdir 竞争唯一写入者；回收旧锁必须先确认 PID 已退出，再删除该所有权文件。 */
+    for (let attempt = 0; attempt < 3 && !owned; attempt++) {
+      try {
+        mkdirSync(lock, { mode: 0o700 });
+        writeFileSync(join(lock, owner), "", { flag: "wx", mode: 0o600 });
+        owned = true;
+        if (readdirSync(lock).length !== 1) throw new Error("状态锁正在被其他实例取得，请稍后重试");
+      } catch (error) {
+        if (owned || !(error instanceof Error && "code" in error && error.code === "EEXIST"))
+          throw error;
+        try {
+          const owners = readdirSync(lock);
+          if (owners.length === 0 && Date.now() - statSync(lock).mtimeMs > 30_000) {
+            rmdirSync(lock);
+            continue;
+          }
+          const previous = owners.length === 1 ? owners[0] : undefined;
+          const pid = previous?.match(/^([1-9]\d*)-[0-9a-f-]+$/)?.[1];
+          if (!previous || !pid)
+            throw new Error("状态锁正在初始化或格式无效，请检查是否已有实例运行");
+          try {
+            process.kill(Number(pid), 0);
+          } catch (error) {
+            if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
+            /** 只有成功移除旧所有权文件的实例才能回收目录，避免竞争时删除新锁。 */
+            unlinkSync(join(lock, previous));
+            rmdirSync(lock);
+            continue;
+          }
+          throw new Error("已有 Agent Relay 实例正在使用状态文件，请先停止该实例");
+        } catch (error) {
+          if (
+            !(
+              error instanceof Error &&
+              "code" in error &&
+              ["ENOENT", "ENOTEMPTY"].includes(String(error.code))
+            )
+          )
+            throw error;
+        }
+      }
     }
-    sqlite.pragma("journal_mode = WAL");
-    sqlite.pragma("foreign_keys = ON");
-    sqlite.pragma("busy_timeout = 5000");
+    if (!owned) throw new Error("无法取得状态文件锁，请稍后重试");
 
-    const db = drizzle(sqlite, { schema });
-    migrate(db, {
-      migrationsFolder: fileURLToPath(new URL("../../migrations", import.meta.url)),
-    });
+    let state: State;
+    try {
+      const contents = readFileSync(path, "utf8");
+      try {
+        state = stateSchema.parse(JSON.parse(contents));
+      } catch {
+        throw new Error("state.json 损坏或格式无效，请检查或从备份恢复；原文件未修改");
+      }
+      chmodSync(path, 0o600);
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      state = { channels: [], inboundUpdates: [], tasks: [], outbox: [] };
+      writeJson(path, state);
+    }
 
-    /** 按 Unicode 字符拆分，含表情的消息也不超过 Telegram 的长度限制。 */
+    /** 一次业务操作只保存一个快照；嵌套操作合并写入，失败时回滚内存并停止后续写入。 */
+    function update<T>(action: () => T): T {
+      if (!usable) throw new Error("状态存储已关闭或写入失败，必须重启服务后恢复");
+      if (updating) return action();
+      const previous = state;
+      state = structuredClone(state);
+      updating = true;
+      try {
+        const result = action();
+        try {
+          writeJson(path, state);
+        } catch (error) {
+          usable = false;
+          throw Object.assign(
+            new Error("无法保存状态文件，请检查磁盘空间和权限", { cause: error }),
+            { code: "STATE_WRITE_FAILED" },
+          );
+        }
+        return structuredClone(result);
+      } catch (error) {
+        state = previous;
+        throw error;
+      } finally {
+        updating = false;
+      }
+    }
+
+    /** 回复按 Unicode 字符拆分，和触发它的状态变更一起保存。 */
     function enqueueReply(
       channelId: number,
       key: string,
@@ -44,37 +141,30 @@ export function openStore(path = join(appDirectory, "agent-relay.db")) {
     ) {
       const parts = text.match(/[\s\S]{1,2000}/gu) ?? ["（没有文本回复）"];
       for (const [index, part] of parts.entries()) {
-        db.insert(schema.outbox)
-          .values({
-            channelId,
-            taskId,
-            key: `${key}:${index}`,
-            text: parts.length > 1 ? `（${index + 1}/${parts.length}）\n${part}` : part,
-          })
-          .onConflictDoNothing()
-          .run();
+        if (state.outbox.some((reply) => reply.key === `${key}:${index}`)) continue;
+        state.outbox.push({
+          id: state.outbox.reduce((max, item) => Math.max(max, item.id), 0) + 1,
+          channelId,
+          taskId,
+          key: `${key}:${index}`,
+          text: parts.length > 1 ? `（${index + 1}/${parts.length}）\n${part}` : part,
+          status: "pending",
+          attempts: 0,
+          retryAt: Date.now(),
+        });
       }
     }
 
-    /** 终态与最终回复一起提交；迟到事件不能重复结束任务或覆盖结果。 */
+    /** 终态与最终回复一起保存，迟到事件不能覆盖已完成结果。 */
     function finishTask(id: number, result: AgentResult) {
-      db.transaction(() => {
-        const task = db
-          .update(schema.tasks)
-          .set({
-            status: result.status,
-            result: result.text,
-            finishedAt: new Date(),
-          })
-          .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.finishedAt)))
-          .returning()
-          .get();
-        if (!task) return;
+      if (!state.tasks.some((task) => task.id === id && task.finishedAt === null)) return;
+      update(() => {
+        const task = state.tasks.find((task) => task.id === id);
+        if (!task) throw new Error("任务记录不存在");
+        Object.assign(task, { status: result.status, result: result.text, finishedAt: Date.now() });
         if (result.status === "interrupted") {
-          db.update(schema.channels)
-            .set({ paused: true })
-            .where(eq(schema.channels.id, task.channelId))
-            .run();
+          const channel = state.channels.find((channel) => channel.id === task.channelId);
+          if (channel) channel.paused = true;
         }
         enqueueReply(
           task.channelId,
@@ -93,215 +183,203 @@ export function openStore(path = join(appDirectory, "agent-relay.db")) {
     }
 
     return {
-      /** 去重、业务写入和回复意图共用事务，成功返回后才能确认入站事件。 */
+      /** 去重标识、任务和回执合并保存，成功返回后才能确认入站事件。 */
       accept(
         message: IncomingMessage,
-        handle: (channel: typeof schema.channels.$inferSelect, inboundId: number) => string,
+        handle: (channel: State["channels"][number], inboundId: number) => string,
       ) {
-        db.transaction(() => {
-          const channel = db
-            .insert(schema.channels)
-            .values(message.channel)
-            .onConflictDoUpdate({
-              target: [schema.channels.platform, schema.channels.accountId, schema.channels.chatId],
-              set: { userId: message.channel.userId, updatedAt: new Date() },
-            })
-            .returning()
-            .get();
-          const inbound = db
-            .insert(schema.inboundUpdates)
-            .values({
-              channelId: channel.id,
-              eventId: message.eventId,
-              messageId: message.messageId,
-            })
-            .onConflictDoNothing()
-            .returning()
-            .get();
-          if (!inbound) return;
-          enqueueReply(channel.id, `inbound:${inbound.id}`, handle(channel, inbound.id));
+        const existing = state.channels.find(
+          (channel) =>
+            channel.platform === message.channel.platform &&
+            channel.accountId === message.channel.accountId &&
+            channel.chatId === message.channel.chatId,
+        );
+        if (
+          existing &&
+          state.inboundUpdates.some(
+            (item) => item.channelId === existing.id && item.eventId === message.eventId,
+          )
+        )
+          return;
+        update(() => {
+          let channel = state.channels.find((channel) => channel.id === existing?.id);
+          if (!channel) {
+            channel = {
+              ...message.channel,
+              id: state.channels.reduce((max, item) => Math.max(max, item.id), 0) + 1,
+              cwd: null,
+              sessionId: null,
+              paused: false,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            };
+            state.channels.push(channel);
+          }
+          channel.userId = message.channel.userId;
+          channel.updatedAt = Date.now();
+          const inboundId =
+            state.inboundUpdates.reduce((max, item) => Math.max(max, item.id), 0) + 1;
+          state.inboundUpdates.push({
+            id: inboundId,
+            channelId: channel.id,
+            eventId: message.eventId,
+            messageId: message.messageId,
+            createdAt: Date.now(),
+          });
+          enqueueReply(channel.id, `inbound:${inboundId}`, handle(channel, inboundId));
         });
       },
-      /** 目录变化或 /new 只影响后续消息，旧任务保留自己的会话与目录。 */
+      /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
       setSession(channelId: number, cwd: string | null) {
-        db.update(schema.channels)
-          .set({ cwd, sessionId: null, updatedAt: new Date() })
-          .where(eq(schema.channels.id, channelId))
-          .run();
+        update(() => {
+          const channel = state.channels.find((channel) => channel.id === channelId);
+          if (channel) Object.assign(channel, { cwd, sessionId: null, updatedAt: Date.now() });
+        });
       },
-      /** 暂停状态持久化，重启后仍需用户明确恢复。 */
+      /** 暂停状态跨重启保留，恢复须由用户明确触发。 */
       setPaused(channelId: number, paused: boolean) {
-        db.update(schema.channels).set({ paused }).where(eq(schema.channels.id, channelId)).run();
+        update(() => {
+          const channel = state.channels.find((channel) => channel.id === channelId);
+          if (channel) channel.paused = paused;
+        });
       },
-      /** 全局唯一的未结束任务，用于接收限制和控制命令。 */
+      /** 返回快照，避免调用方直接修改内存中的持久状态。 */
       activeTask() {
-        return db.select().from(schema.tasks).where(isNull(schema.tasks.finishedAt)).get();
+        return structuredClone(state.tasks.find((task) => task.finishedAt === null));
       },
       /** 最近结果按聊天隔离，供 /last 再次查看。 */
       lastTask(channelId: number) {
-        return db
-          .select()
-          .from(schema.tasks)
-          .where(eq(schema.tasks.channelId, channelId))
-          .orderBy(desc(schema.tasks.id))
-          .limit(1)
-          .get();
+        return structuredClone(state.tasks.findLast((task) => task.channelId === channelId));
       },
-      /** 在入站事务中创建任务并固定提交时的上下文。 */
-      createTask(channel: typeof schema.channels.$inferSelect, inboundId: number, prompt: string) {
-        if (!channel.cwd) throw new Error("创建任务前必须指定工作目录");
-        return db
-          .insert(schema.tasks)
-          .values({
+      /** 接收时固定目录、会话与输入，限制全局只有一个未结束任务。 */
+      createTask(channel: State["channels"][number], inboundId: number, prompt: string) {
+        return update(() => {
+          if (!channel.cwd) throw new Error("创建任务前必须指定工作目录");
+          if (state.tasks.some((task) => task.finishedAt === null))
+            throw new Error("已有任务正在执行");
+          const task: State["tasks"][number] = {
+            id: state.tasks.reduce((max, item) => Math.max(max, item.id), 0) + 1,
             channelId: channel.id,
             inboundId,
             cwd: channel.cwd,
             sessionId: channel.sessionId,
+            runId: null,
             prompt,
             status: "queued",
-          })
-          .returning()
-          .get();
+            result: null,
+            createdAt: Date.now(),
+            finishedAt: null,
+          };
+          state.tasks.push(task);
+          return task;
+        });
       },
-      /** 先持久化 dispatching，再调用 Agent；崩溃后不会重新派发同一任务。 */
+      /** 先保存派发状态再调用 Agent；空闲时仅查询，不反复写文件。 */
       claimTask(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-        return db.transaction(() => {
-          const task = db
-            .select()
-            .from(schema.tasks)
-            .where(eq(schema.tasks.status, "queued"))
-            .get();
-          if (!task) return;
-          const channel = db
-            .select()
-            .from(schema.channels)
-            .where(eq(schema.channels.id, task.channelId))
-            .get();
-          if (
-            !channel ||
-            channel.paused ||
-            channel.platform !== source.platform ||
-            channel.accountId !== source.accountId ||
-            channel.userId !== source.userId
-          )
-            return;
-          return db
-            .update(schema.tasks)
-            .set({ status: "dispatching" })
-            .where(and(eq(schema.tasks.id, task.id), eq(schema.tasks.status, "queued")))
-            .returning()
-            .get();
+        const index = state.tasks.findIndex((task) => task.status === "queued");
+        const task = state.tasks[index];
+        const channel = state.channels.find((channel) => channel.id === task?.channelId);
+        if (
+          !task ||
+          !channel ||
+          channel.paused ||
+          channel.platform !== source.platform ||
+          channel.accountId !== source.accountId ||
+          channel.userId !== source.userId
+        )
+          return;
+        return update(() => {
+          const claimed = { ...task, status: "dispatching" as const };
+          state.tasks[index] = claimed;
+          return claimed;
         });
       },
-      /** 创建会话后立即保存关联，后续消息与重启均可续聊。 */
+      /** 新建会话后立即保存关联，后续消息与重启均可续聊。 */
       recordSession(id: number, sessionId: string) {
-        db.transaction(() => {
-          const task = db
-            .update(schema.tasks)
-            .set({ sessionId })
-            .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.finishedAt)))
-            .returning()
-            .get();
-          if (task)
-            db.update(schema.channels)
-              .set({ sessionId })
-              .where(eq(schema.channels.id, task.channelId))
-              .run();
+        update(() => {
+          const task = state.tasks.find((task) => task.id === id && task.finishedAt === null);
+          if (!task) return;
+          task.sessionId = sessionId;
+          const channel = state.channels.find((channel) => channel.id === task.channelId);
+          if (channel) channel.sessionId = sessionId;
         });
       },
-      /** 早到通知也可登记 run ID，但不能撤销已经请求的停止。 */
+      /** 记录执行标识，迟到通知不能撤销停止请求。 */
       recordRun(id: number, runId: string) {
-        db.update(schema.tasks)
-          .set({
-            runId,
-            status: sql`case when ${schema.tasks.status} = 'dispatching' then 'running' else ${schema.tasks.status} end`,
-          })
-          .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.finishedAt)))
-          .run();
+        update(() => {
+          const task = state.tasks.find((task) => task.id === id && task.finishedAt === null);
+          if (!task) return;
+          task.runId = runId;
+          if (task.status === "dispatching") task.status = "running";
+        });
       },
-      /** 未派发任务可直接取消；已派发任务等待 Agent 返回真实终态。 */
+      /** 未派发任务直接取消；其余等待 Agent 确认终态。 */
       cancelTask(id: number) {
-        const task = db.select().from(schema.tasks).where(eq(schema.tasks.id, id)).get();
-        if (task?.status === "queued")
+        if (state.tasks.find((task) => task.id === id)?.status === "queued") {
           finishTask(id, { status: "cancelled", text: "任务尚未开始，已取消。" });
-        else
-          db.update(schema.tasks)
-            .set({ status: "cancelling" })
-            .where(and(eq(schema.tasks.id, id), isNull(schema.tasks.finishedAt)))
-            .run();
+        } else
+          update(() => {
+            const task = state.tasks.find((task) => task.id === id && task.finishedAt === null);
+            if (task) task.status = "cancelling";
+          });
       },
       finishTask,
-      /** 保留尚未派发的任务；执行结果不确定的任务只通知用户，绝不自动重跑。 */
+      /** 结果不确定的任务暂停并通知用户，不自动重新派发。 */
       recoverTasks() {
-        for (const task of db
-          .select()
-          .from(schema.tasks)
-          .where(and(isNull(schema.tasks.finishedAt), ne(schema.tasks.status, "queued")))
-          .all()) {
+        for (const task of state.tasks.filter(
+          (task) => task.finishedAt === null && task.status !== "queued",
+        )) {
           finishTask(task.id, {
             status: "interrupted",
             text: "服务已重启，无法确认上次任务的执行结果。请先检查工作目录；确认后发送 /resume，再提交新消息。",
           });
         }
       },
-      /** 仅取当前机器人所属聊天的回复，避免换 Token 后发送到错误账号。 */
+      /** 按机器人与授权用户取最早回复，重试保持发送顺序。 */
       pendingReply(accountId: string, userId: string) {
-        const reply = db
-          .select({
-            id: schema.outbox.id,
-            text: schema.outbox.text,
-            attempts: schema.outbox.attempts,
-            retryAt: schema.outbox.retryAt,
-            chatId: schema.channels.chatId,
-          })
-          .from(schema.outbox)
-          .innerJoin(schema.channels, eq(schema.outbox.channelId, schema.channels.id))
-          .where(
-            and(
-              eq(schema.outbox.status, "pending"),
-              eq(schema.channels.platform, "telegram"),
-              eq(schema.channels.accountId, accountId),
-              eq(schema.channels.userId, userId),
-            ),
-          )
-          .orderBy(asc(schema.outbox.id))
-          .limit(1)
-          .get();
-        return reply && reply.retryAt.getTime() <= Date.now() ? reply : undefined;
-      },
-      /** 只有平台确认发送成功才标记完成。 */
-      sentReply(id: number, messageId: string) {
-        db.update(schema.outbox)
-          .set({ status: "sent", messageId })
-          .where(eq(schema.outbox.id, id))
-          .run();
-      },
-      /** 保存重试时间或永久失败状态，发送过程不更改任务结果。 */
-      retryReply(id: number, seconds: number, permanent = false) {
-        db.update(schema.outbox)
-          .set({
-            status: permanent ? "failed" : "pending",
-            attempts: sql`${schema.outbox.attempts} + 1`,
-            retryAt: new Date(Date.now() + seconds * 1000),
-          })
-          .where(eq(schema.outbox.id, id))
-          .run();
-      },
-      /** 最后释放单实例锁，避免旧执行尚未结束时新实例开始工作。 */
-      close() {
-        try {
-          sqlite.close();
-        } finally {
-          lock?.close();
+        for (const reply of state.outbox) {
+          if (reply.status !== "pending") continue;
+          const channel = state.channels.find((channel) => channel.id === reply.channelId);
+          if (
+            channel?.platform === "telegram" &&
+            channel.accountId === accountId &&
+            channel.userId === userId
+          ) {
+            return reply.retryAt <= Date.now()
+              ? structuredClone({ ...reply, chatId: channel.chatId })
+              : undefined;
+          }
         }
+      },
+      /** 平台确认发送后删除待发送内容，任务结果仍保留。 */
+      sentReply(id: number) {
+        update(() => {
+          state.outbox = state.outbox.filter((reply) => reply.id !== id);
+        });
+      },
+      /** 发送失败只更新回复的重试信息，不影响任务执行状态。 */
+      retryReply(id: number, seconds: number, permanent = false) {
+        update(() => {
+          const reply = state.outbox.find((reply) => reply.id === id);
+          if (reply)
+            Object.assign(reply, {
+              status: permanent ? "failed" : "pending",
+              attempts: reply.attempts + 1,
+              retryAt: Date.now() + seconds * 1000,
+            });
+        });
+      },
+      /** 所有任务与消息处理结束后释放单实例锁。 */
+      close() {
+        usable = false;
+        release();
       },
     };
   } catch (error) {
-    sqlite.close();
-    lock?.close();
+    release();
     throw error;
   }
 }
 
-/** 对外只暴露实际存储操作，驱动和 SQL 留在本模块内部。 */
+/** 对外保留现有存储接口，文件格式与写入细节留在本模块。 */
 export type Store = ReturnType<typeof openStore>;

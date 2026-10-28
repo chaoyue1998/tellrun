@@ -16,7 +16,7 @@ let running: Promise<void>[] = [];
 let phase = "配置加载";
 let stopping = false;
 
-/** 两种退出信号共用关停入口；主流程等待消息处理和 Agent 退出后关闭数据库。 */
+/** 两种退出信号共用关停入口；主流程等待消息处理和 Agent 退出后释放状态锁。 */
 function stop() {
   if (stopping) return;
   stopping = true;
@@ -32,7 +32,7 @@ try {
   const config = loadConfig();
   /** 恢复向导保存的执行路径与代理，后台进程无需依赖登录终端。 */
   Object.assign(process.env, config.environment);
-  phase = "数据库迁移";
+  phase = "状态加载";
   store = openStore();
   phase = "Agent 可用性检查";
   const agent = await createCodexAgent(config.codexPath);
@@ -67,14 +67,9 @@ try {
           ? error.code
           : undefined,
     },
-    phase === "配置加载" && error instanceof Error
+    (phase === "配置加载" || phase === "状态加载") && error instanceof Error
       ? error.message
-      : phase === "数据库迁移" &&
-          error instanceof Error &&
-          "code" in error &&
-          error.code === "SQLITE_BUSY"
-        ? "数据库已被占用，请检查是否已有 Agent Relay 实例或迁移进程正在运行"
-        : "服务启动或运行失败",
+      : "服务启动或运行失败",
   );
 } finally {
   im?.stop();

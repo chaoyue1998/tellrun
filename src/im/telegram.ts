@@ -156,7 +156,7 @@ export function createTelegramConnection(
         logger.info({ botId: bot.botInfo.id }, "Telegram 长轮询已启动");
         workers.push(
           (async () => {
-            /** 只有入站事务成功才推进确认位置；重投由数据库唯一约束去重。 */
+            /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
             let offset = 0;
             while (!polling.signal.aborted) {
               for (const update of await bot.api.getUpdates({
@@ -178,8 +178,8 @@ export function createTelegramConnection(
                 continue;
               }
               try {
-                const sent = await bot.api.sendMessage(reply.chatId, reply.text);
-                store.sentReply(reply.id, String(sent.message_id));
+                await bot.api.sendMessage(reply.chatId, reply.text);
+                store.sentReply(reply.id);
               } catch (error) {
                 if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
                 if (error instanceof GrammyError && error.error_code === 401) throw error;

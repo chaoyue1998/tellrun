@@ -32,14 +32,14 @@ async function systemctl(...args: string[]) {
   }
 }
 
-/** CLI 与配置向导共用后台生命周期；不加载数据库或 Telegram 业务入口。 */
+/** CLI 与配置向导共用后台生命周期；不加载运行状态或 Telegram 业务入口。 */
 export async function manageService(
   action: "start" | "stop" | "restart" | "status" | "logs" | "uninstall",
   options: { enable?: boolean; follow?: boolean } = {},
 ) {
   if (action === "status") {
     console.log(
-      `配置：${join(appDirectory, "config.json")}\n数据库：${join(appDirectory, "agent-relay.db")}`,
+      `配置：${join(appDirectory, "config.json")}\n状态：${join(appDirectory, "state.json")}`,
     );
   }
   if (process.platform !== "linux") {
@@ -99,7 +99,7 @@ export async function manageService(
       if (state.LoadState !== "not-found") await systemctl("disable", unit);
       rmSync(join(appDirectory, unit), { force: true });
       await systemctl("daemon-reload");
-      console.log("后台服务已卸载，配置和数据库已保留；用户 linger 设置保持不变。");
+      console.log("后台服务已卸载，配置和状态文件已保留；用户 linger 设置保持不变。");
     } else console.log("后台服务已停止。");
     return;
   }

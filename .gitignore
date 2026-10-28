@@ -6,8 +6,5 @@ coverage/
 !.env.example
 data/
 .agent-relay/
-*.db
-*.db-shm
-*.db-wal
 *.tsbuildinfo
 .DS_Store

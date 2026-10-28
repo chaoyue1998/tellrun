@@ -7,10 +7,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
-  renameSync,
-  rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import * as p from "@clack/prompts";
@@ -19,6 +16,7 @@ import { ZodError } from "zod";
 import { createCodexAgent } from "./agents/codex.js";
 import { manageService } from "./background.js";
 import { appDirectory, type Config, configSchema, loadConfig } from "./config.js";
+import { writeJson } from "./storage/file.js";
 
 /** 全局入口只注册命令；业务入口仅在 run 时动态加载。 */
 const program = new Command()
@@ -168,13 +166,7 @@ program
     /** 校验完成后在同目录原子替换，取消或失败时不留下半份配置。 */
     mkdirSync(appDirectory, { recursive: true, mode: 0o700 });
     chmodSync(appDirectory, 0o700);
-    const temporary = join(appDirectory, `config.${process.pid}.tmp`);
-    try {
-      writeFileSync(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-      renameSync(temporary, join(appDirectory, "config.json"));
-    } finally {
-      rmSync(temporary, { force: true });
-    }
+    writeJson(join(appDirectory, "config.json"), config);
     p.outro("配置已保存；如已有服务运行，请用 agent-relay restart 加载新配置。");
     if (answers.launch !== "later")
       await manageService("restart", { enable: answers.launch === "boot" });
@@ -228,7 +220,7 @@ program
   .command("service")
   .description("管理后台服务安装")
   .command("uninstall")
-  .description("停止并卸载服务，保留配置与数据库")
+  .description("停止并卸载服务，保留配置与状态文件")
   .action(async () => {
     await manageService("uninstall");
   });

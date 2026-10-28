@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-/** CLI、后台服务和独立迁移共用的用户数据目录，不依赖当前工作目录。 */
+/** CLI 与后台服务共用的用户数据目录，不依赖当前工作目录。 */
 export const appDirectory = join(homedir(), ".agent-relay");
 
 /** 配置向导与运行入口共用校验；只保存后台运行需要的环境。 */

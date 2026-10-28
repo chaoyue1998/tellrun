@@ -37,5 +37,5 @@ export interface Agent {
   stop(): void;
 }
 
-/** 返回时表示消息及回复意图已保存，不等待 Agent 执行或 IM 发送。 */
+/** 返回时表示消息标识及回复意图已保存，不等待 Agent 执行或 IM 发送。 */
 export type MessageHandler = (message: IncomingMessage) => Promise<void>;
