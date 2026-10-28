@@ -19,9 +19,9 @@
 
 当前已接通 Telegram → Codex app-server → 结果回复，支持指定工作目录、单会话续聊、新建会话、停止、任务去重和重启恢复。任务与待发送回复保存在 SQLite；多会话选择、任务排队、进度推送和审批界面尚未接入。
 
-## 安装与使用目标
+## 安装与使用
 
-计划提供以下流程；全局 CLI、配置向导和后台服务管理尚未实现，当前开发运行方式见下文。
+先安装 Node.js 24.5.0 或更高版本、Codex，并完成 Codex 登录。CLI、配置向导和 Linux systemd 用户服务管理已接入；本轮未执行 npm 发布，发布后可按以下流程使用。
 
 ```sh
 npm install -g agent-relay
@@ -29,11 +29,16 @@ agent-relay setup       # 交互配置 Telegram、代理和 Codex，完成后可
 agent-relay start       # 后续启动
 agent-relay status      # 查看后台服务状态
 agent-relay logs        # 查看日志
+agent-relay logs -f     # 持续跟随日志
 agent-relay restart     # 重启服务
 agent-relay stop        # 停止后台服务
 ```
 
-CLI 计划采用 Commander，配置向导采用 Clack；Linux 后台运行采用 systemd 用户服务。用户配置和数据库统一保存到当前用户的 `~/.agent-relay/`，分别为 `config.json` 和 `agent-relay.db`；全局 npm 包升级不会覆盖这些数据。退出 SSH 后持续运行与开机自启由配置向导检查并引导设置。具体目录、发布规则及服务生命周期见[架构文档](docs/architecture.md#分发与命令行入口)。
+CLI 采用 Commander，配置向导采用 Clack。`setup` 校验配置与 Codex 可执行文件后原子保存，取消时保留原配置；可选择立即启动或重启后台服务，并启用开机自启。后续也可使用 `agent-relay start --enable` 启用自启。配置、数据库、单实例锁和服务定义都保存在当前用户的 `~/.agent-relay/`，全局 npm 包升级保留这些数据。
+
+后台运行需要 Linux systemd 用户服务。启动时检查并启用用户 linger，确保退出 SSH 后继续运行；权限不足会给出需要在服务器执行的命令。`agent-relay run` 提供前台运行，适用于本地调试或外部进程管理器。`agent-relay service uninstall` 停止并移除服务，保留配置、数据库和用户 linger 设置。
+
+尚未发布时，可在源码目录执行 `npm ci`、`npm pack`，再通过 `npm install -g ./agent-relay-1.0.0.tgz` 安装本地包。打包自动构建并包含运行依赖声明与数据库迁移。升级前停止服务并备份数据，升级后运行 `agent-relay restart` 更新 Node 与 CLI 入口路径。具体布局和生命周期见[架构文档](docs/architecture.md#分发与命令行入口)。
 
 ## 技术方案
 
@@ -45,8 +50,10 @@ Node.js 24 + TypeScript（ESM）；grammY 接入 Telegram；SQLite、better-sqli
 
 ```text
 src/
+├── cli.ts               # 全局命令与交互配置向导
+├── background.ts        # systemd 用户服务的启停、状态和日志
 ├── main.ts              # 组件组装、启动和退出
-├── config.ts            # Telegram 凭据与本人身份校验
+├── config.ts            # 用户配置、环境变量覆盖与校验
 ├── logger.ts            # 结构化日志与敏感字段隐藏
 ├── agents/
 │   └── codex.ts         # Codex app-server 连接、续聊、执行和中断
@@ -79,9 +86,11 @@ cp .env.example .env
 
 编辑 `.env`，填写 `TELEGRAM_BOT_TOKEN` 和本人 `TELEGRAM_OWNER_ID`；用户 ID 必须是十进制正整数。`.env` 已加入 Git 忽略规则。
 
-当前只有以上两项必填配置。数据库固定放在 `data/agent-relay.db`，通过 PATH 调用 `codex`，日志级别固定为 `info`。无需项目清单；在 Telegram 中用 `/cwd` 指定目录，不设置目录白名单。
+当前只有以上两项必填配置，也可运行 `node dist/cli.js setup` 写入用户配置。数据库统一放在 `~/.agent-relay/agent-relay.db`，开发运行与全局安装使用同一目录和单实例锁。Codex 优先使用 `CODEX_PATH`，其次使用配置文件路径，均未设置时通过 PATH 查找。日志级别固定为 `info`。无需项目清单；在 Telegram 中用 `/cwd` 指定目录，不设置目录白名单。
 
-Telegram 默认读取启动终端的 `HTTPS_PROXY` / `https_proxy` 和 `NO_PROXY` / `no_proxy`（小写优先）。如需单独指定，在 `.env` 设置 `TELEGRAM_PROXY_URL=http://127.0.0.1:7897`，优先于终端代理，仍遵循 `NO_PROXY` 规则。支持 HTTP/HTTPS 代理；未设置或留空时沿用终端配置，两处均未配置时直连。
+Telegram 代理优先使用非空 `TELEGRAM_PROXY_URL`，其次使用配置文件中的 `telegram.proxyUrl`；配置文件中空字符串表示明确直连。两处均未指定时，读取 `HTTPS_PROXY` / `https_proxy`；使用代理时遵循 `NO_PROXY` / `no_proxy`（小写优先）。`setup` 保存当前终端的 PATH、CODEX_HOME 和代理环境，后台进程会恢复这些设置；代理 URL 不写入服务定义或命令行参数。
+
+此前源码版本的数据库位于 `data/agent-relay.db`。已有数据需要先停止旧进程并备份，再迁入 `~/.agent-relay/`；如存在 `-wal`、`-shm` 文件，需一并保留。程序不自动搬移旧数据或覆盖目标数据库。
 
 ```sh
 npm run dev
@@ -120,7 +129,7 @@ Codex 沿用本机登录、模型配置和终端代理；默认使用工作区�
 
 上述源码开发命令从项目根目录运行。运行编译产物时仍需保留项目根目录下的 `migrations/`；生产环境不使用 `drizzle-kit push` 代替迁移。
 
-已在本机 Node.js 24.22.1、Codex CLI 0.165.0 验证真实回复、跨进程续聊与中断；临时存储验证覆盖去重、并发控制、单实例锁与重启恢复。目标 Linux 的完整 M0 验证、审批交互和后台部署仍待完成。[Codex app-server 官方文档](https://learn.chatgpt.com/docs/app-server)
+已在本机 Node.js 24.22.1、Codex CLI 0.165.0 验证真实回复、跨进程续聊与中断；临时存储验证覆盖去重、并发控制、单实例锁与重启恢复。本轮通过 npm 打包、临时前缀全局安装、配置保存与取消、目录权限及安装产物迁移检查。后台命令仅在隔离命令环境中检查了调用顺序和特殊路径；目标 Linux 的真实 systemd 启停、退出 SSH、开机自启及完整 M0 验证仍待完成。[Codex app-server 官方文档](https://learn.chatgpt.com/docs/app-server)
 
 ## 文档位置
 

@@ -17,7 +17,12 @@ export function createTelegramConnection(
   /** 默认继承终端代理；显式配置使用优先级更高的小写变量，保留 NO_PROXY 规则。 */
   const agent = new Agent({
     keepAlive: true,
-    proxyEnv: config.proxyUrl ? { ...process.env, https_proxy: config.proxyUrl } : process.env,
+    proxyEnv:
+      config.proxyUrl === undefined
+        ? process.env
+        : config.proxyUrl
+          ? { ...process.env, https_proxy: config.proxyUrl }
+          : {},
   });
   const bot = new Bot(config.token, {
     client: { timeoutSeconds: 35, baseFetchConfig: { agent } },

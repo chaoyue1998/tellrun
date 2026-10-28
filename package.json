@@ -2,15 +2,23 @@
   "name": "agent-relay",
   "version": "1.0.0",
   "description": "通过 IM 与服务器上的编码 Agent 对话，提交开发任务、查看进度、处理审批并继续会话。",
-  "private": true,
   "type": "module",
+  "bin": {
+    "agent-relay": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "docs"
+  ],
   "engines": {
     "node": ">=24.5.0"
   },
   "scripts": {
-    "dev": "node --env-file-if-exists=.env --import tsx --watch src/main.ts",
+    "dev": "node --env-file-if-exists=.env --import tsx --watch src/cli.ts run",
     "build": "tsc -p tsconfig.build.json",
-    "start": "node --env-file-if-exists=.env dist/main.js",
+    "start": "node --env-file-if-exists=.env dist/cli.js run",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "format": "biome check --write .",
@@ -19,8 +27,10 @@
     "db:migrate": "node --env-file-if-exists=.env --import tsx src/storage/migrate.ts"
   },
   "dependencies": {
+    "@clack/prompts": "1.8.1",
     "@grammyjs/auto-retry": "2.0.2",
     "better-sqlite3": "13.0.3",
+    "commander": "15.0.0",
     "drizzle-orm": "0.45.4",
     "grammy": "1.46.0",
     "pino": "10.4.0",

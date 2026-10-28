@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { createCodexAgent } from "./agents/codex.js";
 import { loadConfig } from "./config.js";
 import { createRelayService } from "./core/service.js";
@@ -28,10 +30,12 @@ process.once("SIGTERM", stop);
 
 try {
   const config = loadConfig();
+  /** 恢复向导保存的执行路径与代理，后台进程无需依赖登录终端。 */
+  Object.assign(process.env, config.environment);
   phase = "数据库迁移";
   store = openStore();
   phase = "Agent 可用性检查";
-  const agent = await createCodexAgent();
+  const agent = await createCodexAgent(config.codexPath);
   logger.info({ agent: agent.name, version: agent.version }, "Agent CLI 可用");
 
   if (!stopping) {
@@ -40,6 +44,13 @@ try {
     phase = "IM 连接";
     const source = await im.initialize();
     if (source && !stopping) {
+      /** systemctl start 等待实际初始化成功，避免把进程创建误报为服务就绪。 */
+      if (process.env.NOTIFY_SOCKET) {
+        phase = "后台就绪通知";
+        await promisify(execFile)("systemd-notify", ["--ready", "--status=Telegram 已连接"], {
+          timeout: 5_000,
+        });
+      }
       phase = "消息与任务处理";
       running = [im.start(), relay.run(source)];
       await Promise.all(running);

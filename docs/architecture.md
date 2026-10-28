@@ -11,7 +11,7 @@
 | 决策 | 首版方案 | 原因与边界 |
 | --- | --- | --- |
 | 服务形态 | 全局 npm CLI + 单进程 Node.js 后台服务，内部按职责分模块 | CLI 管理配置与启停，后台进程持续处理消息和任务 |
-| CLI 与交互配置 | 计划使用 Commander + @clack/prompts | 提供子命令、帮助和配置向导；不引入通用依赖注入框架 |
+| CLI 与交互配置 | Commander + @clack/prompts | 提供子命令、帮助和配置向导；不引入通用依赖注入框架 |
 | IM 框架 | grammY，Telegram 长轮询 | 入口是 Bot 消息与按钮；无需公网入站接口 |
 | HTTP 框架 | 首版无需引入；需要 Webhook 或管理 API 时采用 Fastify | 避免为当前没有的 HTTP 业务增加服务层 |
 | Codex 接入 | app-server，stdio 双向 JSON-RPC | 需要完整的会话、审批、问题和中断交互 |
@@ -64,6 +64,8 @@ Codex app-server 提供线程、轮次、执行事件与审批交互；官方把
 | 运行时 | Node.js | 24.22.1 | `.nvmrc` 指定版本，通过 nvm 切换；ESM，生产运行编译后的 JavaScript |
 | 包管理 | npm | 使用 Node.js 自带版本 | 提交 `package-lock.json`，使用 `npm ci` 安装 |
 | 语言 | TypeScript | 7.0.2 | strict + NodeNext；类型检查与构建 |
+| CLI | commander | 15.0.0 | 子命令、参数与帮助 |
+| 配置向导 | @clack/prompts | 1.8.1 | 隐藏凭据输入、字段校验与取消处理 |
 | Telegram | grammy | 1.46.0 | 消息、命令、InlineKeyboard、回调、长轮询 |
 | Telegram 重试 | @grammyjs/auto-retry | 2.0.2 | 429、5xx 最多重试两次；网络错误上抛；整次调用另设超时 |
 | 数据库驱动 | better-sqlite3 | 13.0.3 | 本地 SQLite，短事务，启用 WAL |
@@ -72,7 +74,7 @@ Codex app-server 提供线程、轮次、执行事件与审批交互；官方把
 | 数据校验 | zod | 4.6.7 | 配置及应用边界数据校验 |
 | 日志 | pino | 10.4.0 | JSON 日志、关联标识与脱敏 |
 | 开发运行 | tsx | 4.23.15 | 本地监听与调试；生产用 tsc 构建产物 |
-| 测试 | 暂不引入 | 未安装 | 本轮仅进行静态检查、类型检查与编译验证 |
+| 测试 | 暂不引入 | 未安装 | 使用静态检查、类型检查、编译与临时目录运行校验，不新增测试代码 |
 | 格式与静态检查 | @biomejs/biome | 2.6.3 | 保持一套格式化与 lint 工具 |
 | Codex | Codex CLI | 本机检测到 0.165.0 | 目标 Linux 验证后固定；生成对应协议类型 |
 
@@ -82,26 +84,26 @@ Drizzle 支持 better-sqlite3 驱动。当前文档示例包含 RC 安装命令�
 
 库版本依据各包的 npm 元数据，可从 [grammy](https://www.npmjs.com/package/grammy)、[Drizzle](https://www.npmjs.com/package/drizzle-orm)、[better-sqlite3](https://www.npmjs.com/package/better-sqlite3)、[TypeScript](https://www.npmjs.com/package/typescript) 等包页面复核。工程配套使用 npm，@types/node 与 Node.js 24 对齐。
 
-首版以 grammY 承担 IM 入口，新增轻量 CLI 层管理安装后的交互配置与后台服务。[Commander](https://github.com/tj/commander.js) 提供命令解析与帮助，[Clack](https://github.com/bombshell-dev/clack) 提供配置向导；两者尚未加入当前依赖。Fastify 留给后续 HTTP 入口；NestJS 的模块和依赖注入体系暂时没有对应需求。Codex 已承担 Agent 执行循环，因此首版直接接入其运行时。SQLite 中的任务记录是队列事实来源，当前规模无需 Redis / BullMQ。
+首版以 grammY 承担 IM 入口，轻量 CLI 层管理安装后的交互配置与后台服务。[Commander](https://github.com/tj/commander.js) 提供命令解析与帮助，[Clack](https://github.com/bombshell-dev/clack) 提供配置向导。Fastify 留给后续 HTTP 入口；NestJS 的模块和依赖注入体系暂时没有对应需求。Codex 已承担 Agent 执行循环，因此首版直接接入其运行时。SQLite 中的任务记录是队列事实来源，当前规模无需 Redis / BullMQ。
 
 ## 分发与命令行入口
 
-最终通过 `npm install -g agent-relay` 安装，再运行 CLI 完成交互配置和后台启动。以下为发布目标，当前仍通过仓库内的 npm scripts 开发运行。
+CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装。本轮不执行 npm 发布；发布后通过 `npm install -g agent-relay` 安装，再运行 CLI 完成交互配置和后台启动。以下命令已实现，Linux systemd 的真实服务验收仍需在服务器完成。
 
 | 命令 | 目标行为 |
 | --- | --- |
 | agent-relay setup | 交互填写 Bot Token、本人 ID、可选代理，检查 Codex 路径与运行环境；保存后可启动后台服务并设置开机自启 |
-| agent-relay start | 检查配置、创建或更新本用户的服务定义并启动；重复调用不创建第二个实例 |
+| agent-relay start | 检查配置、创建或更新本用户的服务定义并启动；重复调用不创建第二个实例；--enable 启用开机自启 |
 | agent-relay stop | 停止后台服务及受管理子进程，等待实际结束后报告结果 |
 | agent-relay restart | 完成停止后重新启动；用于配置变更或 npm 升级后加载新版本 |
 | agent-relay status | 查询服务管理器状态并展示配置、数据目录；不启动第二个业务进程 |
-| agent-relay logs | 展示或跟随后台日志，凭据不进入命令行参数 |
+| agent-relay logs | 展示最近 100 条后台日志；-f 持续跟随，凭据不进入命令行参数 |
 | agent-relay run | 前台运行服务，供 systemd 和本地诊断使用；不进行交互配置 |
 | agent-relay service uninstall | 停用并移除本应用的用户服务，保留配置和数据库；之后可通过 npm 卸载程序包 |
 
 `setup` 由用户显式执行，npm 安装脚本仅承担包安装所需工作。交互取消时保留原配置，Token 使用隐藏输入；校验成功后再原子写入配置。CLI 的帮助、版本和状态命令不加载会执行迁移或启动轮询的业务入口。
 
-发布时需调整现有 `private: true`，通过 `bin` 暴露带 Node shebang 的 CLI；使用 `files` 白名单包含编译产物和迁移文件，在打包前完成构建。安装用户不需要源码仓库、TypeScript 或 tsx。迁移资源相对包文件定位，用户配置与数据统一定位到当前用户的 `~/.agent-relay/`，任何命令均可从任意目录执行。[npm 包字段](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
+包已移除 `private: true`，通过 `bin` 暴露带 Node shebang 的 CLI；`files` 白名单包含编译产物、迁移文件和文档，`prepack` 在打包前完成构建。安装用户不需要源码仓库、TypeScript 或 tsx。迁移资源相对包文件定位，用户配置与数据统一定位到当前用户的 `~/.agent-relay/`，任何命令均可从任意目录执行。[npm 包字段](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
 
 发布验收使用实际 `npm pack` 产物，在临时安装前缀全局安装后，从包外目录调用 CLI；检查 bin、运行依赖、迁移资源及目标 Linux 的 SQLite 驱动。升级前停止服务并备份数据，升级后重新解析 Node 与包入口路径、更新服务定义并启动；数据库迁移失败时保留数据并报告失败。
 
@@ -109,7 +111,8 @@ Drizzle 支持 better-sqlite3 驱动。当前文档示例包含 RC 安装命令�
 
 | 模块 | 职责 |
 | --- | --- |
-| src/cli.ts（规划） | CLI 命令解析、配置向导和服务管理；只在 run 时进入后台业务入口 |
+| src/cli.ts | CLI 命令解析与配置向导；只在 run 时动态加载后台业务入口 |
+| src/background.ts | systemd 用户服务、linger、启停、状态与日志 |
 | src/main.ts | 组装组件、数据库迁移、启动和退出；只在这里选择具体 IM 与 Agent |
 | src/config.ts、src/logger.ts | Telegram 凭据与本人身份校验、结构化日志 |
 | src/im/telegram.ts | grammY 接入、本人验证、入站标准化、回复与连接生命周期 |
@@ -258,7 +261,7 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 
 ## 配置与部署
 
-当前源码开发仍读取 `.env`，数据库位于仓库的 `data/agent-relay.db`。全局安装后的目标是由配置向导写入用户配置，配置、数据库和锁统一保存在当前用户主目录下的 `.agent-relay/`；下表为计划中的发布布局，尚未落地到当前代码。
+配置、数据库、锁和服务定义统一保存在当前用户主目录下的 `.agent-relay/`；源码开发与全局安装共用同一布局。源码 npm scripts 仍可读取 `.env` 覆盖 Telegram 凭据和 Codex 路径；后台启动要求向导已保存完整配置，不依赖 CLI 的临时环境。原仓库 `data/` 不会自动迁移，已有数据需停服、备份后迁入。
 
 | 配置项 | 保存位置与约束 |
 | --- | --- |
@@ -267,13 +270,15 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 | Telegram 代理 | 保存明确的代理配置；后台进程不依赖启动终端的临时环境。向导可提示采用当前终端代理 |
 | 工作目录 | 后续由任务或会话指定，不设置目录白名单 |
 | Codex 命令 | 配置时解析可执行文件的绝对路径；与后台服务使用同一 OS 用户，沿用其认证与配置 |
+| 后台运行环境 | config.json 的 environment 保存向导执行时的 PATH、CODEX_HOME 和 HTTP/HTTPS/ALL/NO_PROXY（含小写）；不自动保存 API Key |
 | 应用数据库 | `~/.agent-relay/agent-relay.db`；单实例锁位于同目录的 `agent-relay.db.lock` |
+| 服务定义 | `~/.agent-relay/agent-relay.service`，通过 systemctl --user link 注册；日志保存在系统 journal |
 | 日志级别 | 当前固定为 info |
 | 队列与交互设置 | 规划默认并发 1、队列上限 20、审批 10 分钟、进度间隔 2 秒；当前未实现，不预建配置项 |
 
 `~/.agent-relay/` 按当前运行用户的主目录解析为绝对路径；CLI 与后台服务使用同一用户和同一目录，不受执行命令时的 cwd 影响。数据库、锁和配置不得写到全局 npm 包目录，避免升级覆盖、权限问题和从不同 cwd 启动产生多份数据。
 
-后台方案以支持 systemd 用户服务的 Linux 为目标，CLI 生成本用户的服务定义，通过 `systemctl --user` 管理，日志交给 journal。ExecStart 使用解析后的 Node 和 CLI 绝对路径执行 `agent-relay run`；后台任务的 cwd 由会话单独指定。设置 Restart=on-failure、重启退避和 KillMode=control-group；停止等待须覆盖入站处理和子进程退出期限。[systemd 服务](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
+后台方案以支持 systemd 用户服务的 Linux 为目标，CLI 生成本用户的服务定义，通过 `systemctl --user` 管理，日志交给 journal。ExecStart 使用解析后的 Node 和 CLI 绝对路径执行 `agent-relay run`；后台任务的 cwd 由会话单独指定。Type=notify 在 Telegram 初始化成功后通过 systemd-notify 报告就绪；Restart=on-failure、5 秒重启间隔与启动频率限制负责故障重启，KillMode=control-group 和 45 秒停止期限约束残留子进程。[systemd 服务](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 
 退出 SSH 后继续运行或开机自启需要检查用户 linger 状态。向导说明设置并在系统权限允许时完成；权限不足时给出所需命令，不能报告后台持久运行已配置成功。不支持 systemd 用户服务的环境仍可使用前台 run，由外部进程管理器托管；首版不自行实现通用守护进程管理器。[loginctl linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)
 

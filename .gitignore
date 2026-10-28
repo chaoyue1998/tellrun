@@ -5,6 +5,7 @@ coverage/
 .env.*
 !.env.example
 data/
+.agent-relay/
 *.db
 *.db-shm
 *.db-wal

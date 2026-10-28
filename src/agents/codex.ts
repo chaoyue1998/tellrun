@@ -10,16 +10,19 @@ const turnSchema = z.object({
 });
 
 /** 每次任务使用独立 app-server 连接，续聊使用已持久化的 thread ID。 */
-export async function createCodexAgent(): Promise<Agent> {
+export async function createCodexAgent(
+  command = "codex",
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<Agent> {
   /** 保留运行时、认证和代理环境，不向子进程传入 Telegram 凭据。 */
   const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) =>
+    Object.entries(environment).filter(([key]) =>
       /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_.*|TERM|TMPDIR|TEMP|TMP|SYSTEMROOT|WINDIR|CODEX_HOME|OPENAI_API_KEY|OPENAI_BASE_URL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR)$/.test(
         key,
       ),
     ),
   );
-  const { stdout } = await promisify(execFile)("codex", ["--version"], {
+  const { stdout } = await promisify(execFile)(command, ["--version"], {
     timeout: 5_000,
     maxBuffer: 4_096,
     env,
@@ -34,7 +37,7 @@ export async function createCodexAgent(): Promise<Agent> {
       if (active) throw new Error("Codex 已有任务正在执行");
       const controller = new AbortController();
       active = controller;
-      const child = spawn("codex", ["app-server"], {
+      const child = spawn(command, ["app-server"], {
         cwd: input.cwd,
         env,
         detached: process.platform !== "win32",

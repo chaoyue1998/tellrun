@@ -1,17 +1,19 @@
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { chmodSync, mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { and, asc, desc, eq, isNull, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import { appDirectory } from "../config.js";
 import type { AgentResult, ChannelIdentity, IncomingMessage } from "../core/types.js";
 import * as schema from "./schema.js";
 
 /** 打开 SQLite 并应用已提交的迁移；初始化失败时释放连接。 */
-export function openStore(path = "./data/agent-relay.db") {
+export function openStore(path = join(appDirectory, "agent-relay.db")) {
   if (path !== ":memory:") {
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    if (dirname(path) === appDirectory) chmodSync(appDirectory, 0o700);
   }
 
   const sqlite = new Database(path);
@@ -20,6 +22,8 @@ export function openStore(path = "./data/agent-relay.db") {
     /** 独立 SQLite 写锁约束单实例；进程退出会释放锁，不依赖清理 PID 文件。 */
     if (path !== ":memory:") {
       lock = new Database(`${path}.lock`, { timeout: 0 });
+      chmodSync(path, 0o600);
+      chmodSync(`${path}.lock`, 0o600);
       lock.exec("BEGIN EXCLUSIVE");
     }
     sqlite.pragma("journal_mode = WAL");
