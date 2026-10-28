@@ -61,7 +61,9 @@ try {
       phase,
       errorType: error instanceof Error ? error.name : "UnknownError",
       errorCode:
-        error instanceof Error && "code" in error && typeof error.code === "string"
+        error instanceof Error &&
+        "code" in error &&
+        (typeof error.code === "string" || typeof error.code === "number")
           ? error.code
           : undefined,
     },

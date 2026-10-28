@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { delimiter, dirname } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import type { Agent, AgentResult } from "../core/types.js";
@@ -19,6 +20,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       ),
     ),
   );
+  /** npm 版 Codex 通过 env 查找 node；后台服务也应复用运行 Tellrun 的 Node。 */
+  env.PATH = [dirname(process.execPath), env.PATH].filter(Boolean).join(delimiter);
   const { stdout } = await promisify(execFile)(command, ["--version"], {
     timeout: 5_000,
     maxBuffer: 4_096,
@@ -252,7 +255,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
       try {
         await request("initialize", {
-          clientInfo: { name: "tellrun", title: "Tellrun", version: "1.0.0" },
+          clientInfo: { name: "tellrun", title: "Tellrun", version: "1.0.1" },
           capabilities: null,
         });
         child.stdin.write(`${JSON.stringify({ method: "initialized" })}\n`);

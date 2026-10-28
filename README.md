@@ -40,7 +40,9 @@ CLI 采用 Commander，配置向导采用 Clack。Bot Token 使用明文输入�
 
 后台运行需要 Linux systemd 用户服务。启动时检查并启用用户 linger，确保退出 SSH 后继续运行；权限不足会给出需要在服务器执行的命令。`tellrun run` 提供前台运行，适用于本地调试或外部进程管理器。`tellrun service uninstall` 停止并移除服务，保留配置、状态文件和用户 linger 设置。
 
-尚未发布时，可在源码目录执行 `npm ci`、`npm pack`，再通过 `npm install -g ./tellrun-1.0.0.tgz` 安装本地包。打包自动构建并包含运行依赖声明。升级前停止服务并备份数据，升级后运行 `tellrun restart` 更新 Node 与 CLI 入口路径。具体布局和生命周期见[架构文档](docs/architecture.md#分发与命令行入口)。
+使用 nvm 安装 Node.js 时，Tellrun 会把当前 Node 所在目录补到 Codex 子进程的 `PATH` 前面，保证后台启动也能找到 `node`。
+
+尚未发布时，可在源码目录执行 `npm ci`、`npm pack`，再通过 `npm install -g ./tellrun-1.0.1.tgz` 安装本地包。打包自动构建并包含运行依赖声明。升级前停止服务并备份数据，升级后运行 `tellrun restart` 更新 Node 与 CLI 入口路径。具体布局和生命周期见[架构文档](docs/architecture.md#分发与命令行入口)。
 
 ## 技术方案
 
@@ -143,7 +145,7 @@ npx tsc -p tsconfig.build.json --watch
 
 ```sh
 npm pack                         # 已配置自动构建
-npm install -g ./tellrun-1.0.0.tgz
+npm install -g ./tellrun-1.0.1.tgz
 tellrun --help
 ```
 

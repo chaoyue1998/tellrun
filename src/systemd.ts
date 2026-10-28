@@ -27,7 +27,7 @@ async function systemctl(...args: string[]) {
       return error.stdout.trim();
     }
     throw new Error(
-      `systemctl --user ${args[0]} 失败；请确认当前用户可访问 systemd 用户服务，并用 tellrun logs 查看启动错误。不支持用户服务的环境可用 tellrun run 前台运行。`,
+      `systemctl --user ${args[0]} 失败；请运行 systemctl --user status ${unit} --no-pager -l 查看服务状态，并用 tellrun logs 查看启动错误。不支持用户服务的环境可用 tellrun run 前台运行。`,
     );
   }
 }
