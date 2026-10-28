@@ -170,6 +170,14 @@ export function openStore(path = join(appDirectory, "state.json")) {
             }[result.status]
           }\n${result.text}`,
         );
+        for (const [index, input] of task.inputs.entries()) {
+          if (input.status !== "pending" && input.status !== "sending") continue;
+          enqueueReply(
+            task.channelId,
+            `任务 #${id} 的第 ${index + 1} 条补充消息${input.status === "pending" ? "尚未提交" : "提交结果待确认"}，任务已结束，未自动重试。请检查会话后重新发送需要继续的内容。`,
+          );
+          input.status = "failed";
+        }
       });
     }
 
@@ -246,11 +254,45 @@ export function openStore(path = join(appDirectory, "state.json")) {
             cwd: channel.cwd,
             sessionId: channel.sessionId,
             prompt,
+            inputs: [],
             status: "queued",
             result: null,
           };
           state.tasks.push(task);
           return task;
+        });
+      },
+      /** 尚未派发时合并首条输入；执行中的补充输入与入站去重标识一起保存。 */
+      appendTaskInput(id: number, text: string) {
+        update(() => {
+          const task = state.tasks.find((task) => task.id === id);
+          if (!task || !["queued", "dispatching", "running"].includes(task.status))
+            throw new Error("当前任务无法接收补充输入");
+          if (task.status === "queued") task.prompt += `\n\n${text}`;
+          else task.inputs.push({ text, status: "pending" });
+        });
+      },
+      /** 取得当前轮次后按接收顺序派发，先落盘 sending，不能自动重试不确定输入。 */
+      claimTaskInput(id: number) {
+        const task = state.tasks.find((task) => task.id === id && task.status === "running");
+        const index = task?.inputs.findIndex((input) => input.status === "pending") ?? -1;
+        if (!task || index < 0) return;
+        return update(() => {
+          const input = state.tasks.find((task) => task.id === id)?.inputs[index];
+          if (!input) throw new Error("补充输入记录不存在");
+          input.status = "sending";
+          return { index, text: input.text };
+        });
+      },
+      /** 成功补充不产生固定回执，失败提示和输入状态原子保存。 */
+      finishTaskInput(id: number, index: number, error?: string) {
+        update(() => {
+          const task = state.tasks.find((task) => task.id === id);
+          const input = task?.inputs[index];
+          if (!task || input?.status !== "sending") return;
+          input.status = error === undefined ? "accepted" : "failed";
+          if (error !== undefined)
+            enqueueReply(task.channelId, `任务 #${id} 的第 ${index + 1} 条补充消息：${error}`);
         });
       },
       /** 先保存派发状态再调用 Agent；空闲时仅查询，不反复写文件。 */

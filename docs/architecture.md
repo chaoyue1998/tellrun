@@ -4,7 +4,7 @@
 
 范围与验收见[产品需求文档](prd.md)。本方案面向个人使用，先实现 Telegram + Codex。其他 IM 与 Claude 等 Agent 是后续两个独立的扩展方向。当前已接通单会话执行、续聊、停止、持久化恢复和后台管理命令；多会话、队列、审批及 Linux 真实部署验收仍待完成。
 
-当前实现沿用现有技术栈和单进程结构。入站去重、任务与 outbox 的原子保存、单实例约束和最小停止能力随真实任务一起接入；没有增加运行依赖或测试文件。
+当前实现沿用现有技术栈和单进程结构。入站去重、任务与 outbox 的原子保存、单实例约束和最小停止能力随真实任务一起接入；本地 Codex 后台连接使用 ws，不新增测试文件。
 
 ## 核心架构决定
 
@@ -14,8 +14,8 @@
 | CLI 与交互配置 | Commander + @clack/prompts                               | 提供子命令、帮助和配置向导；不引入通用依赖注入框架       |
 | IM 框架        | grammY，Telegram 长轮询                                  | 入口是 Bot 消息与按钮；无需公网入站接口                  |
 | HTTP 框架      | 首版无需引入；需要 Webhook 或管理 API 时采用 Fastify     | 避免为当前没有的 HTTP 业务增加服务层                     |
-| Codex 接入     | app-server，stdio 双向 JSON-RPC                          | 需要完整的会话、审批、问题和中断交互                     |
-| Codex 进程     | 每个任务创建独立子进程，通过保存的 thread ID 续聊        | 任务串行，进程退出后再开始下一个任务                     |
+| Codex 接入     | app-server，本地 WebSocket 或 stdio 双向 JSON-RPC        | 需要完整的会话、审批、问题和中断交互                     |
+| Codex 进程     | 优先复用本机后台服务，不可用时启动独立子进程             | 复用空闲会话的写锁，任务仍串行并沿用持久化 thread ID     |
 | 数据           | Node.js 文件接口 + JSON                                  | 配置与状态分开保存，使用原子替换                         |
 | 调度           | 文件中的任务记录 + 单个 Worker                           | 队列状态可恢复；控制消息不等待编码任务                   |
 | 消息发送       | 本地 outbox + 进度合并                                   | Telegram 故障不改变编码任务的执行结果                    |
@@ -41,9 +41,9 @@ flowchart TB
             WORKER --> STATE
             STATE --> OUT
         end
-        CODEX["Codex app-server 子进程"]
+        CODEX["Codex app-server 后台服务或子进程"]
         FILES["工作目录与开发工具"]
-        RPC <-->|"stdio JSON-RPC"| CODEX
+        RPC <-->|"本地 WebSocket / stdio JSON-RPC"| CODEX
         CODEX <--> FILES
     end
     TG -->|"长轮询"| IN
@@ -57,7 +57,7 @@ Codex app-server 提供线程、轮次、执行事件与审批交互；官方把
 
 ## 框架与库
 
-下列应用依赖已在 2026 年 10 月 28 日安装并固定至 lockfile；Codex 的目标 Linux 协议兼容性仍由 M0 验证。运行时和 Codex 升级分别验证，不在服务启动时自动追随 latest。
+下列应用依赖截至 2026 年 10 月 29 日已安装并固定至 lockfile；Codex 的目标 Linux 协议兼容性仍由 M0 验证。运行时和 Codex 升级分别验证，不在服务启动时自动追随 latest。
 
 | 用途           | 选择                 | 版本 / 状态           | 使用方式                                                           |
 | -------------- | -------------------- | --------------------- | ------------------------------------------------------------------ |
@@ -68,6 +68,7 @@ Codex app-server 提供线程、轮次、执行事件与审批交互；官方把
 | 配置向导       | @clack/prompts       | 1.8.1                 | 文本输入、字段校验与取消处理                                       |
 | Telegram       | grammy               | 1.46.0                | 消息、命令、InlineKeyboard、回调、长轮询                           |
 | Telegram 重试  | @grammyjs/auto-retry | 2.0.2                 | 429、5xx 最多重试两次；网络错误上抛；整次调用另设超时              |
+| Codex 后台连接 | ws                   | 8.22.0                | 通过 Unix socket 上的 WebSocket 复用本机 app-server               |
 | 数据校验       | zod                  | 4.6.7                 | 配置及应用边界数据校验                                             |
 | 日志           | pino                 | 10.4.0                | JSON 日志、关联标识与脱敏                                          |
 | 开发运行       | tsx                  | 4.23.15               | 本地监听与调试；生产用 tsc 构建产物                                |
@@ -150,7 +151,7 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 未指定目录的会话默认使用 Tellrun 服务启动目录，规范化真实路径后随消息一起保存，用户可直接发送任务；systemd 服务的启动目录默认为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录或 `/new`，目录变化会开始新会话。后续多会话模型再引入独立 conversation_id，不增加目录白名单。
 
-当前全局最多一个未结束任务，由单实例写入与状态校验约束；忙碌时新消息明确提示未提交。待执行队列留到后续，建议上限 20。未来开启并行时，必须增加按可写工作区的互斥；有多个 thread 并不意味着可以同时修改同一目录。
+当前全局最多一个未结束任务，由单实例写入与状态校验约束。同一聊天的新文本直接补充到当前任务：queued 时合并首条输入；dispatching 时持久化保存；running 时通过独立输入循环调用 turn/steer，每 50 毫秒检查一次。补充输入按接收顺序提交，只等待各条 RPC 确认，不等待当前任务结束，也不阻塞入站控制命令。不同聊天和正在停止的任务不能追加输入。独立任务队列留到后续；未来开启并行时，必须增加按可写工作区的互斥。
 
 ## 会话与数据模型
 
@@ -162,7 +163,7 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 | -------------- | -------------------------------------------------------------- |
 | channels       | 聊天来源、当前工作目录、Codex 会话 ID 和暂停状态               |
 | inboundUpdates | 聊天与事件标识，用于重投去重，不保存命令正文                   |
-| tasks          | 所属聊天、目录和会话快照、输入、状态与最终结果                 |
+| tasks          | 所属聊天、目录和会话快照、输入、补充输入及其提交状态、任务状态与最终结果 |
 | outbox         | 待发送回复、所属聊天、重试次数和时间；发送成功或永久拒绝后移除 |
 
 一次业务变更先在内存副本中完成，再写入同目录临时文件；文件刷盘后通过 rename 原子替换，POSIX 系统同时刷新目录。嵌套的存储操作合并成一次保存，因此消息去重标识、任务和必要回复不会分别落盘。业务处理失败恢复内存快照，文件写入失败后停止后续写入并退出服务。
@@ -173,11 +174,13 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 ## Codex 协议与生命周期
 
-Node.js 使用内置 child_process.spawn 启动 codex app-server，参数以数组传入且 shell 为 false。使用 stdin/stdout 的 JSONL 承载双向 RPC，线上消息省略 `jsonrpc` 字段；stderr 只提取必要诊断，不把可能含正文或凭据的原始内容直接转存。stdout 不能混入应用日志。
+每次任务先检查 `CODEX_HOME`（默认 `~/.codex`）下的 `app-server-control/app-server-control.sock`，通过 ws 建立 Unix socket 上的 WebSocket 连接，握手最多等待 5 秒。没有套接字、连接失败或运行在 Windows 时，使用内置 child_process.spawn 启动 codex app-server，参数以数组传入且 shell 为 false。两种传输共用双向 RPC 处理：WebSocket 一帧一条消息，stdin/stdout 使用 JSONL，均省略 `jsonrpc` 字段。独立进程 stderr 不转存，stdout 不能混入应用日志。[传输协议](https://learn.chatgpt.com/docs/app-server#protocol)
 
-每个连接先发送 `initialize` 并等待响应，再发送 `initialized` 通知，之后才能创建或恢复 thread；普通消息启动 turn；中断通过 turn/interrupt 请求。只根据 turn/completed 的实际状态判定完成、失败或中断。请求超时、进程退出和没有收到事件，都不等价于成功。[协议与生命周期](https://learn.chatgpt.com/docs/app-server)
+每个连接先发送 `initialize` 并等待响应，再发送 `initialized` 通知，之后才能创建或恢复 thread；空闲时的普通消息启动 turn，执行中的补充消息使用 turn/steer，并传入当前 threadId 与 expectedTurnId、校验返回的 turnId；中断通过 turn/interrupt 请求。只根据 turn/completed 的实际状态判定完成、失败或中断。请求超时、进程退出和没有收到事件，都不等价于成功。[协议与生命周期](https://learn.chatgpt.com/docs/app-server)
 
-当前每个任务创建独立 app-server 子进程，按持久化 thread ID 恢复上下文。RPC、事件和待响应请求随该进程隔离；核对 threadId 与 turnId，允许事件早于 turn/start 响应。使用 Codex 0.165.0 的 generate-ts 输出核对消费字段，并在运行时用 Zod 校验；没有将整套生成类型复制进仓库。返回结果前等待进程退出；POSIX 下同时清理受管理进程组。
+Codex 后台会在最后一个订阅者断开且会话无活动 30 分钟后才卸载，因此客户端关闭后仍可能持有空闲会话的写锁。Tellrun 复用该后台连接；恢复前通过 `thread/read` 检查状态，恢复后再次确认空闲，再提交任务。对其他进程仍持有写锁的情况保留原 thread ID 并提示连接问题，不自动创建新会话或重跑任务，不转发原始错误内容。[会话卸载规则](https://learn.chatgpt.com/docs/app-server#unsubscribe-from-a-loaded-thread)
+
+RPC 和待响应请求按每次连接隔离，按持久化 thread ID 恢复上下文。早于 turn/start 响应的事件先暂存，取得本次 turn ID 后再按 threadId 与 turnId 处理；其他会话或轮次的交互请求不代为拒绝。共享后台中的停止请求只针对本次 turn，连接中断且无法确认执行结果时仍记为 interrupted。返回结果前关闭自己的连接；仅独立进程模式等待子进程退出并清理进程组，不停止共享后台。协议字段由 Codex 0.165.0 的 generate-ts 输出核对，并用 Zod 校验。
 
 | 协议工作       | 首版要求                                                                                                                 |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------ |
@@ -239,6 +242,8 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 一致性目标是：同一入站事件只创建一个任务，明确的终态只生效一次，结果不确定的执行不自动重放。Telegram、状态文件和 Codex 的变更无法一次原子提交，因此不宣称端到端 exactly-once。
 
 尤其在“Codex 已收到 turn/start，但 Tellrun 尚未收到响应”这一窗口崩溃时，必须保留不确定状态，不能因为没拿到响应就自动重发。持久化的 dispatching 状态用于识别这种情况，turnId 无需跨进程保存。
+
+补充输入保存在任务的 inputs 中，旧状态文件缺少该字段时默认为空数组。与入站事件一起保存 pending，发送前先保存 sending，收到接收确认后保存 accepted，失败保存 failed 并提示。重启或任务结束时，对仍为 pending 或 sending 的输入分别提示尚未提交或结果待确认，不自动重放；成功补充不生成固定回执。补充请求被拒绝不改变原任务结果，通信故障仍按连接中断处理。
 
 ## Telegram 输出与故障恢复
 
@@ -310,4 +315,4 @@ Claude 等 Agent 的新增工作集中在会话创建或恢复、任务输入、
 | 控制响应 | Codex 持续运行或等待审批时，状态查询与停止仍可用                           |
 | 端到端   | 两个临时工作目录、多轮对话、拒绝审批、停止、重启后恢复、连续运行           |
 
-已在 macOS、Node.js 24.22.1、Codex CLI 0.165.0 的临时工作区验证真实回复、跨进程会话恢复和 turn/interrupt；临时文件存储验证覆盖单实例锁、入站去重、忙碌时控制、会话保存与中断恢复。未向真实 Telegram 聊天发送验证消息，也未完成目标 Linux 的完整 M0 验证。
+已在 macOS、Node.js 24.22.1、Codex CLI 0.165.0 的临时工作区验证真实回复、跨进程会话恢复和 turn/interrupt；临时文件存储验证覆盖单实例锁、入站去重、忙碌时控制、会话保存与中断恢复。stdio 与共享 WebSocket 的协议模拟验证覆盖执行中补充、连续输入、轮次隔离、慢请求期间停止、提交拒绝、终态竞态、断线与重启不重放。未向真实 Telegram 聊天发送验证消息，也未完成目标 Linux 的完整 M0 验证。

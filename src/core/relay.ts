@@ -33,7 +33,7 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun 已连接。\n/cwd 绝对路径 — 切换工作目录（可选）\n普通文本 — 交给 Codex，后续消息沿用当前会话\n/new — 新建会话，保留目录\n/status — 查看状态\n/stop — 停止任务并暂停\n/resume — 确认后恢复接收任务\n/last — 查看最近结果\n当前一次处理一个任务；审批与结构化提问尚未接入，遇到此类请求会停止并提示。";
+              return "Tellrun 已连接。\n/cwd 绝对路径 — 切换工作目录（可选）\n普通文本 — 交给 Codex，执行中新消息直接补充到当前任务\n/new — 新建会话，保留目录\n/status — 查看状态\n/stop — 停止任务并暂停\n/resume — 确认后恢复接收任务\n/last — 查看最近结果\n当前一次处理一个任务，后续消息沿用当前会话；审批与结构化提问尚未接入，遇到此类请求会停止并提示。";
             case "status":
               return `服务：已连接\n${options.agent.name}：${options.agent.version}\n工作目录：${channel.cwd}\n会话：${channel.sessionId ? "已有上下文" : "新会话"}\n接收任务：${channel.paused ? "已暂停，使用 /resume 恢复" : "已启用"}\n任务：${task ? `#${task.id} ${statuses[task.status]}` : "空闲"}`;
             case "cwd": {
@@ -81,9 +81,14 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
           return "当前仅支持文本消息，请使用 /help 查看可用操作。";
         if (channel.paused)
           return "当前已暂停。请检查上次任务结果，确认后发送 /resume，再提交新消息。";
-        if (task)
-          return `任务 #${task.id} 仍在处理，本条消息未提交。可用 /status 查看状态或 /stop 停止。`;
         if (!message.content.text.trim()) return "请输入任务内容。";
+        if (task) {
+          if (task.channelId !== channel.id)
+            return `任务 #${task.id} 正在其他聊天执行，本条消息未提交。`;
+          if (task.status === "cancelling") return "当前任务正在停止，请等待最终状态后再提交。";
+          options.store.appendTaskInput(task.id, message.content.text);
+          return;
+        }
         options.store.createTask(channel, message.content.text);
       });
     },
@@ -105,17 +110,45 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
           });
           continue;
         }
-        try {
-          const result = await options.agent.run({
+        let finished = false;
+        const running = options.agent
+          .run({
             cwd: task.cwd,
             prompt: task.prompt,
             sessionId: task.sessionId,
             onSession: (id) => options.store.recordSession(task.id, id),
             onStarted: () => options.store.markRunning(task.id),
+          })
+          .finally(() => {
+            finished = true;
           });
+        /** 补充输入独立于入站处理和任务完成等待，慢 RPC 不阻塞 /status 与 /stop。 */
+        const steering = (async () => {
+          while (!finished && !stopping) {
+            const input = options.store.claimTaskInput(task.id);
+            if (!input) {
+              await setTimeout(50);
+              continue;
+            }
+            let error: string | undefined;
+            try {
+              await options.agent.steer(input.text);
+            } catch (cause) {
+              error =
+                cause instanceof Error && cause.message.startsWith("Codex ")
+                  ? cause.message
+                  : "无法确认是否已提交，未自动重试。请检查会话后重新发送需要继续的内容。";
+            }
+            options.store.finishTaskInput(task.id, input.index, error);
+          }
+        })();
+        try {
+          const [result] = await Promise.all([running, steering]);
           options.store.finishTask(task.id, result);
           options.logger.info({ taskId: task.id, status: result.status }, "Agent 任务已结束");
         } catch (error) {
+          options.agent.stop();
+          await Promise.allSettled([running, steering]);
           options.store.finishTask(task.id, {
             status: "interrupted",
             text: "运行环境异常，服务将停止。请检查工作目录与本地进程后再恢复。",

@@ -41,6 +41,15 @@ export const stateSchema = z
         cwd: z.string(),
         sessionId: z.string().nullable(),
         prompt: z.string(),
+        /** 旧状态文件没有补充输入；发送中记录用于重启后避免不确定重放。 */
+        inputs: z
+          .array(
+            z.strictObject({
+              text: z.string(),
+              status: z.enum(["pending", "sending", "accepted", "failed"]),
+            }),
+          )
+          .default([]),
         status: z.enum([
           "queued",
           "dispatching",

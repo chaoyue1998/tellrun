@@ -33,6 +33,8 @@ export interface Agent {
     onSession: (sessionId: string) => void;
     onStarted: () => void;
   }): Promise<AgentResult>;
+  /** 向当前轮次补充输入，只等待接收确认，不等待任务结束。 */
+  steer(prompt: string): Promise<void>;
   stop(): void;
 }
 
