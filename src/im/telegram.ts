@@ -73,7 +73,6 @@ export function createTelegramConnection(
         userId: String(ctx.from.id),
       },
       eventId: String(ctx.update.update_id),
-      messageId: String(ctx.message.message_id),
       content: command
         ? {
             type: "command",
@@ -84,23 +83,6 @@ export function createTelegramConnection(
           ? { type: "text", text: ctx.message.text }
           : { type: "unsupported" },
     });
-  });
-
-  bot.on("callback_query:data", async (ctx) => {
-    try {
-      await ctx.answerCallbackQuery({ text: "此操作尚不可用或已经失效。" });
-    } catch (error) {
-      /** 过期回调无法再次应答，不应阻断后续消息；其他错误仍向上传递。 */
-      if (
-        error instanceof GrammyError &&
-        error.error_code === 400 &&
-        /query is too old|query id is invalid/i.test(error.description)
-      ) {
-        logger.warn({ updateId: ctx.update.update_id }, "Telegram 按钮回调已过期");
-        return;
-      }
-      throw error;
-    }
   });
 
   /** 原始网络错误可能带 Token，只记录类别和错误码。 */
@@ -162,7 +144,7 @@ export function createTelegramConnection(
               for (const update of await bot.api.getUpdates({
                 offset,
                 timeout: 30,
-                allowed_updates: ["message", "callback_query"],
+                allowed_updates: ["message"],
               })) {
                 if (polling.signal.aborted) return;
                 await bot.handleUpdate(update);
@@ -179,7 +161,7 @@ export function createTelegramConnection(
               }
               try {
                 await bot.api.sendMessage(reply.chatId, reply.text);
-                store.sentReply(reply.id);
+                store.removeReply(reply.id);
               } catch (error) {
                 if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
                 if (error instanceof GrammyError && error.error_code === 401) throw error;
@@ -188,17 +170,18 @@ export function createTelegramConnection(
                   error.error_code >= 400 &&
                   error.error_code < 500 &&
                   error.error_code !== 429;
-                store.retryReply(
-                  reply.id,
-                  error instanceof GrammyError && error.parameters.retry_after !== undefined
-                    ? error.parameters.retry_after
-                    : Math.min(60, 2 ** Math.min(reply.attempts, 6)),
-                  permanent,
-                );
+                if (permanent) store.removeReply(reply.id);
+                else
+                  store.retryReply(
+                    reply.id,
+                    error instanceof GrammyError && error.parameters.retry_after !== undefined
+                      ? error.parameters.retry_after
+                      : Math.min(60, 2 ** Math.min(reply.attempts, 6)),
+                  );
                 logger.warn(
                   { outboxId: reply.id, permanent, errorType: error.name },
                   permanent
-                    ? "Telegram 拒绝发送回复，结果仍保留在本地"
+                    ? "Telegram 永久拒绝发送，回复已移出队列；任务结果仍保留"
                     : "Telegram 回复发送失败，已保留并安排重试",
                 );
               }

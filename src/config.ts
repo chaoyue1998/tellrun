@@ -6,7 +6,7 @@ import { z } from "zod";
 /** CLI 与后台服务共用的用户数据目录，不依赖当前工作目录。 */
 export const appDirectory = join(homedir(), ".agent-relay");
 
-/** 配置向导与运行入口共用校验；只保存后台运行需要的环境。 */
+/** 配置向导与运行入口共用校验，不保存终端环境。 */
 export const configSchema = z.object({
   telegram: z.object({
     token: z
@@ -23,6 +23,7 @@ export const configSchema = z.object({
           .transform(Number),
       ])
       .pipe(z.number().int().positive().max(Number.MAX_SAFE_INTEGER)),
+    /** 可选代理由用户自行配置；未设置时继承运行环境，空字符串表示直连。 */
     proxyUrl: z
       .string()
       .trim()
@@ -30,20 +31,6 @@ export const configSchema = z.object({
       .optional(),
   }),
   codexPath: z.string().trim().min(1).default("codex"),
-  environment: z
-    .object({
-      PATH: z.string().optional(),
-      CODEX_HOME: z.string().optional(),
-      HTTP_PROXY: z.string().optional(),
-      HTTPS_PROXY: z.string().optional(),
-      ALL_PROXY: z.string().optional(),
-      NO_PROXY: z.string().optional(),
-      http_proxy: z.string().optional(),
-      https_proxy: z.string().optional(),
-      all_proxy: z.string().optional(),
-      no_proxy: z.string().optional(),
-    })
-    .default({}),
 });
 
 /** 读取用户配置，允许环境变量覆盖 Telegram 与 Codex 入口；诊断不包含配置值。 */

@@ -30,8 +30,6 @@ process.once("SIGTERM", stop);
 
 try {
   const config = loadConfig();
-  /** 恢复向导保存的执行路径与代理，后台进程无需依赖登录终端。 */
-  Object.assign(process.env, config.environment);
   phase = "状态加载";
   store = openStore();
   phase = "Agent 可用性检查";

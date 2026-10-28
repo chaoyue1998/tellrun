@@ -14,7 +14,7 @@ import { dirname, join } from "node:path";
 import { appDirectory } from "../config.js";
 import type { AgentResult, ChannelIdentity, IncomingMessage } from "../core/types.js";
 import { writeJson } from "./file.js";
-import { type State, stateSchema } from "./schema.js";
+import { activeTaskStatuses, type State, stateSchema } from "./schema.js";
 
 /** 打开文件状态并取得单实例锁；所有业务写入统一替换 state.json。 */
 export function openStore(path = join(appDirectory, "state.json")) {
@@ -133,22 +133,13 @@ export function openStore(path = join(appDirectory, "state.json")) {
     }
 
     /** 回复按 Unicode 字符拆分，和触发它的状态变更一起保存。 */
-    function enqueueReply(
-      channelId: number,
-      key: string,
-      text: string,
-      taskId: number | null = null,
-    ) {
+    function enqueueReply(channelId: number, text: string) {
       const parts = text.match(/[\s\S]{1,2000}/gu) ?? ["（没有文本回复）"];
       for (const [index, part] of parts.entries()) {
-        if (state.outbox.some((reply) => reply.key === `${key}:${index}`)) continue;
         state.outbox.push({
           id: state.outbox.reduce((max, item) => Math.max(max, item.id), 0) + 1,
           channelId,
-          taskId,
-          key: `${key}:${index}`,
           text: parts.length > 1 ? `（${index + 1}/${parts.length}）\n${part}` : part,
-          status: "pending",
           attempts: 0,
           retryAt: Date.now(),
         });
@@ -157,18 +148,18 @@ export function openStore(path = join(appDirectory, "state.json")) {
 
     /** 终态与最终回复一起保存，迟到事件不能覆盖已完成结果。 */
     function finishTask(id: number, result: AgentResult) {
-      if (!state.tasks.some((task) => task.id === id && task.finishedAt === null)) return;
+      if (!state.tasks.some((task) => task.id === id && activeTaskStatuses.has(task.status)))
+        return;
       update(() => {
         const task = state.tasks.find((task) => task.id === id);
         if (!task) throw new Error("任务记录不存在");
-        Object.assign(task, { status: result.status, result: result.text, finishedAt: Date.now() });
+        Object.assign(task, { status: result.status, result: result.text });
         if (result.status === "interrupted") {
           const channel = state.channels.find((channel) => channel.id === task.channelId);
           if (channel) channel.paused = true;
         }
         enqueueReply(
           task.channelId,
-          `task:${id}`,
           `任务 #${id} ${
             {
               completed: "已完成",
@@ -177,17 +168,13 @@ export function openStore(path = join(appDirectory, "state.json")) {
               interrupted: "执行状态待确认",
             }[result.status]
           }\n${result.text}`,
-          id,
         );
       });
     }
 
     return {
       /** 去重标识、任务和回执合并保存，成功返回后才能确认入站事件。 */
-      accept(
-        message: IncomingMessage,
-        handle: (channel: State["channels"][number], inboundId: number) => string,
-      ) {
+      accept(message: IncomingMessage, handle: (channel: State["channels"][number]) => string) {
         const existing = state.channels.find(
           (channel) =>
             channel.platform === message.channel.platform &&
@@ -210,30 +197,22 @@ export function openStore(path = join(appDirectory, "state.json")) {
               cwd: null,
               sessionId: null,
               paused: false,
-              createdAt: Date.now(),
-              updatedAt: Date.now(),
             };
             state.channels.push(channel);
           }
           channel.userId = message.channel.userId;
-          channel.updatedAt = Date.now();
-          const inboundId =
-            state.inboundUpdates.reduce((max, item) => Math.max(max, item.id), 0) + 1;
           state.inboundUpdates.push({
-            id: inboundId,
             channelId: channel.id,
             eventId: message.eventId,
-            messageId: message.messageId,
-            createdAt: Date.now(),
           });
-          enqueueReply(channel.id, `inbound:${inboundId}`, handle(channel, inboundId));
+          enqueueReply(channel.id, handle(channel));
         });
       },
       /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
       setSession(channelId: number, cwd: string | null) {
         update(() => {
           const channel = state.channels.find((channel) => channel.id === channelId);
-          if (channel) Object.assign(channel, { cwd, sessionId: null, updatedAt: Date.now() });
+          if (channel) Object.assign(channel, { cwd, sessionId: null });
         });
       },
       /** 暂停状态跨重启保留，恢复须由用户明确触发。 */
@@ -245,30 +224,26 @@ export function openStore(path = join(appDirectory, "state.json")) {
       },
       /** 返回快照，避免调用方直接修改内存中的持久状态。 */
       activeTask() {
-        return structuredClone(state.tasks.find((task) => task.finishedAt === null));
+        return structuredClone(state.tasks.find((task) => activeTaskStatuses.has(task.status)));
       },
       /** 最近结果按聊天隔离，供 /last 再次查看。 */
       lastTask(channelId: number) {
         return structuredClone(state.tasks.findLast((task) => task.channelId === channelId));
       },
       /** 接收时固定目录、会话与输入，限制全局只有一个未结束任务。 */
-      createTask(channel: State["channels"][number], inboundId: number, prompt: string) {
+      createTask(channel: State["channels"][number], prompt: string) {
         return update(() => {
           if (!channel.cwd) throw new Error("创建任务前必须指定工作目录");
-          if (state.tasks.some((task) => task.finishedAt === null))
+          if (state.tasks.some((task) => activeTaskStatuses.has(task.status)))
             throw new Error("已有任务正在执行");
           const task: State["tasks"][number] = {
             id: state.tasks.reduce((max, item) => Math.max(max, item.id), 0) + 1,
             channelId: channel.id,
-            inboundId,
             cwd: channel.cwd,
             sessionId: channel.sessionId,
-            runId: null,
             prompt,
             status: "queued",
             result: null,
-            createdAt: Date.now(),
-            finishedAt: null,
           };
           state.tasks.push(task);
           return task;
@@ -297,20 +272,20 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 新建会话后立即保存关联，后续消息与重启均可续聊。 */
       recordSession(id: number, sessionId: string) {
         update(() => {
-          const task = state.tasks.find((task) => task.id === id && task.finishedAt === null);
+          const task = state.tasks.find(
+            (task) => task.id === id && activeTaskStatuses.has(task.status),
+          );
           if (!task) return;
           task.sessionId = sessionId;
           const channel = state.channels.find((channel) => channel.id === task.channelId);
           if (channel) channel.sessionId = sessionId;
         });
       },
-      /** 记录执行标识，迟到通知不能撤销停止请求。 */
-      recordRun(id: number, runId: string) {
+      /** 确认开始执行；迟到通知不能撤销停止请求。 */
+      markRunning(id: number) {
         update(() => {
-          const task = state.tasks.find((task) => task.id === id && task.finishedAt === null);
-          if (!task) return;
-          task.runId = runId;
-          if (task.status === "dispatching") task.status = "running";
+          const task = state.tasks.find((task) => task.id === id);
+          if (task?.status === "dispatching") task.status = "running";
         });
       },
       /** 未派发任务直接取消；其余等待 Agent 确认终态。 */
@@ -319,7 +294,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
           finishTask(id, { status: "cancelled", text: "任务尚未开始，已取消。" });
         } else
           update(() => {
-            const task = state.tasks.find((task) => task.id === id && task.finishedAt === null);
+            const task = state.tasks.find(
+              (task) => task.id === id && activeTaskStatuses.has(task.status),
+            );
             if (task) task.status = "cancelling";
           });
       },
@@ -327,7 +304,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 结果不确定的任务暂停并通知用户，不自动重新派发。 */
       recoverTasks() {
         for (const task of state.tasks.filter(
-          (task) => task.finishedAt === null && task.status !== "queued",
+          (task) => activeTaskStatuses.has(task.status) && task.status !== "queued",
         )) {
           finishTask(task.id, {
             status: "interrupted",
@@ -338,7 +315,6 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 按机器人与授权用户取最早回复，重试保持发送顺序。 */
       pendingReply(accountId: string, userId: string) {
         for (const reply of state.outbox) {
-          if (reply.status !== "pending") continue;
           const channel = state.channels.find((channel) => channel.id === reply.channelId);
           if (
             channel?.platform === "telegram" &&
@@ -351,19 +327,18 @@ export function openStore(path = join(appDirectory, "state.json")) {
           }
         }
       },
-      /** 平台确认发送后删除待发送内容，任务结果仍保留。 */
-      sentReply(id: number) {
+      /** 发送成功或永久拒绝后移出发送队列，任务结果仍保留。 */
+      removeReply(id: number) {
         update(() => {
           state.outbox = state.outbox.filter((reply) => reply.id !== id);
         });
       },
       /** 发送失败只更新回复的重试信息，不影响任务执行状态。 */
-      retryReply(id: number, seconds: number, permanent = false) {
+      retryReply(id: number, seconds: number) {
         update(() => {
           const reply = state.outbox.find((reply) => reply.id === id);
           if (reply)
             Object.assign(reply, {
-              status: permanent ? "failed" : "pending",
               attempts: reply.attempts + 1,
               retryAt: Date.now() + seconds * 1000,
             });
@@ -381,5 +356,5 @@ export function openStore(path = join(appDirectory, "state.json")) {
   }
 }
 
-/** 对外保留现有存储接口，文件格式与写入细节留在本模块。 */
+/** 业务层使用的存储接口，文件格式与写入细节留在本模块。 */
 export type Store = ReturnType<typeof openStore>;

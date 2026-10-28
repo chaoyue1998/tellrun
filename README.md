@@ -70,7 +70,8 @@ src/
 
 新增 IM 时，在 `im/` 添加连接器，把授权后的消息转换为 `IncomingMessage` 并调用核心入口。新增 Agent 时，在 `agents/` 实现 `Agent` 的执行和停止接口；审批接口随实际交互能力扩展。核心层不使用 grammY 或 Codex 协议类型，不引入插件注册器、基类或依赖注入框架。
 
-`config.json` 保存 Telegram 凭据、本人 ID、Codex 路径和代理等运行配置。`state.json` 保存聊天与当前会话、工作目录、任务输入与最终结果、入站去重标识和未成功发送的回复；成功发送后移除回复副本。Codex 自己管理完整会话历史，Relay 不保存流式文本、思考过程、工具原始输出或 RPC 等待状态。
+`config.json` 保存 Telegram 凭据、本人 ID、Codex 路径和可选的 `telegram.proxyUrl`。
+`state.json` 保存聊天与当前会话、工作目录、任务输入与最终结果、入站去重标识和待发送回复；发送成功或被永久拒绝后移除回复副本。Codex 自己管理完整会话历史，Relay 不保存流式文本、思考过程、工具原始输出或 RPC 等待状态。
 
 JSON 更新先写同目录临时文件，刷盘后原子替换。`state.json.lock/` 是临时单实例锁目录；正常退出清理，崩溃后检查原进程已退出再回收。文件损坏或写入失败会停止服务，不自动覆盖成空状态。
 
@@ -89,7 +90,7 @@ cp .env.example .env
 
 当前只有以上两项必填配置，也可运行 `node dist/cli.js setup` 写入用户配置。配置与状态分别放在 `~/.agent-relay/config.json`、`~/.agent-relay/state.json`，开发运行与全局安装使用同一目录和单实例锁。Codex 优先使用 `CODEX_PATH`，其次使用配置文件路径，均未设置时通过 PATH 查找。日志级别固定为 `info`。无需项目清单；在 Telegram 中用 `/cwd` 指定目录，不设置目录白名单。
 
-Telegram 代理优先使用非空 `TELEGRAM_PROXY_URL`，其次使用配置文件中的 `telegram.proxyUrl`；配置文件中空字符串表示明确直连。两处均未指定时，读取 `HTTPS_PROXY` / `https_proxy`；使用代理时遵循 `NO_PROXY` / `no_proxy`（小写优先）。`setup` 无代理配置步骤，保存当前终端的 PATH、CODEX_HOME 和代理环境，后台进程会恢复这些设置；重新运行 `setup` 会清除旧的 `telegram.proxyUrl`，改为默认继承终端代理。代理 URL 不写入服务定义或命令行参数。
+`telegram.proxyUrl` 为可选配置，由用户按需填写。Telegram 代理优先使用非空 `TELEGRAM_PROXY_URL`，其次使用配置文件中的 `telegram.proxyUrl`；配置文件中空字符串表示明确直连。两处均未指定时，读取运行环境的 `HTTPS_PROXY` / `https_proxy`；使用代理时遵循 `NO_PROXY` / `no_proxy`（小写优先）。代理 URL 不写入服务定义或命令行参数。
 
 ```sh
 npm run dev
@@ -110,19 +111,19 @@ Codex 沿用本机登录、模型配置和终端代理；默认使用工作区�
 
 入站标识、任务和回执作为同一份快照保存，重复 Update 不会再次执行。重启会保留尚未派发的任务；执行中断且结果不确定的任务不会自动重跑，需检查后 `/resume`。关停等待 Agent 结束后释放状态锁。
 
-普通 Telegram 请求连同重试最多等待 15 秒，长轮询最多 40 秒。发送失败会保留 outbox 并退避重试，429 遵守服务端等待时间；永久拒绝会记录发送失败，结果仍可用 `/last` 查看。发送成功但响应丢失时可能重复通知，但不会重跑任务。轮询或存储故障会停止服务，待人工或进程管理器重启。
+普通 Telegram 请求连同重试最多等待 15 秒，长轮询最多 40 秒。可恢复的发送失败会保留 outbox 并退避重试，429 遵守服务端等待时间；永久拒绝会记录日志并将回复移出队列，任务结果仍可用 `/last` 查看。发送成功但响应丢失时可能重复通知，但不会重跑任务。轮询或存储故障会停止服务，待人工或进程管理器重启。
 
 开发服务本身时使用 `npm run dev`。让 Agent 修改代码时可用 `npm run build && npm start`，避免源码监听重启打断正在执行的任务。
 
 ## 开发命令
 
-| 命令 | 用途 |
-| --- | --- |
-| `npm run dev` | 监听源码并重启 |
-| `npm run check` | 格式、静态检查与类型检查 |
-| `npm run format` | 格式化并应用安全修复 |
-| `npm run build` | 编译到 `dist/` |
-| `npm start` | 运行编译产物 |
+| 命令             | 用途                     |
+| ---------------- | ------------------------ |
+| `npm run dev`    | 监听源码并重启           |
+| `npm run check`  | 格式、静态检查与类型检查 |
+| `npm run format` | 格式化并应用安全修复     |
+| `npm run build`  | 编译到 `dist/`           |
+| `npm start`      | 运行编译产物             |
 
 上述源码开发命令从项目根目录运行，用户配置和运行状态始终保存在用户目录。
 

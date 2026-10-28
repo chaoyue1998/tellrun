@@ -25,7 +25,7 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
     /** 返回前保存消息和回复；重复事件直接忽略，不重新执行控制或任务。 */
     async handleMessage(message: IncomingMessage) {
       if (stopping) throw new Error("服务正在停止，消息尚未接收");
-      options.store.accept(message, (channel, inboundId) => {
+      options.store.accept(message, (channel) => {
         const task = options.store.activeTask();
         if (message.content.type === "command") {
           switch (message.content.name) {
@@ -83,7 +83,7 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
         if (task)
           return `任务 #${task.id} 仍在处理，本条消息未提交。可用 /status 查看状态或 /stop 停止。`;
         if (!message.content.text.trim()) return "请输入任务内容。";
-        return `已接收任务 #${options.store.createTask(channel, inboundId, message.content.text).id}\n工作目录：${channel.cwd}\n可用 /status 查看状态或 /stop 停止。`;
+        return `已接收任务 #${options.store.createTask(channel, message.content.text).id}\n工作目录：${channel.cwd}\n可用 /status 查看状态或 /stop 停止。`;
       });
     },
     /** 领取任务后再次检查目录；运行结果与最终回复在同一个快照中保存。 */
@@ -110,7 +110,7 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
             prompt: task.prompt,
             sessionId: task.sessionId,
             onSession: (id) => options.store.recordSession(task.id, id),
-            onStarted: (id) => options.store.recordRun(task.id, id),
+            onStarted: () => options.store.markRunning(task.id),
           });
           options.store.finishTask(task.id, result);
           options.logger.info({ taskId: task.id, status: result.status }, "Agent 任务已结束");

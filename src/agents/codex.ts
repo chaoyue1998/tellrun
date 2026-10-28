@@ -10,13 +10,10 @@ const turnSchema = z.object({
 });
 
 /** 每次任务使用独立 app-server 连接，续聊使用已持久化的 thread ID。 */
-export async function createCodexAgent(
-  command = "codex",
-  environment: NodeJS.ProcessEnv = process.env,
-): Promise<Agent> {
+export async function createCodexAgent(command = "codex"): Promise<Agent> {
   /** 保留运行时、认证和代理环境，不向子进程传入 Telegram 凭据。 */
   const env = Object.fromEntries(
-    Object.entries(environment).filter(([key]) =>
+    Object.entries(process.env).filter(([key]) =>
       /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_.*|TERM|TMPDIR|TEMP|TMP|SYSTEMROOT|WINDIR|CODEX_HOME|OPENAI_API_KEY|OPENAI_BASE_URL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR)$/.test(
         key,
       ),
@@ -126,7 +123,7 @@ export async function createCodexAgent(
         if (runId && runId !== id) return false;
         if (!runId) {
           runId = id;
-          input.onStarted(id);
+          input.onStarted();
         }
         return true;
       }
@@ -139,7 +136,7 @@ export async function createCodexAgent(
             () => fail("停止请求未得到确认，已结束 Codex 连接。请检查工作目录后发送 /resume。"),
             5_000,
           );
-          if (sessionId && runId && !settled) {
+          if (sessionId && runId) {
             void request("turn/interrupt", { threadId: sessionId, turnId: runId }).catch(() =>
               terminate("SIGTERM"),
             );

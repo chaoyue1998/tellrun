@@ -10,7 +10,6 @@ export interface ChannelIdentity {
 export interface IncomingMessage {
   channel: ChannelIdentity;
   eventId: string;
-  messageId: string;
   content:
     | { type: "command"; name: string; args: string }
     | { type: "text"; text: string }
@@ -32,7 +31,7 @@ export interface Agent {
     prompt: string;
     sessionId: string | null;
     onSession: (sessionId: string) => void;
-    onStarted: (runId: string) => void;
+    onStarted: () => void;
   }): Promise<AgentResult>;
   stop(): void;
 }
