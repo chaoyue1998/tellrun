@@ -65,7 +65,7 @@ Codex app-server 提供线程、轮次、执行事件与审批交互；官方把
 | 包管理 | npm | 使用 Node.js 自带版本 | 提交 `package-lock.json`，使用 `npm ci` 安装 |
 | 语言 | TypeScript | 7.0.2 | strict + NodeNext；类型检查与构建 |
 | CLI | commander | 15.0.0 | 子命令、参数与帮助 |
-| 配置向导 | @clack/prompts | 1.8.1 | 隐藏凭据输入、字段校验与取消处理 |
+| 配置向导 | @clack/prompts | 1.8.1 | 文本输入、字段校验与取消处理 |
 | Telegram | grammy | 1.46.0 | 消息、命令、InlineKeyboard、回调、长轮询 |
 | Telegram 重试 | @grammyjs/auto-retry | 2.0.2 | 429、5xx 最多重试两次；网络错误上抛；整次调用另设超时 |
 | 数据校验 | zod | 4.6.7 | 配置及应用边界数据校验 |
@@ -88,7 +88,7 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 
 | 命令 | 目标行为 |
 | --- | --- |
-| agent-relay setup | 交互填写 Bot Token、本人 ID、可选代理，检查 Codex 路径与运行环境；保存后可启动后台服务并设置开机自启 |
+| agent-relay setup | 交互填写 Bot Token、本人 ID，自动沿用当前终端代理，检查 Codex 路径与运行环境；保存后可启动后台服务并设置开机自启 |
 | agent-relay start | 检查配置、创建或更新本用户的服务定义并启动；重复调用不创建第二个实例；--enable 启用开机自启 |
 | agent-relay stop | 停止后台服务及受管理子进程，等待实际结束后报告结果 |
 | agent-relay restart | 完成停止后重新启动；用于配置变更或 npm 升级后加载新版本 |
@@ -97,7 +97,7 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 | agent-relay run | 前台运行服务，供 systemd 和本地诊断使用；不进行交互配置 |
 | agent-relay service uninstall | 停用并移除本应用的用户服务，保留配置和状态文件；之后可通过 npm 卸载程序包 |
 
-`setup` 由用户显式执行，npm 安装脚本仅承担包安装所需工作。交互取消时保留原配置，Token 使用隐藏输入；校验成功后再原子写入配置。CLI 的帮助、版本和状态命令不加载会加载运行状态或启动轮询的业务入口。
+`setup` 由用户显式执行，npm 安装脚本仅承担包安装所需工作。交互取消时保留原配置，Token 使用明文输入，已有配置时留空保留原值；校验成功后再原子写入配置。CLI 的帮助、版本和状态命令不加载会加载运行状态或启动轮询的业务入口。
 
 包已移除 `private: true`，通过 `bin` 暴露带 Node shebang 的 CLI；`files` 白名单包含编译产物和文档，`prepack` 在打包前完成构建。安装用户不需要源码仓库、TypeScript 或 tsx。用户配置与数据统一定位到当前用户的 `~/.agent-relay/`，任何命令均可从任意目录执行。[npm 包字段](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
 
@@ -260,7 +260,7 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 | --- | --- |
 | 用户配置 | `~/.agent-relay/config.json`；目录权限 0700，文件权限 0600 |
 | Telegram Bot Token 与本人 ID | 由 setup 写入配置，保留环境变量覆盖能力；不依赖可修改的 username |
-| Telegram 代理 | 保存明确的代理配置；后台进程不依赖启动终端的临时环境。向导可提示采用当前终端代理 |
+| Telegram 代理 | setup 自动保存当前终端代理环境，后台进程启动时恢复；向导无需单独填写代理 |
 | 工作目录 | 后续由任务或会话指定，不设置目录白名单 |
 | Codex 命令 | 配置时解析可执行文件的绝对路径；与后台服务使用同一 OS 用户，沿用其认证与配置 |
 | 后台运行环境 | config.json 的 environment 保存向导执行时的 PATH、CODEX_HOME 和 HTTP/HTTPS/ALL/NO_PROXY（含小写）；不自动保存 API Key |

@@ -48,19 +48,11 @@ program
         p.log.warn("现有配置无法加载，需要重新填写；完成前保留原文件。");
       }
     }
-    p.log.info(
-      "配置保存到 ~/.agent-relay/config.json；同时保存当前终端的 PATH、CODEX_HOME 和代理环境，供后台运行使用。",
-    );
-    const proxy =
-      current?.telegram.proxyUrl ??
-      process.env.TELEGRAM_PROXY_URL?.trim() ??
-      process.env.https_proxy ??
-      process.env.HTTPS_PROXY ??
-      "";
+    p.log.info("配置保存到 ~/.agent-relay/config.json。");
     const answers = await p.group(
       {
         token: () =>
-          p.password({
+          p.text({
             message: current ? "Telegram Bot Token（留空保留原值）" : "Telegram Bot Token",
             validate: (value) =>
               configSchema.shape.telegram.shape.token.safeParse(
@@ -78,30 +70,6 @@ program
                 ? undefined
                 : "请输入十进制正整数用户 ID",
           }),
-        proxyMode: () =>
-          p.select({
-            message: "Telegram 代理",
-            options: [
-              {
-                value: "keep",
-                label: proxy ? "沿用已有配置或当前终端代理" : "直连（当前未配置代理）",
-              },
-              { value: "custom", label: "输入 HTTP/HTTPS 代理" },
-              ...(proxy ? [{ value: "direct", label: "直连" }] : []),
-            ],
-          }),
-        proxyUrl: async ({ results }): Promise<string | typeof p.CANCEL_SYMBOL> =>
-          results.proxyMode === "custom"
-            ? p.password({
-                message: "HTTP/HTTPS 代理 URL（隐藏输入，留空直连）",
-                validate: (value) =>
-                  configSchema.shape.telegram.shape.proxyUrl.safeParse(value?.trim() ?? "").success
-                    ? undefined
-                    : "请输入 http:// 或 https:// 代理地址",
-              })
-            : results.proxyMode === "direct"
-              ? ""
-              : proxy,
         codexPath: () =>
           p.text({
             message: "Codex 可执行文件路径或命令名",
@@ -150,13 +118,12 @@ program
       telegram: {
         token: answers.token.trim() || current?.telegram.token,
         ownerId: answers.ownerId,
-        proxyUrl: answers.proxyUrl,
+        proxyUrl: current?.telegram.proxyUrl,
       },
       codexPath: realpathSync(executable),
-      environment: configSchema.shape.environment.parse(process.env),
     });
     try {
-      await createCodexAgent(config.codexPath, { ...process.env, ...config.environment });
+      await createCodexAgent(config.codexPath);
     } catch {
       throw new Error(
         "Codex CLI 检查失败，请检查可执行权限和运行环境；原配置保持不变。认证与模型连通性需在实际任务中验证。",

@@ -1,10 +1,7 @@
 node_modules/
 dist/
-coverage/
 .env
 .env.*
 !.env.example
-data/
 .agent-relay/
-*.tsbuildinfo
 .DS_Store

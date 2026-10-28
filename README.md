@@ -25,7 +25,7 @@
 
 ```sh
 npm install -g agent-relay
-agent-relay setup       # 交互配置 Telegram、代理和 Codex，完成后可直接启动后台服务
+agent-relay setup       # 交互配置 Telegram 和 Codex，完成后可直接启动后台服务
 agent-relay start       # 后续启动
 agent-relay status      # 查看后台服务状态
 agent-relay logs        # 查看日志
@@ -34,7 +34,7 @@ agent-relay restart     # 重启服务
 agent-relay stop        # 停止后台服务
 ```
 
-CLI 采用 Commander，配置向导采用 Clack。`setup` 校验配置与 Codex 可执行文件后原子保存，取消时保留原配置；可选择立即启动或重启后台服务，并启用开机自启。后续也可使用 `agent-relay start --enable` 启用自启。配置、运行状态、单实例锁和服务定义都保存在当前用户的 `~/.agent-relay/`，全局 npm 包升级保留这些数据。
+CLI 采用 Commander，配置向导采用 Clack。Bot Token 使用明文输入，已有配置时留空保留原值。`setup` 校验配置与 Codex 可执行文件后原子保存，取消时保留原配置；可选择立即启动或重启后台服务，并启用开机自启。后续也可使用 `agent-relay start --enable` 启用自启。配置、运行状态、单实例锁和服务定义都保存在当前用户的 `~/.agent-relay/`，全局 npm 包升级保留这些数据。
 
 后台运行需要 Linux systemd 用户服务。启动时检查并启用用户 linger，确保退出 SSH 后继续运行；权限不足会给出需要在服务器执行的命令。`agent-relay run` 提供前台运行，适用于本地调试或外部进程管理器。`agent-relay service uninstall` 停止并移除服务，保留配置、状态文件和用户 linger 设置。
 
@@ -89,7 +89,7 @@ cp .env.example .env
 
 当前只有以上两项必填配置，也可运行 `node dist/cli.js setup` 写入用户配置。配置与状态分别放在 `~/.agent-relay/config.json`、`~/.agent-relay/state.json`，开发运行与全局安装使用同一目录和单实例锁。Codex 优先使用 `CODEX_PATH`，其次使用配置文件路径，均未设置时通过 PATH 查找。日志级别固定为 `info`。无需项目清单；在 Telegram 中用 `/cwd` 指定目录，不设置目录白名单。
 
-Telegram 代理优先使用非空 `TELEGRAM_PROXY_URL`，其次使用配置文件中的 `telegram.proxyUrl`；配置文件中空字符串表示明确直连。两处均未指定时，读取 `HTTPS_PROXY` / `https_proxy`；使用代理时遵循 `NO_PROXY` / `no_proxy`（小写优先）。`setup` 保存当前终端的 PATH、CODEX_HOME 和代理环境，后台进程会恢复这些设置；代理 URL 不写入服务定义或命令行参数。
+Telegram 代理优先使用非空 `TELEGRAM_PROXY_URL`，其次使用配置文件中的 `telegram.proxyUrl`；配置文件中空字符串表示明确直连。两处均未指定时，读取 `HTTPS_PROXY` / `https_proxy`；使用代理时遵循 `NO_PROXY` / `no_proxy`（小写优先）。`setup` 无代理配置步骤，保存当前终端的 PATH、CODEX_HOME 和代理环境，后台进程会恢复这些设置；重新运行 `setup` 会清除旧的 `telegram.proxyUrl`，改为默认继承终端代理。代理 URL 不写入服务定义或命令行参数。
 
 ```sh
 npm run dev

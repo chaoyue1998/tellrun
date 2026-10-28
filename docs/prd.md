@@ -28,7 +28,7 @@
 
 ## 安装与后台管理
 
-使用者在服务器安装 Node.js、Codex 并完成 Codex 认证后，通过 `npm install -g agent-relay` 安装程序。运行 `agent-relay setup`，交互填写 Telegram Bot Token、本人 ID 和可选代理，检查 Codex 可用性，保存配置后可启动或重启后台服务。CLI 与后台管理已接入，npm 发布与 Linux 实际部署验收仍待完成；安装用户无需克隆源码或手动复制 `.env`。
+使用者在服务器安装 Node.js、Codex 并完成 Codex 认证后，通过 `npm install -g agent-relay` 安装程序。运行 `agent-relay setup`，以明文输入 Telegram Bot Token 并填写本人 ID，自动沿用当前终端代理，检查 Codex 可用性，保存配置后可启动或重启后台服务。CLI 与后台管理已接入，npm 发布与 Linux 实际部署验收仍待完成；安装用户无需克隆源码或手动复制 `.env`。
 
 提供 start、stop、restart、status 和 logs 命令，另提供前台 run 用于诊断。停止须等待实际退出，重复启动不创建多份服务；启动失败时给出原因和日志入口。配置向导检查退出 SSH 后持续运行的条件，并提供开机自启选项。
 
