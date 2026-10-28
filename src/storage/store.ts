@@ -132,8 +132,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
       }
     }
 
-    /** 回复按 Unicode 字符拆分，和触发它的状态变更一起保存。 */
-    function enqueueReply(channelId: number, text: string) {
+    /** 无回复时跳过入队；其余按 Unicode 字符拆分，和触发它的状态变更一起保存。 */
+    function enqueueReply(channelId: number, text: string | undefined) {
+      if (text === undefined) return;
       const parts = text.match(/[\s\S]{1,2000}/gu) ?? ["（没有文本回复）"];
       for (const [index, part] of parts.entries()) {
         state.outbox.push({
@@ -173,8 +174,11 @@ export function openStore(path = join(appDirectory, "state.json")) {
     }
 
     return {
-      /** 去重标识、任务和回执合并保存，成功返回后才能确认入站事件。 */
-      accept(message: IncomingMessage, handle: (channel: State["channels"][number]) => string) {
+      /** 去重标识、任务和必要回复合并保存，成功返回后才能确认入站事件。 */
+      accept(
+        message: IncomingMessage,
+        handle: (channel: State["channels"][number]) => string | undefined,
+      ) {
         const existing = state.channels.find(
           (channel) =>
             channel.platform === message.channel.platform &&
