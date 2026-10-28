@@ -118,6 +118,7 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
             sessionId: task.sessionId,
             onSession: (id) => options.store.recordSession(task.id, id),
             onStarted: () => options.store.markRunning(task.id),
+            onText: (text) => options.store.setDraft(task.id, text),
           })
           .finally(() => {
             finished = true;

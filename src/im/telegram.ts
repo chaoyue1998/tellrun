@@ -30,9 +30,9 @@ export function createTelegramConnection(
   /** 中断初始化、拉取和输入提示；正在处理的消息由 start 等待完成。 */
   const polling = new AbortController();
   let started = false;
-  /** 输入提示由刷新循环处理失败，避免自动重发已经过期的状态。 */
+  /** 输入提示与流式草稿只发送最新状态，避免自动重发已过期的内容。 */
   bot.api.config.use((prev, method, payload, signal) =>
-    method === "sendChatAction"
+    ["sendChatAction", "sendMessageDraft"].includes(method)
       ? prev(method, payload, signal)
       : autoRetry({ maxRetryAttempts: 2, maxDelaySeconds: 5, rethrowHttpErrors: true })(
           prev,
@@ -49,9 +49,19 @@ export function createTelegramConnection(
       signal ??
         (AbortSignal.any([
           AbortSignal.timeout(
-            method === "getUpdates" ? 40_000 : method === "sendChatAction" ? 4_000 : 15_000,
+            method === "getUpdates"
+              ? 40_000
+              : ["sendChatAction", "sendMessageDraft"].includes(method)
+                ? 4_000
+                : 15_000,
           ),
-          ...(["getMe", "getWebhookInfo", "getUpdates", "sendChatAction"].includes(method)
+          ...([
+            "getMe",
+            "getWebhookInfo",
+            "getUpdates",
+            "sendChatAction",
+            "sendMessageDraft",
+          ].includes(method)
             ? [polling.signal]
             : []),
         ]) as Parameters<typeof prev>[2]),
@@ -165,15 +175,54 @@ export function createTelegramConnection(
             }
           })(),
           (async () => {
+            /** 草稿最多每秒更新一次；无新内容时每 20 秒续期，最终回复与草稿串行发送。 */
+            let nextDraftAt = 0;
+            let sentDraft: { taskId: number; text: string; at: number } | undefined;
             while (!polling.signal.aborted) {
               const reply = store.pendingReply(String(bot.botInfo.id), String(config.ownerId));
               if (!reply) {
-                await setTimeout(250);
+                const draft = store.pendingDraft(String(bot.botInfo.id), String(config.ownerId));
+                if (
+                  draft &&
+                  Date.now() >= nextDraftAt &&
+                  (draft.taskId !== sentDraft?.taskId ||
+                    draft.text !== sentDraft.text ||
+                    Date.now() - sentDraft.at >= 20_000)
+                ) {
+                  nextDraftAt = Date.now() + 1000;
+                  try {
+                    await bot.api.sendMessageDraft(Number(draft.chatId), draft.taskId, draft.text);
+                    sentDraft = { ...draft, at: Date.now() };
+                  } catch (error) {
+                    if (polling.signal.aborted) return;
+                    if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
+                    if (error instanceof GrammyError && error.error_code === 401) throw error;
+                    nextDraftAt =
+                      error instanceof GrammyError &&
+                      error.error_code >= 400 &&
+                      error.error_code < 500 &&
+                      error.error_code !== 429
+                        ? Number.POSITIVE_INFINITY
+                        : Date.now() +
+                          (error instanceof GrammyError ? (error.parameters.retry_after ?? 5) : 5) *
+                            1000;
+                    logger.warn(
+                      {
+                        errorType: error.name,
+                        errorCode: error instanceof GrammyError ? error.error_code : undefined,
+                      },
+                      "Telegram 流式预览发送失败，完整结果仍通过回复队列发送",
+                    );
+                  }
+                }
+                await setTimeout(100);
                 continue;
               }
               try {
                 await bot.api.sendMessage(reply.chatId, reply.text);
                 store.removeReply(reply.id);
+                /** 普通消息会清除客户端草稿；任务仍执行时允许再次显示最新内容。 */
+                sentDraft = undefined;
               } catch (error) {
                 if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
                 if (error instanceof GrammyError && error.error_code === 401) throw error;

@@ -32,6 +32,8 @@ export interface Agent {
     sessionId: string | null;
     onSession: (sessionId: string) => void;
     onStarted: () => void;
+    /** 当前回复文本快照，随增量更新；调用方不能等待 IM 发送。 */
+    onText: (text: string) => void;
   }): Promise<AgentResult>;
   /** 向当前轮次补充输入，只等待接收确认，不等待任务结束。 */
   steer(prompt: string): Promise<void>;

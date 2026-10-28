@@ -25,6 +25,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
   let owned = false;
   let usable = true;
   let updating = false;
+  /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
+  let draft: { taskId: number; text: string } | undefined;
 
   /** 只删除本实例的所有权文件；非空目录不能被另一个退出中的实例移除。 */
   function release() {
@@ -179,6 +181,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           input.status = "failed";
         }
       });
+      if (draft?.taskId === id) draft = undefined;
     }
 
     return {
@@ -237,6 +240,25 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 返回快照，避免调用方直接修改内存中的持久状态。 */
       activeTask() {
         return structuredClone(state.tasks.find((task) => activeTaskStatuses.has(task.status)));
+      },
+      /** 限制预览为末尾 2000 个 Unicode 字符，完整结果仍由最终回复保存。 */
+      setDraft(id: number, text: string) {
+        if (state.tasks.some((task) => task.id === id && task.status === "running"))
+          draft = { taskId: id, text: [...text].slice(-2000).join("") };
+      },
+      /** 仅向当前机器人与授权用户返回执行中的草稿，停止后不再刷新。 */
+      pendingDraft(accountId: string, userId: string) {
+        if (!draft?.text.trim()) return;
+        const task = state.tasks.find(
+          (task) => task.id === draft?.taskId && task.status === "running",
+        );
+        const channel = state.channels.find((channel) => channel.id === task?.channelId);
+        if (
+          channel?.platform === "telegram" &&
+          channel.accountId === accountId &&
+          channel.userId === userId
+        )
+          return { ...draft, chatId: channel.chatId };
       },
       /** 最近结果按聊天隔离，供 /last 再次查看。 */
       lastTask(channelId: number) {

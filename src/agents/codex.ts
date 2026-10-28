@@ -98,6 +98,15 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         completed.resolve(result);
       }
 
+      /** 增量与完整消息共用输出上限；只推送回复文本，不推送思考或工具原始输出。 */
+      function publishText(text: string) {
+        if ([...messages.values()].reduce((sum, item) => sum + item.text.length, 0) > 256_000) {
+          fail("Codex 文本输出超出限制，任务已中断；可在本机查看会话记录。");
+          return;
+        }
+        input.onText(text);
+      }
+
       /** 共享后台仅断开自己的连接；独立进程按进程组清理。 */
       function terminate(signal: NodeJS.Signals) {
         if (socket) {
@@ -283,7 +292,21 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   ),
                 );
               else item.resolve(message.result);
-            } else if (message.method === "item/completed") {
+            } else if (message.method === "item/agentMessage/delta") {
+              const event = z
+                .object({
+                  threadId: z.string(),
+                  turnId: z.string(),
+                  itemId: z.string(),
+                  delta: z.string(),
+                })
+                .parse(message.params);
+              if (event.threadId !== sessionId || !recordRun(event.turnId)) continue;
+              const item = messages.get(event.itemId) ?? { text: "" };
+              item.text += event.delta;
+              messages.set(event.itemId, item);
+              publishText(item.text);
+            } else if (message.method === "item/started" || message.method === "item/completed") {
               const event = z
                 .object({
                   threadId: z.string(),
@@ -299,11 +322,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               if (event.threadId !== sessionId || !recordRun(event.turnId)) continue;
               if (event.item.type === "agentMessage" && event.item.text !== undefined) {
                 messages.set(event.item.id, { text: event.item.text, phase: event.item.phase });
-                if (
-                  [...messages.values()].reduce((sum, item) => sum + item.text.length, 0) > 256_000
-                ) {
-                  fail("Codex 文本输出超出限制，任务已中断；可在本机查看会话记录。");
-                }
+                publishText(event.item.text);
               }
             } else if (message.method === "turn/started" || message.method === "turn/completed") {
               const event = z
