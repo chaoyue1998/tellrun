@@ -57,12 +57,14 @@ tellrun setup
 | `/new`                | 开始新会话，保留工作目录                   |
 | `/model`              | 查看当前选择，通过按钮选择模型和推理强度   |
 | `/permissions`        | 选择后续任务的权限模式                     |
-| `/status`             | 查看连接、会话、目录和任务状态             |
+| `/status`             | 查看连接、目录、模型、权限和任务状态       |
 | `/last`               | 查看最近已结束任务的状态与结果             |
 | `/stop`               | 请求停止当前任务，并暂停接收新任务         |
 | `/resume`             | 恢复接收新任务，不会重新执行此前中断的任务 |
 
 切换目录或新建会话前，需要等待当前任务结束。使用 `/stop` 后，先检查最终状态，再发送 `/resume` 和新的任务内容。
+
+`/status` 的 `Model` 显示当前选择的模型，未选择时显示 `Default`，表示沿用 Codex 配置。执行中的任务使用不同模型时，额外显示 `Task model`。
 
 `/permissions` 提供与 Codex CLI 0.165.0 对应的四种模式：Ask for approval（默认，额外权限由你审批）、Approve for me（由 Codex 自动审查）、Full Access（不使用 Codex 沙箱和执行审批）、Read Only（只读，修改或联网时请求审批）。Full Access 仍受系统用户权限约束。
 

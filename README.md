@@ -57,12 +57,14 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/new`                | Start a new conversation while keeping the working directory     |
 | `/model`              | Show the current selection and choose model and reasoning effort |
 | `/permissions`        | Choose the permission mode for subsequent tasks                  |
-| `/status`             | Show connection, conversation, directory, and task status        |
+| `/status`             | Show connection, directory, model, permissions, and task status  |
 | `/last`               | Show the latest finished task's status and result                |
 | `/stop`               | Request that the current task stop and pause new tasks           |
 | `/resume`             | Accept new tasks again without rerunning an interrupted task     |
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
+
+In `/status`, `Model` shows the current selection, or `Default` when using the Codex configuration. If the active task uses a different model, `Task model` is also shown.
 
 `/permissions` offers the four presets from Codex CLI 0.165.0: Ask for approval (default), Approve for me (Codex automatic review), Full Access (no Codex sandbox or execution approvals), and Read Only (approval required for edits or network access). Full Access remains subject to operating system permissions.
 
