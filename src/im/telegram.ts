@@ -219,8 +219,9 @@ export function createTelegramConnection(
           logger.error("Webhook configured. Remove it before starting long polling.");
           throw new Error("Bot has an active webhook.");
         }
-        /** 注册默认语言的命令列表，并让默认菜单按钮打开命令菜单。 */
+        /** 同步默认与私聊命令，覆盖旧机器人优先级更高的私聊菜单。 */
         await bot.api.setMyCommands(commands);
+        await bot.api.setMyCommands(commands, { scope: { type: "all_private_chats" } });
         await bot.api.setChatMenuButton({ menu_button: { type: "commands" } });
         if (polling.signal.aborted) return;
         return {
