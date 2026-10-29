@@ -8,7 +8,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 
 [npm](https://www.npmjs.com/package/tellrun) · [GitHub](https://github.com/chaoyue1998/tellrun) · [Report an issue](https://github.com/chaoyue1998/tellrun/issues)
 
-[Quick start](#install-and-connect-codex-to-telegram) · [Telegram commands](#telegram-commands) · [Background service](#background-service) · [Configuration](#configuration-and-data) · [FAQ](#faq) · [Local development](#local-development)
+[Quick start](#install-and-connect-codex-to-telegram) · [Telegram commands](#telegram-commands) · [Terminal commands](#terminal-commands) · [Configuration](#configuration-and-data) · [FAQ](#faq) · [Local development](#local-development)
 
 ## Features
 
@@ -59,7 +59,9 @@ Without `/cwd`, the working directory defaults to the directory where the servic
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
 
-## Background service
+## Terminal commands
+
+Run these commands in the terminal on the computer or server running Tellrun.
 
 | Command                     | Purpose                                                                 |
 | --------------------------- | ----------------------------------------------------------------------- |

@@ -8,7 +8,7 @@
 
 [npm](https://www.npmjs.com/package/tellrun) · [GitHub](https://github.com/chaoyue1998/tellrun) · [问题反馈](https://github.com/chaoyue1998/tellrun/issues)
 
-[快速开始](#安装并通过-telegram-使用-codex) · [Telegram 命令](#telegram-命令) · [后台服务](#后台服务) · [配置](#配置与数据) · [常见问题](#常见问题) · [本地开发](#本地开发)
+[快速开始](#安装并通过-telegram-使用-codex) · [Telegram 命令](#telegram-命令) · [终端命令](#终端命令) · [配置](#配置与数据) · [常见问题](#常见问题) · [本地开发](#本地开发)
 
 ## 功能
 
@@ -59,7 +59,9 @@ tellrun setup
 
 切换目录或新建会话前，需要等待当前任务结束。使用 `/stop` 后，先检查最终状态，再发送 `/resume` 和新的任务内容。
 
-## 后台服务
+## 终端命令
+
+在运行 Tellrun 的电脑或服务器上执行以下命令。
 
 | 命令                        | 作用                                             |
 | --------------------------- | ------------------------------------------------ |
