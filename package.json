@@ -1,6 +1,6 @@
 {
   "name": "tellrun",
-  "version": "1.2.1",
+  "version": "1.2.4",
   "description": "Self-hosted Telegram bot for remote AI coding with OpenAI Codex CLI, persistent sessions, and streaming replies.",
   "keywords": [
     "codex",
