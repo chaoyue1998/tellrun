@@ -18,7 +18,7 @@ export function createLogger() {
         "*.authorization",
         "*.prompt",
       ],
-      censor: "[已隐藏]",
+      censor: "[REDACTED]",
     },
   });
 }

@@ -27,7 +27,7 @@ async function systemctl(...args: string[]) {
       return error.stdout.trim();
     }
     throw new Error(
-      `systemctl --user ${args[0]} 失败；请运行 systemctl --user status ${unit} --no-pager -l 查看服务状态，并用 tellrun logs 查看启动错误。不支持用户服务的环境可用 tellrun run 前台运行。`,
+      `Service ${args[0]} failed. Check tellrun logs or systemctl --user status ${unit} --no-pager -l. Without systemd, use tellrun run.`,
     );
   }
 }
@@ -39,11 +39,11 @@ export async function manageService(
 ) {
   if (action === "status") {
     console.log(
-      `配置：${join(appDirectory, "config.json")}\n状态：${join(appDirectory, "state.json")}`,
+      `Config: ${join(appDirectory, "config.json")}\nState: ${join(appDirectory, "state.json")}`,
     );
   }
   if (process.platform !== "linux") {
-    throw new Error("后台管理需要 Linux systemd 用户服务；当前系统可运行 tellrun run。");
+    throw new Error("Background mode requires Linux systemd. Use tellrun run instead.");
   }
 
   if (action === "logs") {
@@ -62,11 +62,11 @@ export async function manageService(
         { stdio: "inherit" },
       );
       child.on("error", () =>
-        reject(new Error("无法启动 journalctl，请检查 systemd 是否已安装。")),
+        reject(new Error("Cannot start journalctl. Check your systemd installation.")),
       );
       child.on("close", (code, signal) => {
         if (code === 0 || signal === "SIGINT") resolve();
-        else reject(new Error("读取日志失败，请检查当前用户的 journal 访问权限。"));
+        else reject(new Error("Cannot read logs. Check journal access permissions."));
       });
     });
     return;
@@ -85,10 +85,10 @@ export async function manageService(
   );
   if (action === "status") {
     if (state.LoadState === "not-found")
-      console.log("后台服务尚未安装，请运行 tellrun setup 或 start。");
+      console.log("Service not installed. Run tellrun setup or tellrun start.");
     else
       console.log(
-        `服务：${state.ActiveState} / ${state.SubState}\nPID：${state.MainPID}\n自启状态：${state.UnitFileState}`,
+        `Service: ${state.ActiveState} / ${state.SubState}\nPID: ${state.MainPID}\nAt boot: ${state.UnitFileState}`,
       );
     return;
   }
@@ -99,19 +99,19 @@ export async function manageService(
       if (state.LoadState !== "not-found") await systemctl("disable", unit);
       rmSync(join(appDirectory, unit), { force: true });
       await systemctl("daemon-reload");
-      console.log("后台服务已卸载，配置和状态文件已保留；用户 linger 设置保持不变。");
-    } else console.log("后台服务已停止。");
+      console.log("Service removed. Config, state, and user linger unchanged.");
+    } else console.log("Service stopped.");
     return;
   }
 
   /** 服务不能依赖当前终端临时提供的凭据或相对 Codex 路径。 */
   const config = loadConfig({});
   if (!isAbsolute(config.codexPath) || !existsSync(config.codexPath)) {
-    throw new Error("后台运行需要有效的 Codex 绝对路径，请重新运行 tellrun setup。");
+    throw new Error("Background mode needs an absolute Codex path. Run tellrun setup.");
   }
   const entry = fileURLToPath(new URL("./cli.js", import.meta.url));
   if (!existsSync(entry))
-    throw new Error("后台服务需要编译产物，请先 npm run build，再运行 dist/cli.js。");
+    throw new Error("CLI build missing. Run npm run build, then node dist/cli.js.");
 
   /** linger 保证退出 SSH 后用户服务管理器仍然存活；失败时不宣称后台设置成功。 */
   try {
@@ -129,11 +129,11 @@ export async function manageService(
         ["show-user", String(process.getuid?.()), "--property=Linger", "--value"],
         { timeout: 5_000 },
       );
-      if (linger.stdout.trim() !== "yes") throw new Error("linger 未启用");
+      if (linger.stdout.trim() !== "yes") throw new Error("User lingering is disabled.");
     }
   } catch {
     throw new Error(
-      `无法启用退出 SSH 后持续运行；请在服务器执行 sudo loginctl enable-linger ${process.getuid?.()}，然后重试 tellrun ${action}。配置已保留。`,
+      `Enable lingering with sudo loginctl enable-linger ${process.getuid?.()}, then retry tellrun ${action}. Config unchanged.`,
     );
   }
 
@@ -181,9 +181,11 @@ export async function manageService(
   await systemctl("reset-failed", unit);
   await systemctl(action, unit);
   if ((await systemctl("is-active", unit)) !== "active") {
-    throw new Error("后台服务未能保持运行，请用 tellrun logs 查看原因。");
+    throw new Error("Service failed to stay running. Check tellrun logs.");
   }
-  console.log(action === "restart" ? "后台服务已重启。" : "后台服务已启动。");
-  if (options.enable) console.log("已启用开机自启。");
-  console.log("退出 SSH 后服务会继续运行；可用 tellrun status / logs 查看状态与日志。");
+  console.log(action === "restart" ? "Service restarted." : "Service started.");
+  if (options.enable) console.log("Enabled at boot.");
+  console.log(
+    "Service will keep running after SSH disconnects. Use tellrun status or tellrun logs.",
+  );
 }

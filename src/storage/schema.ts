@@ -89,7 +89,7 @@ export const stateSchema = z
       state.outbox.every((row) => channels.has(row.channelId)) &&
       state.tasks.filter((row) => activeTaskStatuses.has(row.status)).length <= 1
     );
-  }, "状态标识、引用关系或活动任务数量无效");
+  }, "Invalid state IDs, references, or active task count.");
 
 /** 存储操作共用的文件结构，由运行时校验规则推导。 */
 export type State = z.infer<typeof stateSchema>;

@@ -13,14 +13,14 @@ let store: Store | undefined;
 let im: ReturnType<typeof createTelegramConnection> | undefined;
 let relay: ReturnType<typeof createRelayService> | undefined;
 let running: Promise<void>[] = [];
-let phase = "配置加载";
+let phase = "Loading config";
 let stopping = false;
 
 /** 两种退出信号共用关停入口；主流程等待消息处理和 Agent 退出后释放状态锁。 */
 function stop() {
   if (stopping) return;
   stopping = true;
-  logger.info("正在停止服务");
+  logger.info("Stopping service");
   im?.stop();
   relay?.stop();
 }
@@ -30,26 +30,26 @@ process.once("SIGTERM", stop);
 
 try {
   const config = loadConfig();
-  phase = "状态加载";
+  phase = "Loading state";
   store = openStore();
-  phase = "Agent 可用性检查";
+  phase = "Checking agent";
   const agent = await createCodexAgent(config.codexPath);
-  logger.info({ agent: agent.name, version: agent.version }, "Agent CLI 可用");
+  logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
 
   if (!stopping) {
     relay = createRelayService({ store, agent, logger });
     im = createTelegramConnection(config.telegram, relay.handleMessage, store, logger);
-    phase = "IM 连接";
+    phase = "Connecting Telegram";
     const source = await im.initialize();
     if (source && !stopping) {
       /** systemctl start 等待实际初始化成功，避免把进程创建误报为服务就绪。 */
       if (process.env.NOTIFY_SOCKET) {
-        phase = "后台就绪通知";
-        await promisify(execFile)("systemd-notify", ["--ready", "--status=Telegram 已连接"], {
+        phase = "Notifying systemd";
+        await promisify(execFile)("systemd-notify", ["--ready", "--status=Telegram connected"], {
           timeout: 5_000,
         });
       }
-      phase = "消息与任务处理";
+      phase = "Processing messages";
       running = [im.start(), relay.run(source)];
       await Promise.all(running);
     }
@@ -67,9 +67,9 @@ try {
           ? error.code
           : undefined,
     },
-    (phase === "配置加载" || phase === "状态加载") && error instanceof Error
+    (phase === "Loading config" || phase === "Loading state") && error instanceof Error
       ? error.message
-      : "服务启动或运行失败",
+      : "Service failed",
   );
 } finally {
   im?.stop();
@@ -78,5 +78,5 @@ try {
   store?.close();
   process.removeListener("SIGINT", stop);
   process.removeListener("SIGTERM", stop);
-  logger.info("Tellrun 已退出");
+  logger.info("Tellrun stopped");
 }

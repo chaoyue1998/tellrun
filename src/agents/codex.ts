@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -38,7 +38,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     maxBuffer: 4_096,
     env,
   });
-  if (!/^codex-cli \S+$/.test(stdout.trim())) throw new Error("Codex CLI 返回了无法识别的版本信息");
+  if (!/^codex-cli \S+$/.test(stdout.trim())) throw new Error("Unrecognized Codex CLI version.");
   let active: AbortController | undefined;
   /** 只绑定当前任务的连接，不能把迟到输入送入下一轮或其他客户端的轮次。 */
   let steer: Agent["steer"] | undefined;
@@ -47,7 +47,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     name: "Codex",
     version: stdout.trim().replace(/^codex-cli /, ""),
     async run(input) {
-      if (active) throw new Error("Codex 已有任务正在执行");
+      if (active) throw new Error("Codex is already running a task.");
       const controller = new AbortController();
       active = controller;
       /** 后台服务会保留空闲会话的写锁，复用其连接才能立即恢复同一会话。 */
@@ -102,7 +102,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       /** 增量与完整消息共用输出上限；只推送回复文本，不推送思考或工具原始输出。 */
       function publishText(text: string) {
         if ([...messages.values()].reduce((sum, item) => sum + item.text.length, 0) > 256_000) {
-          fail("Codex 文本输出超出限制，任务已中断；可在本机查看会话记录。");
+          fail("Codex output limit exceeded. Task interrupted; check the local session.");
           return;
         }
         input.onText(text);
@@ -122,7 +122,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) {
             finish({
               status: "interrupted",
-              text: "无法确认 Codex 子进程已停止，请检查本地进程。",
+              text: "Codex stop unconfirmed. Check local processes.",
             });
           }
         }
@@ -144,25 +144,26 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         try {
           if (socket)
             socket.send(JSON.stringify(message), (error) => {
-              if (error) fail("无法写入 Codex 连接，执行状态待确认。");
+              if (error) fail("Codex connection write failed. Task status unknown.");
             });
           else
             child?.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-              if (error) fail("无法写入 Codex 连接，执行状态待确认。");
+              if (error) fail("Codex connection write failed. Task status unknown.");
             });
         } catch {
-          fail("无法写入 Codex 连接，执行状态待确认。");
+          fail("Codex connection write failed. Task status unknown.");
         }
       }
 
       /** 超时仍终止任务；区分服务端拒绝与连接故障，保留补充输入的不确定状态。 */
       async function request(method: string, params: unknown): Promise<unknown> {
-        if (controller.signal.aborted && method !== "turn/interrupt") throw new Error("任务已停止");
+        if (controller.signal.aborted && method !== "turn/interrupt")
+          throw new Error("Task stopped.");
         try {
           return await client
             .timeout(30_000, (id) => {
-              fail(`Codex ${method} 请求超时，未自动重试。`);
-              return createJSONRPCErrorResponse(id, 0, "Codex 请求超时");
+              fail(`Codex ${method} timed out. Not retried.`);
+              return createJSONRPCErrorResponse(id, 0, "Codex request timed out.");
             })
             .request(method, params);
         } catch (error) {
@@ -172,14 +173,14 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               method === "thread/resume" &&
                 error.code === -32600 &&
                 error.message.includes("already has an active writer")
-                ? "Codex 会话仍由其他进程持有，本次任务未开始。请检查本机 Codex 后台连接；空闲会话也可能暂时保留写锁。"
+                ? "Codex session locked by another process. Task not started; check local Codex connections."
                 : method === "turn/steer"
-                  ? `Codex 补充输入被拒绝（${error.code}），可能当前轮次已结束。请重新发送需要继续的内容。`
-                  : `Codex ${method} 请求被拒绝（${error.code}）。请检查本机 Codex 配置与认证。`,
+                  ? `Codex rejected input (${error.code}). The turn may have ended; resend to continue.`
+                  : `Codex ${method} rejected (${error.code}). Check config and sign-in.`,
             );
           if (method === "turn/steer")
             throw new Error(
-              "Codex 无法确认补充输入是否已提交，未自动重试。请检查会话后重新发送需要继续的内容。",
+              "Codex input delivery unconfirmed. Not retried; check the session before resending.",
             );
           throw error;
         }
@@ -200,7 +201,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         () => {
           if (settled) return;
           stopTimer = setTimeout(
-            () => fail("停止请求未得到确认，已结束 Codex 连接。请检查工作目录后发送 /resume。"),
+            () => fail("Stop unconfirmed; Codex disconnected. Check the project before /resume."),
             5_000,
           );
           if (sessionId && runId) {
@@ -215,16 +216,18 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       function onClose(code: number | null) {
         closed.resolve();
         if (controller.signal.aborted && !dispatched)
-          finish({ status: "cancelled", text: "任务在开始前已停止。" });
-        if (!settled) fail(`Codex 连接已退出（${code ?? "signal"}），请检查本机认证与运行环境。`);
-        else client.rejectAllPendingRequests("Codex 连接已关闭");
+          finish({ status: "cancelled", text: "Stopped before starting." });
+        if (!settled)
+          fail(`Codex disconnected (${code ?? "signal"}). Check sign-in and local setup.`);
+        else client.rejectAllPendingRequests("Codex connection closed.");
       }
 
       /** 两种传输与提前到达的通知共用协议处理，始终只消费当前任务的事件。 */
       function onData(chunk: string) {
         if (settled) return;
         buffer += chunk;
-        if (buffer.length > 8_000_000) return fail("Codex 协议缓冲超出限制，任务已中断。");
+        if (buffer.length > 8_000_000)
+          return fail("Codex buffer limit exceeded. Task interrupted.");
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
         for (const line of lines) {
@@ -243,7 +246,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               if (dispatched) {
                 earlyMessages += `${line}\n`;
                 if (earlyMessages.length > 8_000_000)
-                  return fail("Codex 提前通知超出限制，任务已中断。");
+                  return fail("Codex event limit exceeded. Task interrupted.");
               }
               continue;
             }
@@ -267,7 +270,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 },
               });
               fail(
-                "任务需要审批或补充输入，当前版本尚未接入该交互，已中断。请在本机处理后发送 /resume，或调整任务后重新提交。",
+                "Task interrupted: approvals and structured questions are unsupported. Handle locally, then /resume.",
               );
             } else if (typeof message.id === "number") {
               /** 补齐库需要的协议字段；错误来源标记仅用于本地处理，不信任服务端 data。 */
@@ -336,33 +339,35 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                       .map((item) => item.text)
                       .join("\n\n") ||
                     (event.turn.status === "completed"
-                      ? "Codex 已完成，本轮没有文本输出。"
+                      ? "Codex finished with no text output."
                       : event.turn.status === "failed"
-                        ? "Codex 未能完成本轮任务，请检查本机认证、模型访问与网络。"
-                        : "任务已中断。已完成的文件修改不会自动撤销。"),
+                        ? "Codex task failed. Check sign-in, model access, and network."
+                        : "Task interrupted. File changes were not reverted."),
                 });
               }
             }
           } catch {
-            fail("Codex 协议响应或状态保存失败，任务已中断，请检查 CLI 版本与本地存储。");
+            fail(
+              "Codex response or state save failed. Task interrupted; check CLI version and storage.",
+            );
           }
         }
       }
 
-      child?.on("error", () => fail("无法启动 Codex app-server，请检查 CLI 和工作目录。"));
-      child?.stdin.on("error", () => fail("Codex 输入连接已关闭，执行状态待确认。"));
+      child?.on("error", () =>
+        fail("Cannot start Codex app-server. Check CLI and working directory."),
+      );
+      child?.stdin.on("error", () => fail("Codex input closed. Task status unknown."));
       child?.on("close", onClose);
       child?.stdout.setEncoding("utf8");
       child?.stdout.on("data", onData);
-      socket?.on("error", () => fail("Codex 后台连接异常，执行状态待确认。"));
+      socket?.on("error", () => fail("Codex connection failed. Task status unknown."));
       socket?.on("close", () => onClose(null));
       socket?.on("message", (data) => onData(`${data.toString()}\n`));
 
       steer = async (prompt) => {
         if (!sessionId || !runId || settled || controller.signal.aborted)
-          throw new Error(
-            "Codex 当前轮次尚未开始、已结束或正在停止，补充消息未提交。请稍后重新发送。",
-          );
+          throw new Error("Codex turn is not running. Input not sent; try again later.");
         const response = z.object({ turnId: z.string() }).parse(
           await request("turn/steer", {
             threadId: sessionId,
@@ -371,15 +376,23 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           }),
         );
         if (response.turnId !== runId) {
-          fail("Codex 补充输入返回了不同轮次，执行状态待确认。");
-          throw new Error("Codex 无法确认补充输入所属轮次，未自动重试。请检查会话。");
+          fail("Codex input returned a different turn. Task status unknown.");
+          throw new Error("Codex input turn unconfirmed. Not retried; check the session.");
         }
       };
 
       try {
-        if (controller.signal.aborted) return { status: "cancelled", text: "任务在开始前已停止。" };
+        if (controller.signal.aborted)
+          return { status: "cancelled", text: "Stopped before starting." };
         await request("initialize", {
-          clientInfo: { name: "tellrun", title: "Tellrun", version: "1.0.1" },
+          clientInfo: {
+            name: "tellrun",
+            title: "Tellrun",
+            /** 源码和编译产物都读取包版本，与 CLI 的版本显示保持一致。 */
+            version: JSON.parse(
+              readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
+            ).version,
+          },
           capabilities: null,
         });
         write({ method: "initialized" });
@@ -390,7 +403,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             .parse(await request("thread/read", { threadId: input.sessionId }));
           if (!["idle", "notLoaded"].includes(current.thread.status.type))
             throw new Error(
-              "Codex 会话仍在执行任务或状态异常，本次消息未提交。请等待当前任务结束后再发送。",
+              "Codex session busy or unavailable. Message not sent; wait until it is idle.",
             );
         }
         const response = z
@@ -409,10 +422,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             }),
           );
         if (socket && response.thread.status?.type !== "idle")
-          throw new Error("Codex 会话当前未空闲，本次消息未提交。请等待当前任务结束后再发送。");
+          throw new Error("Codex session busy. Message not sent; wait until it is idle.");
         sessionId = response.thread.id;
         input.onSession(sessionId);
-        if (controller.signal.aborted) return { status: "cancelled", text: "任务在开始前已停止。" };
+        if (controller.signal.aborted)
+          return { status: "cancelled", text: "Stopped before starting." };
         dispatched = true;
         const started = await Promise.race([
           request("turn/start", {
@@ -436,17 +450,17 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             text:
               error instanceof Error && error.message.startsWith("Codex ")
                 ? error.message
-                : "Codex 任务未能正常完成，请检查本地运行环境。",
+                : "Codex task failed. Check the local setup.",
           });
         return await completed.promise;
       } finally {
         steer = undefined;
         clearTimeout(stopTimer);
-        client.rejectAllPendingRequests("Codex 连接已结束");
+        client.rejectAllPendingRequests("Codex connection closed.");
         terminate("SIGTERM");
         const force = setTimeout(() => terminate("SIGKILL"), 3_000);
         const deadline = setTimeout(
-          () => closed.reject(new Error("无法确认 Codex 子进程退出，服务必须停止")),
+          () => closed.reject(new Error("Codex exit unconfirmed. Service must stop.")),
           8_000,
         );
         try {
@@ -463,7 +477,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     steer(prompt) {
       if (!steer)
         return Promise.reject(
-          new Error("Codex 当前没有执行中的轮次，补充消息未提交。请重新发送。"),
+          new Error("Codex has no active turn. Input not sent; resend to continue."),
         );
       return steer(prompt);
     },

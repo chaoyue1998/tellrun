@@ -54,7 +54,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         mkdirSync(lock, { mode: 0o700 });
         writeFileSync(join(lock, owner), "", { flag: "wx", mode: 0o600 });
         owned = true;
-        if (readdirSync(lock).length !== 1) throw new Error("状态锁正在被其他实例取得，请稍后重试");
+        if (readdirSync(lock).length !== 1) throw new Error("State lock busy. Try again.");
       } catch (error) {
         if (owned || !(error instanceof Error && "code" in error && error.code === "EEXIST"))
           throw error;
@@ -67,7 +67,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           const previous = owners.length === 1 ? owners[0] : undefined;
           const pid = previous?.match(/^([1-9]\d*)-[0-9a-f-]+$/)?.[1];
           if (!previous || !pid)
-            throw new Error("状态锁正在初始化或格式无效，请检查是否已有实例运行");
+            throw new Error("State lock initializing or invalid. Check for another instance.");
           try {
             process.kill(Number(pid), 0);
           } catch (error) {
@@ -77,7 +77,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             rmdirSync(lock);
             continue;
           }
-          throw new Error("已有 Tellrun 实例正在使用状态文件，请先停止该实例");
+          throw new Error("Another Tellrun instance is running. Stop it first.");
         } catch (error) {
           if (
             !(
@@ -90,7 +90,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         }
       }
     }
-    if (!owned) throw new Error("无法取得状态文件锁，请稍后重试");
+    if (!owned) throw new Error("Cannot acquire state lock. Try again.");
 
     let state: State;
     try {
@@ -98,7 +98,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       try {
         state = stateSchema.parse(JSON.parse(contents));
       } catch {
-        throw new Error("state.json 损坏或格式无效，请检查或从备份恢复；原文件未修改");
+        throw new Error("Invalid state.json; file unchanged. Check it or restore a backup.");
       }
       chmodSync(path, 0o600);
     } catch (error) {
@@ -109,7 +109,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
 
     /** 一次业务操作只保存一个快照；嵌套操作合并写入，失败时回滚内存并停止后续写入。 */
     function update<T>(action: () => T): T {
-      if (!usable) throw new Error("状态存储已关闭或写入失败，必须重启服务后恢复");
+      if (!usable) throw new Error("State storage unavailable. Restart the service.");
       if (updating) return action();
       const previous = state;
       state = structuredClone(state);
@@ -121,7 +121,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         } catch (error) {
           usable = false;
           throw Object.assign(
-            new Error("无法保存状态文件，请检查磁盘空间和权限", { cause: error }),
+            new Error("Cannot save state. Check disk space and permissions.", { cause: error }),
             { code: "STATE_WRITE_FAILED" },
           );
         }
@@ -137,12 +137,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
     /** 无回复时跳过入队；其余按 Unicode 字符拆分，和触发它的状态变更一起保存。 */
     function enqueueReply(channelId: number, text: string | undefined) {
       if (text === undefined) return;
-      const parts = text.match(/[\s\S]{1,2000}/gu) ?? ["（没有文本回复）"];
+      const parts = text.match(/[\s\S]{1,2000}/gu) ?? ["(No text reply)"];
       for (const [index, part] of parts.entries()) {
         state.outbox.push({
           id: state.outbox.reduce((max, item) => Math.max(max, item.id), 0) + 1,
           channelId,
-          text: parts.length > 1 ? `（${index + 1}/${parts.length}）\n${part}` : part,
+          text: parts.length > 1 ? `(${index + 1}/${parts.length})\n${part}` : part,
           attempts: 0,
           retryAt: Date.now(),
         });
@@ -155,7 +155,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         return;
       update(() => {
         const task = state.tasks.find((task) => task.id === id);
-        if (!task) throw new Error("任务记录不存在");
+        if (!task) throw new Error("Task not found.");
         Object.assign(task, { status: result.status, result: result.text });
         if (result.status === "interrupted") {
           const channel = state.channels.find((channel) => channel.id === task.channelId);
@@ -163,12 +163,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
         }
         enqueueReply(
           task.channelId,
-          `任务 #${id} ${
+          `Task #${id} ${
             {
-              completed: "已完成",
-              failed: "失败",
-              cancelled: "已停止",
-              interrupted: "执行状态待确认",
+              completed: "Completed",
+              failed: "Failed",
+              cancelled: "Stopped",
+              interrupted: "Unconfirmed",
             }[result.status]
           }\n${result.text}`,
         );
@@ -176,7 +176,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           if (input.status !== "pending" && input.status !== "sending") continue;
           enqueueReply(
             task.channelId,
-            `任务 #${id} 的第 ${index + 1} 条补充消息${input.status === "pending" ? "尚未提交" : "提交结果待确认"}，任务已结束，未自动重试。请检查会话后重新发送需要继续的内容。`,
+            `Task #${id}, message ${index + 1}: ${input.status === "pending" ? "not sent" : "delivery unconfirmed"}. Task ended; not retried. Check the session before resending.`,
           );
           input.status = "failed";
         }
@@ -267,9 +267,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 接收时固定目录、会话与输入，限制全局只有一个未结束任务。 */
       createTask(channel: State["channels"][number], prompt: string) {
         return update(() => {
-          if (!channel.cwd) throw new Error("创建任务前必须指定工作目录");
+          if (!channel.cwd) throw new Error("Set a working directory first.");
           if (state.tasks.some((task) => activeTaskStatuses.has(task.status)))
-            throw new Error("已有任务正在执行");
+            throw new Error("A task is already running.");
           const task: State["tasks"][number] = {
             id: state.tasks.reduce((max, item) => Math.max(max, item.id), 0) + 1,
             channelId: channel.id,
@@ -289,7 +289,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         update(() => {
           const task = state.tasks.find((task) => task.id === id);
           if (!task || !["queued", "dispatching", "running"].includes(task.status))
-            throw new Error("当前任务无法接收补充输入");
+            throw new Error("Task cannot accept more input.");
           if (task.status === "queued") task.prompt += `\n\n${text}`;
           else task.inputs.push({ text, status: "pending" });
         });
@@ -301,7 +301,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         if (!task || index < 0) return;
         return update(() => {
           const input = state.tasks.find((task) => task.id === id)?.inputs[index];
-          if (!input) throw new Error("补充输入记录不存在");
+          if (!input) throw new Error("Input not found.");
           input.status = "sending";
           return { index, text: input.text };
         });
@@ -314,7 +314,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           if (!task || input?.status !== "sending") return;
           input.status = error === undefined ? "accepted" : "failed";
           if (error !== undefined)
-            enqueueReply(task.channelId, `任务 #${id} 的第 ${index + 1} 条补充消息：${error}`);
+            enqueueReply(task.channelId, `Task #${id}, message ${index + 1}: ${error}`);
         });
       },
       /** 先保存派发状态再调用 Agent；空闲时仅查询，不反复写文件。 */
@@ -359,7 +359,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 未派发任务直接取消；其余等待 Agent 确认终态。 */
       cancelTask(id: number) {
         if (state.tasks.find((task) => task.id === id)?.status === "queued") {
-          finishTask(id, { status: "cancelled", text: "任务尚未开始，已取消。" });
+          finishTask(id, { status: "cancelled", text: "Cancelled before starting." });
         } else
           update(() => {
             const task = state.tasks.find(
@@ -376,7 +376,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         )) {
           finishTask(task.id, {
             status: "interrupted",
-            text: "服务已重启，无法确认上次任务的执行结果。请先检查工作目录；确认后发送 /resume，再提交新消息。",
+            text: "Service restarted; task result unknown. Check the project, then /resume and send a new task.",
           });
         }
       },

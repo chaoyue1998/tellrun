@@ -20,7 +20,6 @@
 
 当前支持 **Telegram + Codex**，面向单用户，每次处理一个任务。多会话列表、独立任务排队、审批与结构化提问交互、图片和文件输入暂未支持。
 
-CLI 配置向导和机器人状态提示目前使用中文。
 
 ## 安装并通过 Telegram 使用 Codex
 
@@ -74,16 +73,16 @@ tellrun run
 
 ## Telegram 命令
 
-| 命令 | 作用 |
-| --- | --- |
-| `/start`、`/help` | 查看使用说明 |
-| `/cwd` | 查看当前工作目录 |
-| `/cwd /absolute/path` | 切换工作目录并开始新会话 |
-| `/new` | 开始新会话，保留工作目录 |
-| `/status` | 查看连接、会话、目录和任务状态 |
-| `/last` | 查看最近任务的状态与结果 |
-| `/stop` | 请求停止当前任务，并暂停接收新任务 |
-| `/resume` | 恢复接收新任务，不会重新执行此前中断的任务 |
+| 命令                  | 作用                                       |
+| --------------------- | ------------------------------------------ |
+| `/start`、`/help`     | 查看使用说明                               |
+| `/cwd`                | 查看当前工作目录                           |
+| `/cwd /absolute/path` | 切换工作目录并开始新会话                   |
+| `/new`                | 开始新会话，保留工作目录                   |
+| `/status`             | 查看连接、会话、目录和任务状态             |
+| `/last`               | 查看最近任务的状态与结果                   |
+| `/stop`               | 请求停止当前任务，并暂停接收新任务         |
+| `/resume`             | 恢复接收新任务，不会重新执行此前中断的任务 |
 
 切换目录或新建会话前，需要等待当前任务结束。使用 `/stop` 后，先检查最终状态，再发送 `/resume` 和新的任务内容。
 
@@ -91,15 +90,15 @@ tellrun run
 
 以下命令用于 Linux systemd 用户服务：
 
-| 命令 | 作用 |
-| --- | --- |
-| `tellrun start` | 启动后台服务 |
-| `tellrun start --enable` | 启动服务并启用开机自启 |
-| `tellrun status` | 查看服务状态与数据路径 |
-| `tellrun logs` | 查看最近 100 条日志 |
-| `tellrun logs -f` | 持续跟随日志 |
-| `tellrun restart` | 重启服务，加载新配置或新版本 |
-| `tellrun stop` | 停止后台服务 |
+| 命令                        | 作用                           |
+| --------------------------- | ------------------------------ |
+| `tellrun start`             | 启动后台服务                   |
+| `tellrun start --enable`    | 启动服务并启用开机自启         |
+| `tellrun status`            | 查看服务状态与数据路径         |
+| `tellrun logs`              | 查看最近 100 条日志            |
+| `tellrun logs -f`           | 持续跟随日志                   |
+| `tellrun restart`           | 重启服务，加载新配置或新版本   |
+| `tellrun stop`              | 停止后台服务                   |
 | `tellrun service uninstall` | 停止并移除服务，保留配置和状态 |
 
 启动时会检查并启用用户 linger，使服务在退出 SSH 后继续运行。若权限不足，CLI 会显示需要在服务器执行的命令。完整命令帮助见 `tellrun --help`。
@@ -120,11 +119,11 @@ tellrun restart
 
 运行 `tellrun setup` 创建或更新配置，已有 Bot Token 可留空保留原值。
 
-| 路径 | 内容 |
-| --- | --- |
-| `~/.tellrun/config.json` | Bot Token、授权用户 ID、Codex 路径和可选代理 |
-| `~/.tellrun/state.json` | 当前会话、工作目录、任务输入与结果、待发送回复 |
-| `~/.tellrun/tellrun.service` | Linux 后台服务定义 |
+| 路径                         | 内容                                           |
+| ---------------------------- | ---------------------------------------------- |
+| `~/.tellrun/config.json`     | Bot Token、授权用户 ID、Codex 路径和可选代理   |
+| `~/.tellrun/state.json`      | 当前会话、工作目录、任务输入与结果、待发送回复 |
+| `~/.tellrun/tellrun.service` | Linux 后台服务定义                             |
 
 Codex 使用同一系统用户的登录和模型配置，完整会话历史由 Codex 管理。Tellrun 不设置项目目录白名单；可访问范围由运行用户权限和 Codex 沙箱共同决定，默认采用工作区写入与按需审批策略。
 
@@ -132,11 +131,11 @@ Codex 使用同一系统用户的登录和模型配置，完整会话历史由 C
 
 前台运行或自行托管进程时，可以使用环境变量覆盖配置：
 
-| 变量 | 用途 |
-| --- | --- |
-| `TELEGRAM_BOT_TOKEN` | 机器人 Token |
-| `TELEGRAM_OWNER_ID` | 允许操作机器人的数字用户 ID |
-| `CODEX_PATH` | Codex 命令名或可执行文件路径 |
+| 变量                 | 用途                                            |
+| -------------------- | ----------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN` | 机器人 Token                                    |
+| `TELEGRAM_OWNER_ID`  | 允许操作机器人的数字用户 ID                     |
+| `CODEX_PATH`         | Codex 命令名或可执行文件路径                    |
 | `TELEGRAM_PROXY_URL` | Telegram 的 HTTP/HTTPS 代理，非空时覆盖配置文件 |
 
 内置后台服务不会自动读取当前终端的环境变量或项目 `.env`，请使用 `tellrun setup` 保存必要配置。
@@ -188,12 +187,12 @@ npm run dev
 
 在配置向导中选择仅保存配置，再启动开发进程。开发环境与全局安装共用 `~/.tellrun/`，请先停止已有实例。也可参考仓库中的 [.env.example](https://github.com/chaoyue1998/tellrun/blob/main/.env.example)，创建 `.env` 提供开发配置。
 
-| 命令 | 用途 |
-| --- | --- |
-| `npm run dev` | 监听源码并自动重启 |
+| 命令            | 用途                     |
+| --------------- | ------------------------ |
+| `npm run dev`   | 监听源码并自动重启       |
 | `npm run check` | 格式、静态检查与类型检查 |
-| `npm run build` | 编译到 `dist/` |
-| `npm start` | 运行编译产物 |
+| `npm run build` | 编译到 `dist/`           |
+| `npm start`     | 运行编译产物             |
 
 如果让 Codex 修改 Tellrun 自身，使用 `npm run build` 后执行 `npm start`，避免源码监听重启打断任务。
 

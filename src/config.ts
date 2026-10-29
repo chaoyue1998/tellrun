@@ -43,8 +43,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
       throw new Error(
         error instanceof SyntaxError
-          ? "~/.tellrun/config.json 不是有效的配置对象，请运行 tellrun setup 重新配置"
-          : "无法读取 ~/.tellrun/config.json，请检查文件权限",
+          ? "Invalid ~/.tellrun/config.json. Run tellrun setup."
+          : "Cannot read ~/.tellrun/config.json. Check permissions.",
       );
     }
   }
@@ -60,7 +60,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   });
   if (!config.success) {
     throw new Error(
-      `配置无效：${[...new Set(config.error.issues.map((issue) => issue.path.join(".")))].join("、")}；请运行 tellrun setup 或检查环境变量`,
+      `Invalid config: ${[...new Set(config.error.issues.map((issue) => issue.path.join(".")))].join(", ")}. Run tellrun setup or check environment variables.`,
     );
   }
   return config.data;

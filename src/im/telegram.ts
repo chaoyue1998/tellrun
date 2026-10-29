@@ -123,10 +123,10 @@ export function createTelegramConnection(
               : undefined,
       },
       cause instanceof GrammyError && cause.error_code === 409
-        ? "Telegram 轮询冲突，请检查其他实例或 Webhook"
+        ? "Telegram polling conflict. Check other instances or webhook."
         : cause instanceof GrammyError && cause.error_code === 401
-          ? "Telegram 身份验证失败，请检查 Bot Token"
-          : "Telegram 连接或持久化处理失败，服务将停止",
+          ? "Telegram authentication failed. Check bot token."
+          : "Telegram or storage error. Stopping service.",
     );
   }
 
@@ -137,8 +137,8 @@ export function createTelegramConnection(
         bot.botInfo = await bot.api.getMe();
         if (polling.signal.aborted) return;
         if ((await bot.api.getWebhookInfo()).url) {
-          logger.error("当前 Bot 已配置 Webhook，请先确认并手动移除后再启用长轮询");
-          throw new Error("Bot 已被 Webhook 占用");
+          logger.error("Webhook configured. Remove it before starting long polling.");
+          throw new Error("Bot has an active webhook.");
         }
         return {
           platform: "telegram",
@@ -157,7 +157,7 @@ export function createTelegramConnection(
       const workers: Promise<void>[] = [];
       try {
         if (polling.signal.aborted) return;
-        logger.info({ botId: bot.botInfo.id }, "Telegram 长轮询已启动");
+        logger.info({ botId: bot.botInfo.id }, "Telegram polling started");
         workers.push(
           (async () => {
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
@@ -211,7 +211,7 @@ export function createTelegramConnection(
                         errorType: error.name,
                         errorCode: error instanceof GrammyError ? error.error_code : undefined,
                       },
-                      "Telegram 流式预览发送失败，完整结果仍通过回复队列发送",
+                      "Telegram preview failed; final reply delivery continues",
                     );
                   }
                 }
@@ -242,8 +242,8 @@ export function createTelegramConnection(
                 logger.warn(
                   { outboxId: reply.id, permanent, errorType: error.name },
                   permanent
-                    ? "Telegram 永久拒绝发送，回复已移出队列；任务结果仍保留"
-                    : "Telegram 回复发送失败，已保留并安排重试",
+                    ? "Telegram rejected reply permanently; removed from queue. Result kept."
+                    : "Telegram reply failed; saved for retry",
                 );
               }
             }
@@ -271,7 +271,7 @@ export function createTelegramConnection(
                       errorType: error instanceof Error ? error.name : "UnknownError",
                       errorCode: error instanceof GrammyError ? error.error_code : undefined,
                     },
-                    "Telegram 输入状态更新失败，任务继续执行",
+                    "Telegram typing update failed; task continues",
                   );
                 }
               }

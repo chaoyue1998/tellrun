@@ -20,7 +20,6 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 
 Currently supports **Telegram + Codex** for one user, with one task at a time. A session picker, a queue of separate tasks, approval and structured question interfaces, and image or file input are not yet supported.
 
-The CLI setup wizard and bot status messages are currently in Chinese.
 
 ## Install and connect Codex to Telegram
 
@@ -74,16 +73,16 @@ Without `/cwd`, the working directory defaults to the directory where the servic
 
 ## Telegram commands
 
-| Command | Purpose |
-| --- | --- |
-| `/start`, `/help` | Show usage instructions |
-| `/cwd` | Show the current working directory |
-| `/cwd /absolute/path` | Change the working directory and start a new conversation |
-| `/new` | Start a new conversation while keeping the working directory |
-| `/status` | Show connection, conversation, directory, and task status |
-| `/last` | Show the latest task's status and result |
-| `/stop` | Request that the current task stop and pause new tasks |
-| `/resume` | Accept new tasks again without rerunning an interrupted task |
+| Command               | Purpose                                                      |
+| --------------------- | ------------------------------------------------------------ |
+| `/start`, `/help`     | Show usage instructions                                      |
+| `/cwd`                | Show the current working directory                           |
+| `/cwd /absolute/path` | Change the working directory and start a new conversation    |
+| `/new`                | Start a new conversation while keeping the working directory |
+| `/status`             | Show connection, conversation, directory, and task status    |
+| `/last`               | Show the latest task's status and result                     |
+| `/stop`               | Request that the current task stop and pause new tasks       |
+| `/resume`             | Accept new tasks again without rerunning an interrupted task |
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
 
@@ -91,15 +90,15 @@ Wait for the current task to finish before changing directories or starting a ne
 
 These commands manage a Linux systemd user service:
 
-| Command | Purpose |
-| --- | --- |
-| `tellrun start` | Start the background service |
-| `tellrun start --enable` | Start the service and enable it at boot |
-| `tellrun status` | Show service status and data paths |
-| `tellrun logs` | Show the latest 100 log entries |
-| `tellrun logs -f` | Follow logs |
-| `tellrun restart` | Restart with the current configuration or installed version |
-| `tellrun stop` | Stop the background service |
+| Command                     | Purpose                                                      |
+| --------------------------- | ------------------------------------------------------------ |
+| `tellrun start`             | Start the background service                                 |
+| `tellrun start --enable`    | Start the service and enable it at boot                      |
+| `tellrun status`            | Show service status and data paths                           |
+| `tellrun logs`              | Show the latest 100 log entries                              |
+| `tellrun logs -f`           | Follow logs                                                  |
+| `tellrun restart`           | Restart with the current configuration or installed version  |
+| `tellrun stop`              | Stop the background service                                  |
 | `tellrun service uninstall` | Stop and remove the service, keeping configuration and state |
 
 On startup, Tellrun checks and enables user lingering so the service can continue after you disconnect from SSH. If permissions are insufficient, the CLI prints the command to run on your server. Use `tellrun --help` for full CLI help.
@@ -120,11 +119,11 @@ Configuration and state live in `~/.tellrun/` and are preserved when upgrading t
 
 Run `tellrun setup` to create or update your configuration. Leave the Bot Token blank to keep the existing value.
 
-| Path | Contents |
-| --- | --- |
-| `~/.tellrun/config.json` | Bot Token, authorized user ID, Codex path, and optional proxy |
-| `~/.tellrun/state.json` | Current conversation, working directory, task inputs and results, and pending replies |
-| `~/.tellrun/tellrun.service` | Linux background service definition |
+| Path                         | Contents                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------- |
+| `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                         |
+| `~/.tellrun/state.json`      | Current conversation, working directory, task inputs and results, and pending replies |
+| `~/.tellrun/tellrun.service` | Linux background service definition                                                   |
 
 Codex uses the same operating system user's authentication and model configuration, and manages its own full conversation history. Tellrun does not maintain a project directory allowlist. Access depends on operating system permissions and the Codex sandbox; Tellrun defaults to workspace write access and approvals on request.
 
@@ -132,11 +131,11 @@ Codex uses the same operating system user's authentication and model configurati
 
 When running in the foreground or managing the process yourself, you can override configuration with environment variables:
 
-| Variable | Purpose |
-| --- | --- |
-| `TELEGRAM_BOT_TOKEN` | Bot token |
-| `TELEGRAM_OWNER_ID` | Numeric ID of the user allowed to interact with the bot |
-| `CODEX_PATH` | Codex command name or executable path |
+| Variable             | Purpose                                                                       |
+| -------------------- | ----------------------------------------------------------------------------- |
+| `TELEGRAM_BOT_TOKEN` | Bot token                                                                     |
+| `TELEGRAM_OWNER_ID`  | Numeric ID of the user allowed to interact with the bot                       |
+| `CODEX_PATH`         | Codex command name or executable path                                         |
 | `TELEGRAM_PROXY_URL` | HTTP/HTTPS proxy for Telegram; overrides the configuration file when nonempty |
 
 The built-in background service does not automatically load your current terminal's environment variables or a project's `.env` file. Save the required configuration with `tellrun setup`.
@@ -188,12 +187,12 @@ npm run dev
 
 Choose to save configuration without starting a background service in the setup wizard, then start the development process. Development and global installations share `~/.tellrun/`, so stop any existing instance first. You can also create a `.env` file using the repository's [.env.example](https://github.com/chaoyue1998/tellrun/blob/main/.env.example) for development configuration.
 
-| Command | Purpose |
-| --- | --- |
-| `npm run dev` | Watch source files and restart automatically |
+| Command         | Purpose                                          |
+| --------------- | ------------------------------------------------ |
+| `npm run dev`   | Watch source files and restart automatically     |
 | `npm run check` | Run formatting, static analysis, and type checks |
-| `npm run build` | Compile to `dist/` |
-| `npm start` | Run the compiled application |
+| `npm run build` | Compile to `dist/`                               |
+| `npm start`     | Run the compiled application                     |
 
 When asking Codex to modify Tellrun itself, run `npm run build` followed by `npm start` so source changes do not trigger a restart during the task.
 
