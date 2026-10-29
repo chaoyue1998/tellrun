@@ -213,11 +213,14 @@ export function createTelegramConnection(
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
             let offset = 0;
             while (!polling.signal.aborted) {
-              for (const update of await bot.api.getUpdates({
+              const updates = await bot.api.getUpdates({
                 offset,
                 timeout: 30,
                 allowed_updates: ["message", "callback_query"],
-              })) {
+              });
+              if (polling.signal.aborted) return;
+              store.confirmUpdates(String(bot.botInfo.id), offset, updates.length === 0);
+              for (const update of updates) {
                 if (polling.signal.aborted) return;
                 await bot.handleUpdate(update);
                 offset = update.update_id + 1;
@@ -229,7 +232,7 @@ export function createTelegramConnection(
             let nextDraftAt = 0;
             let sentDraft: { taskId: number; text: string; at: number } | undefined;
             while (!polling.signal.aborted) {
-              const reply = store.pendingReply(String(bot.botInfo.id), String(config.ownerId));
+              const reply = store.claimReply(String(bot.botInfo.id), String(config.ownerId));
               if (!reply) {
                 const draft = store.pendingDraft(String(bot.botInfo.id), String(config.ownerId));
                 if (
@@ -334,7 +337,7 @@ export function createTelegramConnection(
                 logger.warn(
                   { outboxId: reply.id, permanent, errorType: error.name },
                   permanent
-                    ? "Telegram rejected reply permanently; removed from queue. Result kept."
+                    ? "Telegram rejected reply permanently; removed from queue."
                     : "Telegram reply failed; saved for retry",
                 );
               }

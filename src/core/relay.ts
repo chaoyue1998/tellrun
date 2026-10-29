@@ -1,12 +1,11 @@
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import type { Logger } from "pino";
 import type { Store } from "../storage/store.js";
 import type { Agent, ChannelIdentity, IncomingMessage } from "./types.js";
 
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
-export function createRelayService(options: { store: Store; agent: Agent; logger: Logger }) {
+export function createRelayService(options: { store: Store; agent: Agent }) {
   let stopping = false;
   /** 状态查询与历史结果共用面向用户的状态名称。 */
   const statuses = {
@@ -176,7 +175,6 @@ export function createRelayService(options: { store: Store; agent: Agent; logger
         try {
           const [result] = await Promise.all([running, steering, answering]);
           options.store.finishTask(task.id, result);
-          options.logger.info({ taskId: task.id, status: result.status }, "Task finished");
         } catch (error) {
           options.agent.stop();
           await Promise.allSettled([running, steering, answering]);

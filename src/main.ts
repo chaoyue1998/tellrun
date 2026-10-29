@@ -37,7 +37,7 @@ try {
   logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
 
   if (!stopping) {
-    relay = createRelayService({ store, agent, logger });
+    relay = createRelayService({ store, agent });
     im = createTelegramConnection(config.telegram, relay.handleMessage, store, logger);
     phase = "Connecting Telegram";
     const source = await im.initialize();

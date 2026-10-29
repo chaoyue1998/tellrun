@@ -15,7 +15,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Remote coding**: send tasks in a private Telegram chat and let Codex execute them on your server.
 - **Continuous conversations**: keep the current conversation context, select a project with `/cwd`, and start fresh with `/new`.
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
-- **Task control**: check status and recent results, stop a task and pause new work, and retain conversation and task records across restarts.
+- **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
 - **Personal deployment**: only the configured user's private messages are accepted. Long polling requires no webhook or inbound port configuration.
 
@@ -81,7 +81,7 @@ Without `/cwd`, the working directory defaults to the directory where the servic
 | `/cwd /absolute/path` | Change the working directory and start a new conversation    |
 | `/new`                | Start a new conversation while keeping the working directory |
 | `/status`             | Show connection, conversation, directory, and task status    |
-| `/last`               | Show the latest task's status and result                     |
+| `/last`               | Show the latest finished task's status and result            |
 | `/stop`               | Request that the current task stop and pause new tasks       |
 | `/resume`             | Accept new tasks again without rerunning an interrupted task |
 
@@ -123,10 +123,12 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 | Path                         | Contents                                                                              |
 | ---------------------------- | ------------------------------------------------------------------------------------- |
 | `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                         |
-| `~/.tellrun/state.json`      | Current conversation, working directory, task inputs and results, interactions, and pending replies |
+| `~/.tellrun/state.json`      | Current conversation, directory, active task, latest result, pending interactions and replies, and unconfirmed update IDs |
 | `~/.tellrun/tellrun.service` | Linux background service definition                                                   |
 
 Codex uses the same operating system user's authentication and model configuration, and manages its own full conversation history. Tellrun does not maintain a project directory allowlist. Access depends on operating system permissions and the Codex sandbox; Tellrun defaults to workspace write access and approvals on request.
+
+Tellrun keeps only active tasks and each chat's latest result for `/last`. Confirmed update IDs and closed interactions are removed once they are no longer needed; pending replies remain until sent or permanently rejected. Task history stays with Codex; Tellrun logs only service startup, shutdown, and connection or storage diagnostics.
 
 ### Environment variables
 
@@ -173,7 +175,7 @@ The bot shows the requested operation and offers allow-once, decline, and stop b
 
 For structured questions, select an option or use Telegram's Reply action on the corresponding question. All questions must be answered before the response is submitted. Questions with fixed options accept their number or full label; questions allowing custom answers accept free text. Ordinary new messages still steer the task. Use `/status` to view pending interactions or `/stop` to stop while waiting.
 
-Interactions expire after at most 10 minutes, or sooner if the runtime specifies a shorter deadline. Expired approvals and blocking questions interrupt the task; nonblocking questions expire without choosing an answer and execution continues. Old buttons and replies become invalid after cancellation, task completion, or restart. Saved approvals are never replayed automatically.
+Interactions expire after at most 10 minutes, or sooner if the runtime specifies a shorter deadline. Expired approvals and blocking questions interrupt the task; nonblocking questions expire without choosing an answer and execution continues. Old buttons and replies become invalid after cancellation, task completion, or restart. Saved approvals are never replayed automatically. Replies to bot messages are reserved for open questions; otherwise, send a new message to continue.
 
 Secret input, MCP forms or URL requests, and dynamic tool interactions still require local handling. Unsupported requests interrupt the task with an explanation. Check the task state, then send `/resume` and a new message to continue.
 

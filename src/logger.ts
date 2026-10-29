@@ -1,6 +1,6 @@
 import { pino } from "pino";
 
-/** 创建结构化日志；调用方只记录标识和阶段，不传入配置、正文或原始 API 错误。 */
+/** 只记录服务启停与故障诊断，不传入任务正文、配置或原始 API 错误。 */
 export function createLogger() {
   return pino({
     name: "tellrun",

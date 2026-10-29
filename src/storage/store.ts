@@ -33,6 +33,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
   let updating = false;
   /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
   let draft: { taskId: number; text: string } | undefined;
+  /** 单个发送循环正在处理的回复；交互关闭时仍需保留它的消息清理关联。 */
+  let delivering: State["outbox"][number] | undefined;
 
   /** 只删除本实例的所有权文件；非空目录不能被另一个退出中的实例移除。 */
   function release() {
@@ -124,6 +126,27 @@ export function openStore(path = join(appDirectory, "state.json")) {
       updating = true;
       try {
         const result = action();
+        /** state 只保留运行所需记录；发送中的交互及待发送编辑不能提前回收。 */
+        state.interactions = state.interactions.filter(
+          (item) =>
+            item.status !== "closed" ||
+            item.id === delivering?.interactionId ||
+            state.outbox.some((reply) => reply.interactionId === item.id),
+        );
+        const latest = new Set(
+          state.channels.map(
+            (channel) =>
+              state.tasks.findLast(
+                (task) => task.channelId === channel.id && !activeTaskStatuses.has(task.status),
+              )?.id,
+          ),
+        );
+        state.tasks = state.tasks.filter(
+          (task) =>
+            activeTaskStatuses.has(task.status) ||
+            latest.has(task.id) ||
+            state.interactions.some((item) => item.taskId === task.id),
+        );
         try {
           writeJson(path, state);
         } catch (error) {
@@ -291,6 +314,21 @@ export function openStore(path = join(appDirectory, "state.json")) {
           return reply;
         });
       },
+      /** 成功拉取后才能回收已确认更新；空响应也说明服务端已无可重投记录。 */
+      confirmUpdates(accountId: string, offset: number, empty: boolean) {
+        const pending = state.inboundUpdates.filter((item) => {
+          const channel = state.channels.find((channel) => channel.id === item.channelId);
+          return (
+            channel?.platform !== "telegram" ||
+            channel.accountId !== accountId ||
+            (!empty && !(Number(item.eventId) < offset))
+          );
+        });
+        if (pending.length !== state.inboundUpdates.length)
+          update(() => {
+            state.inboundUpdates = pending;
+          });
+      },
       /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
       setSession(channelId: number, cwd: string | null) {
         update(() => {
@@ -344,7 +382,11 @@ export function openStore(path = join(appDirectory, "state.json")) {
       },
       /** 最近结果按聊天隔离，供 /last 再次查看。 */
       lastTask(channelId: number) {
-        return structuredClone(state.tasks.findLast((task) => task.channelId === channelId));
+        return structuredClone(
+          state.tasks.findLast(
+            (task) => task.channelId === channelId && !activeTaskStatuses.has(task.status),
+          ) ?? state.tasks.findLast((task) => task.channelId === channelId),
+        );
       },
       /** 接收时固定目录、会话与输入，限制全局只有一个未结束任务。 */
       createTask(channel: State["channels"][number], prompt: string) {
@@ -481,7 +523,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
             : item.messages.some((message) => message.messageId === content.replyToMessageId) &&
               state.tasks.some((task) => task.id === item.taskId && task.channelId === channelId),
         );
-        if (!interaction) return content.type === "interaction" ? "Request expired." : undefined;
+        if (!interaction)
+          return content.type === "interaction"
+            ? "Request expired."
+            : content.replyToMessageId !== undefined
+              ? "Send a new message to continue."
+              : undefined;
         const task = state.tasks.find(
           (task) => task.id === interaction.taskId && task.channelId === channelId,
         );
@@ -596,8 +643,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
         for (const interaction of state.interactions)
           closeInteraction(interaction.id, "Service restarted. Request closed.");
       },
-      /** 按机器人与授权用户取最早回复，重试保持发送顺序。 */
-      pendingReply(accountId: string, userId: string) {
+      /** 按机器人与授权用户领取最早回复，内存关联保留到发送成功或失败。 */
+      claimReply(accountId: string, userId: string) {
+        if (delivering) return;
         for (const reply of state.outbox) {
           const interaction = state.interactions.find((item) => item.id === reply.interactionId);
           if (
@@ -615,17 +663,17 @@ export function openStore(path = join(appDirectory, "state.json")) {
             channel.accountId === accountId &&
             channel.userId === userId
           ) {
-            return reply.retryAt <= Date.now()
-              ? structuredClone({
-                  ...reply,
-                  chatId: channel.chatId,
-                  interaction,
-                })
-              : undefined;
+            if (reply.retryAt > Date.now()) return;
+            delivering = structuredClone(reply);
+            return structuredClone({
+              ...reply,
+              chatId: channel.chatId,
+              interaction,
+            });
           }
         }
       },
-      /** 发送成功或永久拒绝后移出发送队列，任务结果仍保留。 */
+      /** 发送成功或永久拒绝后移出队列；/last 只保留每个聊天的最近结果。 */
       removeReply(
         id: number,
         delivery?: {
@@ -636,6 +684,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         },
       ) {
         update(() => {
+          if (delivering?.id === id) delivering = undefined;
           state.outbox = state.outbox.filter((reply) => reply.id !== id);
           const interaction = state.interactions.find(
             (item) => item.id === delivery?.interactionId,
@@ -673,6 +722,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 发送失败只更新回复的重试信息，不影响任务执行状态。 */
       retryReply(id: number, seconds: number) {
         update(() => {
+          if (delivering?.id === id) delivering = undefined;
           const reply = state.outbox.find((reply) => reply.id === id);
           if (reply)
             Object.assign(reply, {
