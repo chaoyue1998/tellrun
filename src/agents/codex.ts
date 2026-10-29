@@ -4,6 +4,13 @@ import { connect } from "node:net";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { promisify } from "node:util";
+import {
+  createJSONRPCErrorResponse,
+  createJSONRPCSuccessResponse,
+  JSONRPCClient,
+  JSONRPCErrorException,
+  type JSONRPCRequest,
+} from "json-rpc-2.0";
 import WebSocket from "ws";
 import { z } from "zod";
 import type { Agent, AgentResult } from "../core/types.js";
@@ -71,17 +78,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           });
       const closed = Promise.withResolvers<void>();
       const completed = Promise.withResolvers<AgentResult>();
-      const pending = new Map<
-        number,
-        {
-          resolve: (value: unknown) => void;
-          reject: (error: Error) => void;
-          timer: ReturnType<typeof setTimeout>;
-          method: string;
-        }
-      >();
+      /** 库管理请求关联和超时；Codex 线上消息省略 jsonrpc 字段。 */
+      const client = new JSONRPCClient(({ id, method, params }: JSONRPCRequest) =>
+        write({ id, method, params }),
+      );
       const messages = new Map<string, { text: string; phase?: string | null | undefined }>();
-      let serial = 0;
       let buffer = "";
       /** turn/start 响应前的事件暂存，收到当前 turn ID 后再处理，避免混入其他客户端事件。 */
       let earlyMessages = "";
@@ -127,33 +128,14 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       }
 
-      /** 连接结束时释放所有 RPC 等待，取消初始化也不必等待请求超时。 */
-      function rejectPending(text: string) {
-        for (const item of pending.values()) {
-          clearTimeout(item.timer);
-          item.reject(
-            new Error(
-              item.method === "turn/steer"
-                ? "Codex 无法确认补充输入是否已提交，未自动重试。请检查会话后重新发送需要继续的内容。"
-                : text,
-            ),
-          );
-        }
-        pending.clear();
-      }
-
       /** 通信故障不等于执行失败；保留不确定状态并结束当前连接。 */
       function fail(text: string) {
         if (settled) return;
         finish({ status: "interrupted", text });
-        rejectPending(text);
         /** 共享服务不会随连接退出；仅中断已经确认归属本次任务的 turn。 */
         if (socket?.readyState === WebSocket.OPEN && sessionId && runId)
-          write({
-            id: ++serial,
-            method: "turn/interrupt",
-            params: { threadId: sessionId, turnId: runId },
-          });
+          void request("turn/interrupt", { threadId: sessionId, turnId: runId }).catch(() => {});
+        client.rejectAllPendingRequests(text);
         controller.abort();
       }
 
@@ -173,20 +155,34 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       }
 
-      /** 请求按 ID 关联且有超时，补充输入和中断使用当前任务的连接。 */
-      function request(method: string, params: unknown): Promise<unknown> {
-        if (controller.signal.aborted && method !== "turn/interrupt")
-          return Promise.reject(new Error("任务已停止"));
-        return new Promise((resolve, reject) => {
-          const id = ++serial;
-          pending.set(id, {
-            resolve,
-            reject,
-            method,
-            timer: setTimeout(() => fail(`Codex ${method} 请求超时，未自动重试。`), 30_000),
-          });
-          write({ id, method, params });
-        });
+      /** 超时仍终止任务；区分服务端拒绝与连接故障，保留补充输入的不确定状态。 */
+      async function request(method: string, params: unknown): Promise<unknown> {
+        if (controller.signal.aborted && method !== "turn/interrupt") throw new Error("任务已停止");
+        try {
+          return await client
+            .timeout(30_000, (id) => {
+              fail(`Codex ${method} 请求超时，未自动重试。`);
+              return createJSONRPCErrorResponse(id, 0, "Codex 请求超时");
+            })
+            .request(method, params);
+        } catch (error) {
+          /** 只识别已知占用错误，避免把可能含敏感信息的原始错误转发到 IM。 */
+          if (error instanceof JSONRPCErrorException && error.data === "codex")
+            throw new Error(
+              method === "thread/resume" &&
+                error.code === -32600 &&
+                error.message.includes("already has an active writer")
+                ? "Codex 会话仍由其他进程持有，本次任务未开始。请检查本机 Codex 后台连接；空闲会话也可能暂时保留写锁。"
+                : method === "turn/steer"
+                  ? `Codex 补充输入被拒绝（${error.code}），可能当前轮次已结束。请重新发送需要继续的内容。`
+                  : `Codex ${method} 请求被拒绝（${error.code}）。请检查本机 Codex 配置与认证。`,
+            );
+          if (method === "turn/steer")
+            throw new Error(
+              "Codex 无法确认补充输入是否已提交，未自动重试。请检查会话后重新发送需要继续的内容。",
+            );
+          throw error;
+        }
       }
 
       /** 以 turn/start 响应确认本次任务的 run ID，其他客户端的事件不能改变归属。 */
@@ -221,7 +217,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         if (controller.signal.aborted && !dispatched)
           finish({ status: "cancelled", text: "任务在开始前已停止。" });
         if (!settled) fail(`Codex 连接已退出（${code ?? "signal"}），请检查本机认证与运行环境。`);
-        else rejectPending("Codex 连接已关闭");
+        else client.rejectAllPendingRequests("Codex 连接已关闭");
       }
 
       /** 两种传输与提前到达的通知共用协议处理，始终只消费当前任务的事件。 */
@@ -274,24 +270,17 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 "任务需要审批或补充输入，当前版本尚未接入该交互，已中断。请在本机处理后发送 /resume，或调整任务后重新提交。",
               );
             } else if (typeof message.id === "number") {
-              const item = pending.get(message.id);
-              if (!item) continue;
-              clearTimeout(item.timer);
-              pending.delete(message.id);
-              /** 只识别已知占用错误，避免把可能含敏感信息的原始错误转发到 IM。 */
-              if (message.error)
-                item.reject(
-                  new Error(
-                    item.method === "thread/resume" &&
-                      message.error.code === -32600 &&
-                      message.error.message?.includes("already has an active writer")
-                      ? "Codex 会话仍由其他进程持有，本次任务未开始。请检查本机 Codex 后台连接；空闲会话也可能暂时保留写锁。"
-                      : item.method === "turn/steer"
-                        ? `Codex 补充输入被拒绝（${message.error.code}），可能当前轮次已结束。请重新发送需要继续的内容。`
-                        : `Codex ${item.method} 请求被拒绝（${message.error.code}）。请检查本机 Codex 配置与认证。`,
-                  ),
-                );
-              else item.resolve(message.result);
+              /** 补齐库需要的协议字段；错误来源标记仅用于本地处理，不信任服务端 data。 */
+              client.receive(
+                message.error
+                  ? createJSONRPCErrorResponse(
+                      message.id,
+                      message.error.code,
+                      message.error.message ?? "",
+                      "codex",
+                    )
+                  : createJSONRPCSuccessResponse(message.id, message.result),
+              );
             } else if (message.method === "item/agentMessage/delta") {
               const event = z
                 .object({
@@ -453,7 +442,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       } finally {
         steer = undefined;
         clearTimeout(stopTimer);
-        rejectPending("Codex 连接已结束");
+        client.rejectAllPendingRequests("Codex 连接已结束");
         terminate("SIGTERM");
         const force = setTimeout(() => terminate("SIGKILL"), 3_000);
         const deadline = setTimeout(

@@ -69,6 +69,7 @@ Codex app-server 提供线程、轮次、执行事件与审批交互；官方把
 | Telegram       | grammy               | 1.46.0                | 消息、命令、InlineKeyboard、回调、长轮询                           |
 | Telegram 重试  | @grammyjs/auto-retry | 2.0.2                 | 429、5xx 最多重试两次；网络错误上抛；整次调用另设超时              |
 | Codex 后台连接 | ws                   | 8.22.0                | 通过 Unix socket 上的 WebSocket 复用本机 app-server               |
+| Codex 请求管理 | json-rpc-2.0         | 1.8.1                 | 请求编号、响应匹配、超时和断线时释放等待中的请求                   |
 | 数据校验       | zod                  | 4.6.7                 | 配置及应用边界数据校验                                             |
 | 日志           | pino                 | 10.4.0                | JSON 日志、关联标识与脱敏                                          |
 | 开发运行       | tsx                  | 4.23.15               | 本地监听与调试；生产用 tsc 构建产物                                |
@@ -177,6 +178,8 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 每次任务先检查 `CODEX_HOME`（默认 `~/.codex`）下的 `app-server-control/app-server-control.sock`，通过 ws 建立 Unix socket 上的 WebSocket 连接，握手最多等待 5 秒。没有套接字、连接失败或运行在 Windows 时，使用内置 child_process.spawn 启动 codex app-server，参数以数组传入且 shell 为 false。两种传输共用双向 RPC 处理：WebSocket 一帧一条消息，stdin/stdout 使用 JSONL，均省略 `jsonrpc` 字段。独立进程 stderr 不转存，stdout 不能混入应用日志。[传输协议](https://learn.chatgpt.com/docs/app-server#protocol)
 
 每个连接先发送 `initialize` 并等待响应，再发送 `initialized` 通知，之后才能创建或恢复 thread；空闲时的普通消息启动 turn，执行中的补充消息使用 turn/steer，并传入当前 threadId 与 expectedTurnId、校验返回的 turnId；中断通过 turn/interrupt 请求。只根据 turn/completed 的实际状态判定完成、失败或中断。请求超时、进程退出和没有收到事件，都不等价于成功。[协议与生命周期](https://learn.chatgpt.com/docs/app-server)
+
+请求管理使用 `json-rpc-2.0` 的 `JSONRPCClient`，收发边界适配 Codex 省略 `jsonrpc` 字段的消息格式。单次请求超时仍为 30 秒，超时会中断当前任务并释放等待中的请求。Zod 校验、事件归属与任务状态由应用处理；服务端拒绝和本地连接故障分别映射提示，补充输入在断线后保持“提交状态不确定”，不自动重试。
 
 Codex 后台会在最后一个订阅者断开且会话无活动 30 分钟后才卸载，因此客户端关闭后仍可能持有空闲会话的写锁。Tellrun 复用该后台连接；恢复前通过 `thread/read` 检查状态，恢复后再次确认空闲，再提交任务。对其他进程仍持有写锁的情况保留原 thread ID 并提示连接问题，不自动创建新会话或重跑任务，不转发原始错误内容。[会话卸载规则](https://learn.chatgpt.com/docs/app-server#unsubscribe-from-a-loaded-thread)
 
@@ -319,4 +322,4 @@ Claude 等 Agent 的新增工作集中在会话创建或恢复、任务输入、
 | 控制响应 | Codex 持续运行或等待审批时，状态查询与停止仍可用                           |
 | 端到端   | 两个临时工作目录、多轮对话、拒绝审批、停止、重启后恢复、连续运行           |
 
-已在 macOS、Node.js 24.22.1、Codex CLI 0.165.0 的临时工作区验证真实回复、跨进程会话恢复和 turn/interrupt；临时文件存储验证覆盖单实例锁、入站去重、忙碌时控制、会话保存与中断恢复。stdio 与共享 WebSocket 的协议模拟验证覆盖执行中补充、连续输入、轮次隔离、慢请求期间停止、提交拒绝、终态竞态、断线与重启不重放。未向真实 Telegram 聊天发送验证消息，也未完成目标 Linux 的完整 M0 验证。
+已在 macOS、Node.js 24.22.1、Codex CLI 0.165.0 的临时工作区验证真实回复、跨进程会话恢复和 turn/interrupt；临时文件存储验证覆盖单实例锁、入站去重、忙碌时控制、会话保存与中断恢复。stdio 与共享 WebSocket 的协议模拟验证覆盖执行中补充、连续输入、轮次隔离、慢请求期间停止、提交拒绝、终态竞态、断线与重启不重放，以及文本增量、早到事件和最终文本校正。Telegram API 模拟验证覆盖首段提前展示、草稿合并与续期、限流恢复、Unicode 长文本、终态与草稿发送次序、关停取消和正式结果分段。未向真实 Telegram 聊天发送验证消息，也未完成目标 Linux 的完整 M0 验证。

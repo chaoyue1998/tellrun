@@ -1,7 +1,31 @@
 {
   "name": "tellrun",
   "version": "1.0.1",
-  "description": "通过 IM 与服务器上的编码 Agent 对话，提交开发任务、查看进度、处理审批并继续会话。",
+  "description": "Self-hosted Telegram bot for remote AI coding with OpenAI Codex CLI, persistent sessions, and streaming replies.",
+  "keywords": [
+    "codex",
+    "codex-cli",
+    "openai",
+    "openai-codex",
+    "telegram",
+    "telegram-bot",
+    "ai-coding",
+    "ai-agent",
+    "coding-agent",
+    "coding-assistant",
+    "remote-coding",
+    "self-hosted",
+    "chatops",
+    "bridge"
+  ],
+  "homepage": "https://github.com/chaoyue1998/tellrun#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chaoyue1998/tellrun.git"
+  },
+  "bugs": {
+    "url": "https://github.com/chaoyue1998/tellrun/issues"
+  },
   "type": "module",
   "bin": {
     "tellrun": "dist/cli.js"
@@ -28,6 +52,7 @@
     "@grammyjs/auto-retry": "2.0.2",
     "commander": "15.0.0",
     "grammy": "1.46.0",
+    "json-rpc-2.0": "1.8.1",
     "pino": "10.4.0",
     "which": "7.0.0",
     "ws": "8.22.0",
@@ -41,6 +66,6 @@
     "tsx": "4.23.15",
     "typescript": "7.0.2"
   },
-  "author": "",
-  "license": "ISC"
+  "author": "chaoyue1998",
+  "license": "MIT"
 }
