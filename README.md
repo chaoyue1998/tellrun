@@ -47,6 +47,8 @@ Without `/cwd`, the working directory defaults to the directory where the servic
 
 ## Telegram commands
 
+At startup, Tellrun registers an English command menu. Use the menu button beside the chat input or type `/` to select a command.
+
 | Command               | Purpose                                                      |
 | --------------------- | ------------------------------------------------------------ |
 | `/start`, `/help`     | Show usage instructions                                      |

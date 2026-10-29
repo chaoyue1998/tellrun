@@ -7,6 +7,19 @@ import type { Config } from "../config.js";
 import type { MessageHandler } from "../core/types.js";
 import type { Store } from "../storage/store.js";
 
+/** 默认菜单和控制命令识别共用定义，菜单说明统一使用英文。 */
+const commands = [
+  { command: "start", description: "Show usage instructions" },
+  { command: "help", description: "Show available commands" },
+  { command: "cwd", description: "Show or change the working directory" },
+  { command: "new", description: "Start a new conversation" },
+  { command: "permissions", description: "Select the permission mode for future tasks" },
+  { command: "status", description: "Show session and task status" },
+  { command: "last", description: "Show the latest task result" },
+  { command: "stop", description: "Stop the current task and pause" },
+  { command: "resume", description: "Accept new tasks" },
+];
+
 /** Telegram 连接器负责鉴权、消息转换与发送，业务逻辑交给统一处理入口。 */
 export function createTelegramConnection(
   config: Config["telegram"],
@@ -58,6 +71,8 @@ export function createTelegramConnection(
           ...([
             "getMe",
             "getWebhookInfo",
+            "setMyCommands",
+            "setChatMenuButton",
             "getUpdates",
             "sendChatAction",
             "sendMessageDraft",
@@ -89,9 +104,7 @@ export function createTelegramConnection(
     /** 问题回复可包含绝对路径等斜杠文本；已知控制命令仍优先处理。 */
     if (
       ctx.message.reply_to_message?.from?.id === ctx.me.id &&
-      !["start", "help", "cwd", "new", "permissions", "status", "last", "stop", "resume"].includes(
-        name ?? "",
-      )
+      !commands.some((item) => item.command === name)
     )
       command = undefined;
     if (command && target !== undefined && target.toLowerCase() !== ctx.me.username?.toLowerCase())
@@ -206,6 +219,10 @@ export function createTelegramConnection(
           logger.error("Webhook configured. Remove it before starting long polling.");
           throw new Error("Bot has an active webhook.");
         }
+        /** 注册默认语言的命令列表，并让默认菜单按钮打开命令菜单。 */
+        await bot.api.setMyCommands(commands);
+        await bot.api.setChatMenuButton({ menu_button: { type: "commands" } });
+        if (polling.signal.aborted) return;
         return {
           platform: "telegram",
           accountId: String(bot.botInfo.id),
