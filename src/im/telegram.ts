@@ -176,7 +176,10 @@ export function createTelegramConnection(
         ? "Telegram polling conflict. Check other instances or webhook."
         : cause instanceof GrammyError && cause.error_code === 401
           ? "Telegram authentication failed. Check bot token."
-          : "Telegram or storage error. Stopping service.",
+          : error instanceof HttpError ||
+              (error instanceof BotError && error.error instanceof HttpError)
+            ? "Telegram connection failed. Check your network or set telegram.proxyUrl in ~/.tellrun/config.json."
+            : "Telegram or storage error. Stopping service.",
     );
   }
 
