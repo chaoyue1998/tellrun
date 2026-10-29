@@ -28,6 +28,8 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
         /** 未指定目录时沿用服务启动目录，并随消息一同保存，后续可用 /cwd 切换。 */
         if (!channel.cwd) options.store.setSession(channel.id, realpathSync(process.cwd()));
         const task = options.store.activeTask();
+        if (message.content.type === "permissions")
+          return options.store.choosePermissions(channel.id, message.content);
         if (
           message.content.type === "interaction" ||
           (message.content.type === "text" && message.content.replyToMessageId !== undefined)
@@ -39,9 +41,12 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/status — Task status\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Answer questions with buttons or replies. Requests expire within 10 minutes.";
+              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/permissions — Select permission mode\n/status — Task status\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Answer questions with buttons or replies. Requests expire within 10 minutes.";
+            case "permissions":
+              options.store.openPermissions(channel.id, options.agent.permissionModes);
+              return;
             case "status":
-              return `Service: connected\n${options.agent.name}: ${options.agent.version}\nDirectory: ${channel.cwd}\nSession: ${channel.sessionId ? "existing" : "new"}\nNew tasks: ${channel.paused ? "paused (/resume)" : "enabled"}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}`;
+              return `Service: connected\n${options.agent.name}: ${options.agent.version}\nDirectory: ${channel.cwd}\nSession: ${channel.sessionId ? "existing" : "new"}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === channel.permissionMode)?.label ?? channel.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== channel.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nNew tasks: ${channel.paused ? "paused (/resume)" : "enabled"}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}`;
             case "cwd": {
               if (!message.content.args)
                 return `Directory: ${channel.cwd}\nUse /cwd /absolute/path to change directory and start a new session.`;
@@ -127,6 +132,7 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
             cwd: task.cwd,
             prompt: task.prompt,
             sessionId: task.sessionId,
+            permissionMode: task.permissionMode,
             onSession: (id) => options.store.recordSession(task.id, id),
             onStarted: () => options.store.markRunning(task.id),
             onText: (text) => options.store.setDraft(task.id, text),

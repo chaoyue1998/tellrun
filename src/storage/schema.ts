@@ -26,6 +26,17 @@ export const stateSchema = z
         cwd: z.string().nullable(),
         sessionId: z.string().nullable(),
         paused: z.boolean(),
+        /** 模式标识属于 Agent；空值沿用默认模式，兼容旧状态文件。 */
+        permissionMode: z.string().min(1).nullable().default(null),
+        permissionMenu: z
+          .strictObject({
+            id: z.uuid(),
+            expiresAt: nonnegativeInteger,
+            options: z.array(z.strictObject({ id: z.string().min(1), label: z.string() })),
+            messages: z.array(z.strictObject({ messageId: id, text: z.string() })),
+          })
+          .nullable()
+          .default(null),
       }),
     ),
     inboundUpdates: z.array(
@@ -41,6 +52,7 @@ export const stateSchema = z
         cwd: z.string(),
         sessionId: z.string().nullable(),
         prompt: z.string(),
+        permissionMode: z.string().min(1).nullable().default(null),
         /** 旧状态文件没有补充输入；发送中记录用于重启后避免不确定重放。 */
         inputs: z
           .array(
@@ -109,6 +121,7 @@ export const stateSchema = z
         promptEnd: z.boolean().optional(),
         /** 有消息 ID 时编辑原消息并移除按钮，否则发送新消息。 */
         messageId: id.optional(),
+        permissionMenuId: z.uuid().optional(),
       }),
     ),
   })

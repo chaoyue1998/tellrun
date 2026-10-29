@@ -7,6 +7,7 @@ import type {
   ChannelIdentity,
   IncomingMessage,
   InteractionAnswer,
+  PermissionMode,
 } from "../core/types.js";
 import { writeJson } from "./json.js";
 import { acquireLock } from "./lock.js";
@@ -94,7 +95,10 @@ export function openStore(path = join(appDirectory, "state.json")) {
     function enqueueReply(
       channelId: number,
       text: string | undefined,
-      delivery: Pick<State["outbox"][number], "interactionId" | "questionIndex" | "messageId"> = {},
+      delivery: Pick<
+        State["outbox"][number],
+        "interactionId" | "questionIndex" | "messageId" | "permissionMenuId"
+      > = {},
     ) {
       if (text === undefined) return;
       const parts = delivery.messageId
@@ -108,11 +112,23 @@ export function openStore(path = join(appDirectory, "state.json")) {
           attempts: 0,
           retryAt: Date.now(),
           ...delivery,
-          ...(delivery.interactionId && !delivery.messageId
+          ...((delivery.interactionId || delivery.permissionMenuId) && !delivery.messageId
             ? { promptEnd: index === parts.length - 1 }
             : {}),
         });
       }
+    }
+
+    /** 新建、使用或失效菜单时清理按钮，发送途中的旧消息由回执继续清理。 */
+    function closePermissionMenu(channelId: number) {
+      const channel = state.channels.find((item) => item.id === channelId);
+      if (!channel?.permissionMenu) return;
+      state.outbox = state.outbox.filter(
+        (reply) => reply.permissionMenuId !== channel.permissionMenu?.id,
+      );
+      for (const message of channel.permissionMenu.messages)
+        enqueueReply(channel.id, message.text, { messageId: message.messageId });
+      channel.permissionMenu = null;
     }
 
     /** 关闭请求或单个已答问题；撤回未发送提示，已发送消息保留正文并移除按钮。 */
@@ -216,7 +232,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
             (item) => item.channelId === existing.id && item.eventId === message.eventId,
           )
         )
-          return message.content.type === "interaction" ? "Already handled." : undefined;
+          return ["interaction", "permissions"].includes(message.content.type)
+            ? "Already handled."
+            : undefined;
         return update(() => {
           let channel = state.channels.find((channel) => channel.id === existing?.id);
           if (!channel) {
@@ -226,6 +244,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
               cwd: null,
               sessionId: null,
               paused: false,
+              permissionMode: null,
+              permissionMenu: null,
             };
             state.channels.push(channel);
           }
@@ -235,7 +255,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
             eventId: message.eventId,
           });
           const reply = handle(channel);
-          if (message.content.type !== "interaction") enqueueReply(channel.id, reply);
+          if (!["interaction", "permissions"].includes(message.content.type))
+            enqueueReply(channel.id, reply);
           return reply;
         });
       },
@@ -258,8 +279,56 @@ export function openStore(path = join(appDirectory, "state.json")) {
       setSession(channelId: number, cwd: string | null) {
         update(() => {
           const channel = state.channels.find((channel) => channel.id === channelId);
-          if (channel) Object.assign(channel, { cwd, sessionId: null });
+          if (channel) {
+            closePermissionMenu(channelId);
+            if (cwd !== channel.cwd) channel.permissionMode = null;
+            Object.assign(channel, { cwd, sessionId: null });
+          }
         });
+      },
+      /** 菜单只依赖通用模式信息；不启动 Agent 或调用模型。 */
+      openPermissions(channelId: number, modes: readonly PermissionMode[]) {
+        update(() => {
+          const channel = state.channels.find((item) => item.id === channelId);
+          if (!channel) return;
+          closePermissionMenu(channelId);
+          channel.permissionMenu = {
+            id: crypto.randomUUID(),
+            expiresAt: Date.now() + 600_000,
+            options: modes.map(({ id, label }) => ({ id, label })),
+            messages: [],
+          };
+          enqueueReply(
+            channelId,
+            `Permissions\nCurrent selection: ${modes.find((mode) => mode.id === channel.permissionMode)?.label ?? channel.permissionMode ?? modes[0]?.label ?? "Not set"}\n\n${modes.map((mode, index) => `${index + 1}. ${mode.label}`).join("\n")}\n\nApplies to future tasks. The current task keeps its permissions. Modes are subject to local configuration.`,
+            { permissionMenuId: channel.permissionMenu.id },
+          );
+        });
+      },
+      /** 校验聊天、原消息、菜单和有效期；只保存模式，不改变已提交任务的快照。 */
+      choosePermissions(
+        channelId: number,
+        content: Extract<IncomingMessage["content"], { type: "permissions" }>,
+      ) {
+        const channel = state.channels.find((item) => item.id === channelId);
+        const menu = channel?.permissionMenu;
+        if (
+          !menu ||
+          menu.id !== content.id ||
+          menu.expiresAt <= Date.now() ||
+          !menu.messages.some((message) => message.messageId === content.messageId)
+        )
+          return "Menu expired. Open /permissions again.";
+        const option = menu.options[content.optionIndex];
+        if (!option) return "Invalid permission option.";
+        update(() => {
+          const current = state.channels.find((item) => item.id === channelId);
+          if (!current) return;
+          current.permissionMode = option.id;
+          closePermissionMenu(channelId);
+          enqueueReply(channelId, `Selected: ${option.label}. Applies to the next task.`);
+        });
+        return "Permission mode saved.";
       },
       /** 暂停状态跨重启保留，恢复须由用户明确触发。 */
       setPaused(channelId: number, paused: boolean) {
@@ -325,6 +394,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             cwd: channel.cwd,
             sessionId: channel.sessionId,
             prompt,
+            permissionMode: channel.permissionMode,
             inputs: [],
             status: "queued",
             result: null,
@@ -557,6 +627,10 @@ export function openStore(path = join(appDirectory, "state.json")) {
       closeInteraction,
       /** 结果不确定的任务暂停并通知用户，不自动重新派发。 */
       recoverTasks() {
+        if (state.channels.some((channel) => channel.permissionMenu))
+          update(() => {
+            for (const channel of state.channels) closePermissionMenu(channel.id);
+          });
         for (const task of state.tasks.filter(
           (task) => activeTaskStatuses.has(task.status) && task.status !== "queued",
         )) {
@@ -571,6 +645,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 按机器人与授权用户领取最早回复，内存关联保留到发送成功或失败。 */
       claimReply(accountId: string, userId: string) {
         if (delivering) return;
+        for (const channel of state.channels)
+          if (channel.permissionMenu && channel.permissionMenu.expiresAt <= Date.now())
+            update(() => closePermissionMenu(channel.id));
         for (const reply of state.outbox) {
           const interaction = state.interactions.find((item) => item.id === reply.interactionId);
           if (
@@ -594,6 +671,10 @@ export function openStore(path = join(appDirectory, "state.json")) {
               ...reply,
               chatId: channel.chatId,
               interaction,
+              permissionMenu:
+                channel.permissionMenu?.id === reply.permissionMenuId
+                  ? channel.permissionMenu
+                  : undefined,
             });
           }
         }
@@ -606,11 +687,28 @@ export function openStore(path = join(appDirectory, "state.json")) {
           text: string;
           interactionId?: string;
           questionIndex?: number;
+          permissionMenuId?: string;
         },
       ) {
         update(() => {
+          const channelId =
+            delivering?.id === id
+              ? delivering.channelId
+              : state.outbox.find((reply) => reply.id === id)?.channelId;
           if (delivering?.id === id) delivering = undefined;
           state.outbox = state.outbox.filter((reply) => reply.id !== id);
+          if (delivery?.permissionMenuId && channelId !== undefined) {
+            const channel = state.channels.find((item) => item.id === channelId);
+            if (
+              channel?.permissionMenu?.id === delivery.permissionMenuId &&
+              channel.permissionMenu.expiresAt > Date.now()
+            )
+              channel.permissionMenu.messages.push({
+                messageId: delivery.messageId,
+                text: delivery.text,
+              });
+            else enqueueReply(channelId, delivery.text, { messageId: delivery.messageId });
+          }
           const interaction = state.interactions.find(
             (item) => item.id === delivery?.interactionId,
           );

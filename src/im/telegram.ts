@@ -89,7 +89,9 @@ export function createTelegramConnection(
     /** 问题回复可包含绝对路径等斜杠文本；已知控制命令仍优先处理。 */
     if (
       ctx.message.reply_to_message?.from?.id === ctx.me.id &&
-      !["start", "help", "cwd", "new", "status", "last", "stop", "resume"].includes(name ?? "")
+      !["start", "help", "cwd", "new", "permissions", "status", "last", "stop", "resume"].includes(
+        name ?? "",
+      )
     )
       command = undefined;
     if (command && target !== undefined && target.toLowerCase() !== ctx.me.username?.toLowerCase())
@@ -126,8 +128,9 @@ export function createTelegramConnection(
     const match = ctx.callbackQuery.data.match(
       /^i:([0-9a-f-]{36}):(accept|decline|stop|q(\d+)_(\d+))$/,
     );
+    const permissions = ctx.callbackQuery.data.match(/^p:([0-9a-f-]{36}):(\d+)$/);
     let reply = "Button expired.";
-    if (match?.[1] && ctx.chat && ctx.callbackQuery.message) {
+    if ((match?.[1] || permissions?.[1]) && ctx.chat && ctx.callbackQuery.message) {
       reply =
         (await handleMessage({
           channel: {
@@ -137,15 +140,25 @@ export function createTelegramConnection(
             userId: String(ctx.from.id),
           },
           eventId: String(ctx.update.update_id),
-          content: {
-            type: "interaction",
-            id: match[1],
-            action: match[3] !== undefined ? "option" : (match[2] as "accept" | "decline" | "stop"),
-            messageId: ctx.callbackQuery.message.message_id,
-            ...(match[3] !== undefined
-              ? { questionIndex: Number(match[3]), optionIndex: Number(match[4]) }
-              : {}),
-          },
+          content: permissions?.[1]
+            ? {
+                type: "permissions",
+                id: permissions[1],
+                optionIndex: Number(permissions[2]),
+                messageId: ctx.callbackQuery.message.message_id,
+              }
+            : {
+                type: "interaction",
+                id: match?.[1] ?? "",
+                action:
+                  match?.[3] !== undefined
+                    ? "option"
+                    : (match?.[2] as "accept" | "decline" | "stop"),
+                messageId: ctx.callbackQuery.message.message_id,
+                ...(match?.[3] !== undefined
+                  ? { questionIndex: Number(match[3]), optionIndex: Number(match[4]) }
+                  : {}),
+              },
         })) ?? "Received.";
     }
     /** 回调提示不占用入站循环，慢网络下 /status 和 /stop 仍能立即处理。 */
@@ -284,31 +297,45 @@ export function createTelegramConnection(
                   const interaction = reply.interaction;
                   const sent = await bot.api.sendMessage(reply.chatId, reply.text, {
                     ...(reply.promptEnd &&
-                    interaction?.status === "pending" &&
-                    interaction.expiresAt > Date.now()
+                    reply.permissionMenu &&
+                    reply.permissionMenu.expiresAt > Date.now()
                       ? {
                           reply_markup: {
-                            inline_keyboard: [
-                              ...(interaction.kind === "approval"
-                                ? interaction.choices.map((choice) => [
-                                    {
-                                      text: choice === "accept" ? "Allow once" : "Decline",
-                                      callback_data: `i:${interaction.id}:${choice}`,
-                                    },
-                                  ])
-                                : (
-                                    interaction.questions[reply.questionIndex ?? -1]?.options ?? []
-                                  ).map((option, index) => [
-                                    {
-                                      text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
-                                      callback_data: `i:${interaction.id}:q${reply.questionIndex}_${index}`,
-                                    },
-                                  ])),
-                              [{ text: "Stop", callback_data: `i:${interaction.id}:stop` }],
-                            ],
+                            inline_keyboard: reply.permissionMenu.options.map((option, index) => [
+                              {
+                                text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
+                                callback_data: `p:${reply.permissionMenu?.id}:${index}`,
+                              },
+                            ]),
                           },
                         }
-                      : {}),
+                      : reply.promptEnd &&
+                          interaction?.status === "pending" &&
+                          interaction.expiresAt > Date.now()
+                        ? {
+                            reply_markup: {
+                              inline_keyboard: [
+                                ...(interaction.kind === "approval"
+                                  ? interaction.choices.map((choice) => [
+                                      {
+                                        text: choice === "accept" ? "Allow once" : "Decline",
+                                        callback_data: `i:${interaction.id}:${choice}`,
+                                      },
+                                    ])
+                                  : (
+                                      interaction.questions[reply.questionIndex ?? -1]?.options ??
+                                      []
+                                    ).map((option, index) => [
+                                      {
+                                        text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
+                                        callback_data: `i:${interaction.id}:q${reply.questionIndex}_${index}`,
+                                      },
+                                    ])),
+                                [{ text: "Stop", callback_data: `i:${interaction.id}:stop` }],
+                              ],
+                            },
+                          }
+                        : {}),
                   });
                   store.removeReply(reply.id, {
                     messageId: sent.message_id,
@@ -316,6 +343,9 @@ export function createTelegramConnection(
                     ...(reply.interactionId ? { interactionId: reply.interactionId } : {}),
                     ...(reply.questionIndex !== undefined
                       ? { questionIndex: reply.questionIndex }
+                      : {}),
+                    ...(reply.promptEnd && reply.permissionMenuId
+                      ? { permissionMenuId: reply.permissionMenuId }
                       : {}),
                   });
                 }

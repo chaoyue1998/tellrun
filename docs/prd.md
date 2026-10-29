@@ -73,6 +73,7 @@
 | --- | --- |
 | /start 或 /help | 展示使用说明、当前会话和常用操作 |
 | /new | 新建 Agent 会话 |
+| /permissions | 选择后续任务的权限模式，执行中的任务保持原权限 |
 | /sessions | 分页列出会话，点击切换 |
 | /status | 显示当前会话、工作目录、运行中的任务、队列和服务状态 |
 | /queue | 查看排队任务，通过按钮取消指定任务 |
@@ -89,6 +90,8 @@ Telegram 支持长轮询，服务器主动接收更新；这种部署方式无�
 ## 审批与异常行为
 
 默认建议使用 Codex 的工作区写入权限与按需审批策略。允许范围内的操作可直接执行；只有 Codex 明确发起的审批请求才显示审批交互，因此不是每一条命令都弹出按钮。操作范围受运行时实际配置和托管策略约束。[Codex 审批说明](https://learn.chatgpt.com/docs/app-server#approvals)
+
+`/permissions` 固定提供 Codex CLI 0.165.0 的 Ask for approval、Approve for me、Full Access 和 Read Only 四种模式，默认 Ask for approval。模式在提交任务时形成快照，执行中的新选择只影响后续任务；`/status` 区分所选模式与当前任务模式。选择跨重启保存，`/new` 沿用选择，切换目录恢复默认。可用性由 Codex 在启动任务时校验，拒绝或返回设置不符时不提交任务；本次不提供自定义 permission profile 发现。
 
 | 情况 | 产品行为 |
 | --- | --- |

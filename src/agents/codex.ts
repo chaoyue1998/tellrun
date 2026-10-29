@@ -22,6 +22,34 @@ const turnSchema = z.object({
   status: z.enum(["inProgress", "completed", "failed", "interrupted"]),
 });
 
+/** Codex CLI 的四种预设；协议参数只在适配层使用，菜单与执行共用此定义。 */
+const permissionModes = [
+  {
+    id: "default",
+    label: "Ask for approval",
+    config: { sandbox: "workspace-write", approvalPolicy: "on-request", approvalsReviewer: "user" },
+  },
+  {
+    id: "auto-review",
+    label: "Approve for me",
+    config: {
+      sandbox: "workspace-write",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "auto_review",
+    },
+  },
+  {
+    id: "full-access",
+    label: "Full Access",
+    config: { sandbox: "danger-full-access", approvalPolicy: "never", approvalsReviewer: "user" },
+  },
+  {
+    id: "read-only",
+    label: "Read Only",
+    config: { sandbox: "read-only", approvalPolicy: "on-request", approvalsReviewer: "user" },
+  },
+] as const;
+
 /** 优先连接本机后台服务，否则启动独立进程；续聊使用已持久化的 thread ID。 */
 export async function createCodexAgent(command = "codex"): Promise<Agent> {
   /** 保留运行时、认证和代理环境，不向子进程传入 Telegram 凭据。 */
@@ -48,6 +76,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
   return {
     name: "Codex",
     version: stdout.trim().replace(/^codex-cli /, ""),
+    permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
     async run(input) {
       if (active) throw new Error("Codex is already running a task.");
       const controller = new AbortController();
@@ -516,6 +545,13 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       try {
         if (controller.signal.aborted)
           return { status: "cancelled", text: "Stopped before starting." };
+        const permissionMode = permissionModes.find(
+          (mode) => mode.id === (input.permissionMode ?? "default"),
+        );
+        if (!permissionMode)
+          throw new Error(
+            "Codex permission mode unavailable. Choose another mode with /permissions.",
+          );
         await request("initialize", {
           clientInfo: {
             name: "tellrun",
@@ -544,17 +580,29 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               id: z.string().min(1),
               status: z.object({ type: z.string() }).optional(),
             }),
+            approvalPolicy: z.unknown(),
+            approvalsReviewer: z.string(),
+            sandbox: z.object({ type: z.string() }),
           })
           .parse(
             await request(input.sessionId ? "thread/resume" : "thread/start", {
               ...(input.sessionId ? { threadId: input.sessionId, excludeTurns: true } : {}),
               cwd: input.cwd,
-              approvalPolicy: "on-request",
-              sandbox: "workspace-write",
+              ...permissionMode.config,
             }),
           );
         if (socket && response.thread.status?.type !== "idle")
           throw new Error("Codex session busy. Message not sent; wait until it is idle.");
+        /** 使用服务端实际返回值核实预设，不能在权限被改写时仍启动任务。 */
+        if (
+          response.approvalPolicy !== permissionMode.config.approvalPolicy ||
+          response.approvalsReviewer !== permissionMode.config.approvalsReviewer ||
+          response.sandbox.type.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`) !==
+            permissionMode.config.sandbox
+        )
+          throw new Error(
+            "Codex did not apply the selected permission mode. Task not started; check config and choose a mode with /permissions.",
+          );
         sessionId = response.thread.id;
         input.onSession(sessionId);
         if (controller.signal.aborted)

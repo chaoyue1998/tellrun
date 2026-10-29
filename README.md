@@ -17,6 +17,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
+- **Permission modes**: use `/permissions` to choose one of four Codex modes, saved for subsequent tasks.
 
 ## Install and connect Codex to Telegram
 
@@ -52,12 +53,17 @@ Without `/cwd`, the working directory defaults to the directory where the servic
 | `/cwd`                | Show the current working directory                           |
 | `/cwd /absolute/path` | Change the working directory and start a new conversation    |
 | `/new`                | Start a new conversation while keeping the working directory |
+| `/permissions`        | Choose the permission mode for subsequent tasks             |
 | `/status`             | Show connection, conversation, directory, and task status    |
 | `/last`               | Show the latest finished task's status and result            |
 | `/stop`               | Request that the current task stop and pause new tasks       |
 | `/resume`             | Accept new tasks again without rerunning an interrupted task |
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
+
+`/permissions` offers the four presets from Codex CLI 0.165.0: Ask for approval (default), Approve for me (Codex automatic review), Full Access (no Codex sandbox or execution approvals), and Read Only (approval required for edits or network access). Full Access remains subject to operating system permissions.
+
+Selections apply to subsequently submitted tasks; the current task and its follow-up messages retain their original mode. `/status` shows both modes when they differ. Selections survive service restarts and `/new`; changing the working directory resets the mode to its default. Menus expire after 10 minutes and are invalidated when reopened, on a new conversation, on a directory change, or after a restart. Codex validates the selected mode when starting a task. If it rejects the configuration or returns different settings, the task does not start.
 
 ## Terminal commands
 
