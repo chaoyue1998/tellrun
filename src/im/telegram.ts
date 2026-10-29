@@ -307,69 +307,73 @@ export function createTelegramConnection(
                 continue;
               }
               try {
-                if (reply.messageId) {
-                  await bot.api.editMessageText(reply.chatId, reply.messageId, reply.text, {
-                    reply_markup: { inline_keyboard: [] },
-                  });
-                  store.removeReply(reply.id);
-                } else {
-                  const interaction = reply.interaction;
-                  const menu = reply.permissionMenu ?? reply.modelMenu;
-                  const sent = await bot.api.sendMessage(reply.chatId, reply.text, {
-                    ...(reply.promptEnd && menu?.options.length && menu.expiresAt > Date.now()
+                const interaction = reply.interaction;
+                const menu = reply.permissionMenu ?? reply.modelMenu;
+                /** 发送与原地编辑共用按钮；确认结果和旧交互编辑会移除按钮。 */
+                const markup =
+                  reply.promptEnd && menu?.options.length && menu.expiresAt > Date.now()
+                    ? {
+                        reply_markup: {
+                          inline_keyboard: menu.options.map((option, index) => [
+                            {
+                              text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
+                              callback_data: `${reply.modelMenu ? "m" : "p"}:${menu.id}:${index}`,
+                            },
+                          ]),
+                        },
+                      }
+                    : !reply.messageId &&
+                        reply.promptEnd &&
+                        interaction?.status === "pending" &&
+                        interaction.expiresAt > Date.now()
                       ? {
                           reply_markup: {
-                            inline_keyboard: menu.options.map((option, index) => [
-                              {
-                                text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
-                                callback_data: `${reply.modelMenu ? "m" : "p"}:${menu.id}:${index}`,
-                              },
-                            ]),
+                            inline_keyboard: [
+                              ...(interaction.kind === "approval"
+                                ? interaction.choices.map((choice) => [
+                                    {
+                                      text: choice === "accept" ? "Allow once" : "Decline",
+                                      callback_data: `i:${interaction.id}:${choice}`,
+                                    },
+                                  ])
+                                : (
+                                    interaction.questions[reply.questionIndex ?? -1]?.options ?? []
+                                  ).map((option, index) => [
+                                    {
+                                      text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
+                                      callback_data: `i:${interaction.id}:q${reply.questionIndex}_${index}`,
+                                    },
+                                  ])),
+                              [{ text: "Stop", callback_data: `i:${interaction.id}:stop` }],
+                            ],
                           },
                         }
-                      : reply.promptEnd &&
-                          interaction?.status === "pending" &&
-                          interaction.expiresAt > Date.now()
-                        ? {
-                            reply_markup: {
-                              inline_keyboard: [
-                                ...(interaction.kind === "approval"
-                                  ? interaction.choices.map((choice) => [
-                                      {
-                                        text: choice === "accept" ? "Allow once" : "Decline",
-                                        callback_data: `i:${interaction.id}:${choice}`,
-                                      },
-                                    ])
-                                  : (
-                                      interaction.questions[reply.questionIndex ?? -1]?.options ??
-                                      []
-                                    ).map((option, index) => [
-                                      {
-                                        text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
-                                        callback_data: `i:${interaction.id}:q${reply.questionIndex}_${index}`,
-                                      },
-                                    ])),
-                                [{ text: "Stop", callback_data: `i:${interaction.id}:stop` }],
-                              ],
-                            },
-                          }
-                        : {}),
-                  });
-                  store.removeReply(reply.id, {
-                    messageId: sent.message_id,
-                    text: reply.text,
-                    ...(reply.interactionId ? { interactionId: reply.interactionId } : {}),
-                    ...(reply.questionIndex !== undefined
-                      ? { questionIndex: reply.questionIndex }
-                      : {}),
-                    ...(reply.promptEnd && reply.permissionMenuId
-                      ? { permissionMenuId: reply.permissionMenuId }
-                      : {}),
-                    ...(reply.promptEnd && reply.modelMenuId
-                      ? { modelMenuId: reply.modelMenuId }
-                      : {}),
-                  });
-                }
+                      : { reply_markup: { inline_keyboard: [] } };
+                let messageId = reply.messageId;
+                if (messageId)
+                  await bot.api.editMessageText(reply.chatId, messageId, reply.text, markup);
+                else
+                  messageId = (await bot.api.sendMessage(reply.chatId, reply.text, markup))
+                    .message_id;
+                store.removeReply(
+                  reply.id,
+                  reply.messageId && !reply.modelMenuId && !reply.permissionMenuId
+                    ? undefined
+                    : {
+                        messageId,
+                        text: reply.text,
+                        ...(reply.interactionId ? { interactionId: reply.interactionId } : {}),
+                        ...(reply.questionIndex !== undefined
+                          ? { questionIndex: reply.questionIndex }
+                          : {}),
+                        ...(reply.promptEnd && reply.permissionMenuId
+                          ? { permissionMenuId: reply.permissionMenuId }
+                          : {}),
+                        ...(reply.promptEnd && reply.modelMenuId
+                          ? { modelMenuId: reply.modelMenuId }
+                          : {}),
+                      },
+                );
                 /** 普通消息会清除客户端草稿；任务仍执行时允许再次显示最新内容。 */
                 sentDraft = undefined;
               } catch (error) {

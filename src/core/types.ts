@@ -81,7 +81,7 @@ export interface Agent {
     runId?: string | null;
     /** 未选择时由 Agent 使用默认模式，任务提交后不受后续选择影响。 */
     permissionMode?: string | null;
-    /** 空值沿用 Codex 配置；选择在任务提交时固定。 */
+    /** 空值沿用 Agent 配置；选择在任务提交时固定。 */
     model?: string | null;
     /** 与模型一起形成任务快照；空值沿用 Agent 配置。 */
     reasoningEffort?: string | null;

@@ -43,19 +43,44 @@ export const stateSchema = z
         /** 旧状态没有模型选择时沿用 Codex 配置。 */
         model: z.string().min(1).nullable().default(null),
         reasoningEffort: z.string().min(1).nullable().default(null),
-        modelMenu: menuSchema
-          .extend({
-            options: z.array(
-              optionSchema.extend({
-                reasoningEfforts: z.array(optionSchema).optional(),
-                defaultReasoningEffort: z.string().min(1).optional(),
+        modelMenu: z.preprocess(
+          /** 旧菜单没有阶段标记；读取时补齐，原选择与消息清理记录保持不变。 */
+          (menu) =>
+            menu && typeof menu === "object" && !("stage" in menu)
+              ? {
+                  ...menu,
+                  stage:
+                    "model" in menu
+                      ? "reasoning"
+                      : "options" in menu && Array.isArray(menu.options) && menu.options.length
+                        ? "model"
+                        : "loading",
+                }
+              : menu,
+          z
+            .discriminatedUnion("stage", [
+              menuSchema.extend({ stage: z.literal("loading"), options: z.tuple([]) }),
+              menuSchema.extend({
+                stage: z.literal("model"),
+                options: z
+                  .array(
+                    optionSchema.extend({
+                      reasoningEfforts: z.array(optionSchema).default([]),
+                      defaultReasoningEffort: z.string().default(""),
+                    }),
+                  )
+                  .min(1),
               }),
-            ),
-            /** 第二步只暂存模型，选定推理强度后再一起应用。 */
-            model: optionSchema.optional(),
-          })
-          .nullable()
-          .default(null),
+              menuSchema.extend({
+                stage: z.literal("reasoning"),
+                /** 第二步只暂存模型，选定推理强度后再一起应用。 */
+                model: optionSchema,
+                options: z.array(optionSchema).min(1),
+              }),
+            ])
+            .nullable()
+            .default(null),
+        ),
       }),
     ),
     inboundUpdates: z.array(
@@ -142,7 +167,7 @@ export const stateSchema = z
         interactionId: z.uuid().optional(),
         questionIndex: nonnegativeInteger.optional(),
         promptEnd: z.boolean().optional(),
-        /** 有消息 ID 时编辑原消息并移除按钮，否则发送新消息。 */
+        /** 有消息 ID 时编辑原消息；关联菜单时更新按钮，否则移除按钮。 */
         messageId: id.optional(),
         permissionMenuId: z.uuid().optional(),
         modelMenuId: z.uuid().optional(),
