@@ -1,15 +1,4 @@
-import { randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  rmdirSync,
-  rmSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appDirectory } from "../config.js";
 import type {
@@ -20,15 +9,14 @@ import type {
   InteractionAnswer,
 } from "../core/types.js";
 import { writeJson } from "./json.js";
+import { acquireLock } from "./lock.js";
 import { activeTaskStatuses, type State, stateSchema } from "./schema.js";
 
 /** 打开文件状态并取得单实例锁；所有业务写入统一替换 state.json。 */
 export function openStore(path = join(appDirectory, "state.json")) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   if (dirname(path) === appDirectory) chmodSync(appDirectory, 0o700);
-  const lock = `${path}.lock`;
-  const owner = `${process.pid}-${randomUUID()}`;
-  let owned = false;
+  const release = acquireLock(path);
   let usable = true;
   let updating = false;
   /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
@@ -36,70 +24,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
   /** 单个发送循环正在处理的回复；交互关闭时仍需保留它的消息清理关联。 */
   let delivering: State["outbox"][number] | undefined;
 
-  /** 只删除本实例的所有权文件；非空目录不能被另一个退出中的实例移除。 */
-  function release() {
-    if (!owned) return;
-    rmSync(join(lock, owner), { force: true });
-    owned = false;
-    try {
-      rmdirSync(lock);
-    } catch (error) {
-      if (
-        !(
-          error instanceof Error &&
-          "code" in error &&
-          ["ENOENT", "ENOTEMPTY"].includes(String(error.code))
-        )
-      )
-        throw error;
-    }
-  }
-
   try {
-    /** mkdir 竞争唯一写入者；回收旧锁必须先确认 PID 已退出，再删除该所有权文件。 */
-    for (let attempt = 0; attempt < 3 && !owned; attempt++) {
-      try {
-        mkdirSync(lock, { mode: 0o700 });
-        writeFileSync(join(lock, owner), "", { flag: "wx", mode: 0o600 });
-        owned = true;
-        if (readdirSync(lock).length !== 1) throw new Error("State lock busy. Try again.");
-      } catch (error) {
-        if (owned || !(error instanceof Error && "code" in error && error.code === "EEXIST"))
-          throw error;
-        try {
-          const owners = readdirSync(lock);
-          if (owners.length === 0 && Date.now() - statSync(lock).mtimeMs > 30_000) {
-            rmdirSync(lock);
-            continue;
-          }
-          const previous = owners.length === 1 ? owners[0] : undefined;
-          const pid = previous?.match(/^([1-9]\d*)-[0-9a-f-]+$/)?.[1];
-          if (!previous || !pid)
-            throw new Error("State lock initializing or invalid. Check for another instance.");
-          try {
-            process.kill(Number(pid), 0);
-          } catch (error) {
-            if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) throw error;
-            /** 只有成功移除旧所有权文件的实例才能回收目录，避免竞争时删除新锁。 */
-            unlinkSync(join(lock, previous));
-            rmdirSync(lock);
-            continue;
-          }
-          throw new Error("Another Tellrun instance is running. Stop it first.");
-        } catch (error) {
-          if (
-            !(
-              error instanceof Error &&
-              "code" in error &&
-              ["ENOENT", "ENOTEMPTY"].includes(String(error.code))
-            )
-          )
-            throw error;
-        }
-      }
-    }
-    if (!owned) throw new Error("Cannot acquire state lock. Try again.");
-
     let state: State;
     try {
       const contents = readFileSync(path, "utf8");

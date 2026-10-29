@@ -1,5 +1,4 @@
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
@@ -15,21 +14,13 @@ import {
 import WebSocket from "ws";
 import { z } from "zod";
 import type { Agent, AgentInteraction, AgentResult } from "../core/types.js";
+import { fileChangesSchema, parseCodexInteraction } from "./codex-interaction.js";
 
 /** 由 Codex 0.165.0 的 generate-ts 核对；只校验实际消费的协议字段。 */
 const turnSchema = z.object({
   id: z.string().min(1),
   status: z.enum(["inProgress", "completed", "failed", "interrupted"]),
 });
-
-/** 文件事件与审批提示共用变更格式；审批前必须能展示实际路径与差异。 */
-const fileChangesSchema = z.array(
-  z.object({
-    path: z.string(),
-    kind: z.object({ type: z.enum(["add", "delete", "update"]), move_path: z.string().nullish() }),
-    diff: z.string(),
-  }),
-);
 
 /** 优先连接本机后台服务，否则启动独立进程；续聊使用已持久化的 thread ID。 */
 export async function createCodexAgent(command = "codex"): Promise<Agent> {
@@ -291,138 +282,25 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 continue;
               if (controller.signal.aborted || seenRequests.has(message.id)) continue;
               seenRequests.add(message.id);
-              const interaction: AgentInteraction = {
-                id: randomUUID(),
-                kind: "approval",
-                text: "",
-                expiresAt: Date.now() + 10 * 60_000,
-                blocking: true,
-                choices: ["accept", "decline"],
-                questions: [],
-              };
-              let permissions: Record<string, unknown> | undefined;
-              let fileReview: { itemId: string; changes: string } | undefined;
-              if (message.method === "item/commandExecution/requestApproval") {
-                const params = z
-                  .object({
-                    turnId: z.string(),
-                    kind: z.enum(["command", "writeStdin"]).default("command"),
-                    command: z.string().nullish(),
-                    cwd: z.string().nullish(),
-                    reason: z.string().nullish(),
-                    networkApprovalContext: z
-                      .object({ host: z.string(), protocol: z.string() })
-                      .nullish(),
-                    additionalPermissions: z.unknown().optional(),
-                    availableDecisions: z.array(z.unknown()).nullish(),
-                  })
-                  .parse(message.params);
-                interaction.text = `${params.kind === "writeStdin" ? "Terminal input" : "Command"}\nDirectory: ${params.cwd ?? input.cwd}\n${params.command ?? "Command unavailable."}${params.reason ? `\nReason: ${params.reason}` : ""}${params.networkApprovalContext ? `\nNetwork: ${params.networkApprovalContext.protocol}://${params.networkApprovalContext.host}` : ""}${params.additionalPermissions ? `\nPermissions: ${JSON.stringify(params.additionalPermissions, null, 2)}` : ""}`;
-                interaction.choices = interaction.choices.filter(
-                  (choice) =>
-                    (params.availableDecisions == null ||
-                      params.availableDecisions.includes(choice)) &&
-                    (choice !== "accept" || !!params.command || !!params.networkApprovalContext),
-                );
-              } else if (message.method === "item/fileChange/requestApproval") {
-                const params = z
-                  .object({
-                    turnId: z.string(),
-                    itemId: z.string(),
-                    reason: z.string().nullish(),
-                    grantRoot: z.string().nullish(),
-                  })
-                  .parse(message.params);
-                const changes = fileChanges.get(params.itemId);
-                if (changes?.length)
-                  fileReview = { itemId: params.itemId, changes: JSON.stringify(changes) };
-                interaction.text = `File changes\nDirectory: ${input.cwd}${params.reason ? `\nReason: ${params.reason}` : ""}${params.grantRoot ? `\nWrite access: ${params.grantRoot}` : ""}\n${changes?.length ? changes.map((change) => `${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}`).join("\n\n") : "Details unavailable. Decline or stop."}`;
-                if (!changes?.length) interaction.choices = ["decline"];
-              } else if (message.method === "item/permissions/requestApproval") {
-                const params = z
-                  .object({
-                    turnId: z.string(),
-                    cwd: z.string(),
-                    reason: z.string().nullish(),
-                    permissions: z.strictObject({
-                      network: z.strictObject({ enabled: z.boolean().nullable() }).nullish(),
-                      fileSystem: z
-                        .strictObject({
-                          read: z.array(z.string()).nullable(),
-                          write: z.array(z.string()).nullable(),
-                          globScanMaxDepth: z.number().int().nonnegative().optional(),
-                          entries: z.array(z.unknown()).optional(),
-                        })
-                        .nullish(),
-                    }),
-                  })
-                  .parse(message.params);
-                permissions = Object.fromEntries(
-                  Object.entries(params.permissions).filter(([, value]) => value != null),
-                );
-                interaction.text = `Permissions (this turn only)\nDirectory: ${params.cwd}${params.reason ? `\nReason: ${params.reason}` : ""}\n${JSON.stringify(permissions, null, 2)}`;
-              } else if (message.method === "item/tool/requestUserInput") {
-                const params = z
-                  .object({
-                    turnId: z.string(),
-                    isBlocking: z.boolean().default(true),
-                    autoResolutionMs: z.number().int().nonnegative().nullish(),
-                    questions: z
-                      .array(
-                        z.object({
-                          id: z.string().min(1),
-                          header: z.string(),
-                          question: z.string(),
-                          isOther: z.boolean().default(false),
-                          isSecret: z.boolean().default(false),
-                          options: z
-                            .array(z.object({ label: z.string().min(1), description: z.string() }))
-                            .max(20)
-                            .nullable(),
-                        }),
-                      )
-                      .min(1)
-                      .max(20),
-                  })
-                  .parse(message.params);
-                if (params.questions.some((question) => question.isSecret)) {
-                  fail("Secret input unsupported. Handle locally, then /resume.");
-                  continue;
-                }
-                if (
-                  new Set(params.questions.map((question) => question.id)).size !==
-                  params.questions.length
-                )
-                  throw new Error("Duplicate question IDs.");
-                interaction.kind = "question";
-                interaction.blocking = params.isBlocking;
-                interaction.choices = [];
-                interaction.expiresAt = Math.min(
-                  interaction.expiresAt,
-                  Date.now() + (params.autoResolutionMs ?? 10 * 60_000),
-                );
-                interaction.questions = params.questions.map((question) => ({
-                  id: question.id,
-                  header: question.header,
-                  question: question.question,
-                  options: question.options ?? [],
-                  allowText: question.isOther || !question.options?.length,
-                }));
-              } else {
-                write({
-                  id: message.id,
-                  error: { code: -32601, message: "Unsupported interactive request" },
-                });
-                fail("Unsupported request. Handle locally, then /resume.");
+              const parsed = parseCodexInteraction(
+                message.method,
+                message.params,
+                input.cwd,
+                fileChanges,
+              );
+              if ("error" in parsed) {
+                if (parsed.unsupported)
+                  write({
+                    id: message.id,
+                    error: { code: -32601, message: "Unsupported interactive request" },
+                  });
+                fail(parsed.error);
                 continue;
               }
-              if (JSON.stringify(interaction).length > 64_000) {
-                fail("Request too large. Handle locally, then /resume.");
-                continue;
-              }
+              const { request: interaction } = parsed;
               interactions.set(interaction.id, {
                 requestId: message.id,
-                request: interaction,
+                ...parsed,
                 timer: setTimeout(
                   () => {
                     const pending = interactions.get(interaction.id);
@@ -445,8 +323,6 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   },
                   Math.max(0, interaction.expiresAt - Date.now()),
                 ),
-                ...(permissions ? { permissions } : {}),
-                ...(fileReview ? { fileReview } : {}),
               });
               input.onInteraction(interaction);
             } else if (typeof message.id === "number") {

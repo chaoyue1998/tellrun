@@ -18,8 +18,6 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
 
-Currently supports **Telegram + Codex** for one user, with one task at a time. A session picker, a queue of separate tasks, tool progress summaries, and image or file input are not yet supported.
-
 ## Install and connect Codex to Telegram
 
 ### 1. Prerequisites
