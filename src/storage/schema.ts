@@ -63,6 +63,40 @@ export const stateSchema = z
         result: z.string().nullable(),
       }),
     ),
+    /** 旧文件自动补空数组；请求编号和等待对象只保存在 Agent 内存中。 */
+    interactions: z
+      .array(
+        z.strictObject({
+          id: z.uuid(),
+          taskId: id,
+          kind: z.enum(["approval", "question"]),
+          text: z.string(),
+          expiresAt: nonnegativeInteger,
+          blocking: z.boolean(),
+          choices: z.array(z.enum(["accept", "decline"])),
+          questions: z.array(
+            z.strictObject({
+              id: z.string(),
+              header: z.string(),
+              question: z.string(),
+              options: z.array(z.strictObject({ label: z.string(), description: z.string() })),
+              allowText: z.boolean(),
+              answer: z.string().nullable(),
+            }),
+          ),
+          decision: z.enum(["accept", "decline"]).nullable(),
+          status: z.enum(["pending", "ready", "sending", "closed"]),
+          resolution: z.string().nullable(),
+          messages: z.array(
+            z.strictObject({
+              messageId: id,
+              questionIndex: nonnegativeInteger.optional(),
+              text: z.string(),
+            }),
+          ),
+        }),
+      )
+      .default([]),
     outbox: z.array(
       z.strictObject({
         id,
@@ -70,6 +104,11 @@ export const stateSchema = z
         text: z.string(),
         attempts: nonnegativeInteger,
         retryAt: nonnegativeInteger,
+        interactionId: z.uuid().optional(),
+        questionIndex: nonnegativeInteger.optional(),
+        promptEnd: z.boolean().optional(),
+        /** 有消息 ID 时编辑原消息并移除按钮，否则发送新消息。 */
+        messageId: id.optional(),
       }),
     ),
   })
@@ -87,6 +126,16 @@ export const stateSchema = z
       state.inboundUpdates.every((row) => channels.has(row.channelId)) &&
       state.tasks.every((row) => channels.has(row.channelId)) &&
       state.outbox.every((row) => channels.has(row.channelId)) &&
+      new Set(state.interactions.map((row) => row.id)).size === state.interactions.length &&
+      state.interactions.every(
+        (row) =>
+          state.tasks.some((task) => task.id === row.taskId) &&
+          new Set(row.questions.map((question) => question.id)).size === row.questions.length,
+      ) &&
+      state.outbox.every(
+        (row) =>
+          !row.interactionId || state.interactions.some((item) => item.id === row.interactionId),
+      ) &&
       state.tasks.filter((row) => activeTaskStatuses.has(row.status)).length <= 1
     );
   }, "Invalid state IDs, references, or active task count.");

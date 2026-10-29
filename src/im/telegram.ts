@@ -32,7 +32,7 @@ export function createTelegramConnection(
   let started = false;
   /** 输入提示与流式草稿只发送最新状态，避免自动重发已过期的内容。 */
   bot.api.config.use((prev, method, payload, signal) =>
-    ["sendChatAction", "sendMessageDraft"].includes(method)
+    ["sendChatAction", "sendMessageDraft", "answerCallbackQuery"].includes(method)
       ? prev(method, payload, signal)
       : autoRetry({ maxRetryAttempts: 2, maxDelaySeconds: 5, rethrowHttpErrors: true })(
           prev,
@@ -51,7 +51,7 @@ export function createTelegramConnection(
           AbortSignal.timeout(
             method === "getUpdates"
               ? 40_000
-              : ["sendChatAction", "sendMessageDraft"].includes(method)
+              : ["sendChatAction", "sendMessageDraft", "answerCallbackQuery"].includes(method)
                 ? 4_000
                 : 15_000,
           ),
@@ -61,6 +61,7 @@ export function createTelegramConnection(
             "getUpdates",
             "sendChatAction",
             "sendMessageDraft",
+            "answerCallbackQuery",
           ].includes(method)
             ? [polling.signal]
             : []),
@@ -76,7 +77,7 @@ export function createTelegramConnection(
   });
 
   bot.on("message", async (ctx) => {
-    const command =
+    let command =
       ctx.message.text === undefined
         ? undefined
         : ctx.message.entities?.find(
@@ -85,7 +86,14 @@ export function createTelegramConnection(
     const [name, target] = command
       ? (ctx.message.text?.slice(1, command.length).split("@") ?? [])
       : [];
-    if (target !== undefined && target.toLowerCase() !== ctx.me.username?.toLowerCase()) return;
+    /** 问题回复可包含绝对路径等斜杠文本；已知控制命令仍优先处理。 */
+    if (
+      ctx.message.reply_to_message?.from?.id === ctx.me.id &&
+      !["start", "help", "cwd", "new", "status", "last", "stop", "resume"].includes(name ?? "")
+    )
+      command = undefined;
+    if (command && target !== undefined && target.toLowerCase() !== ctx.me.username?.toLowerCase())
+      return;
 
     await handleMessage({
       channel: {
@@ -102,8 +110,50 @@ export function createTelegramConnection(
             args: ctx.message.text?.slice(command.length).trim() ?? "",
           }
         : ctx.message.text !== undefined
-          ? { type: "text", text: ctx.message.text }
+          ? {
+              type: "text",
+              text: ctx.message.text,
+              ...(ctx.message.reply_to_message?.from?.id === ctx.me.id
+                ? { replyToMessageId: ctx.message.reply_to_message.message_id }
+                : {}),
+            }
           : { type: "unsupported" },
+    });
+  });
+
+  /** 先保存选择，再关闭客户端等待提示；答复回调失败不能撤销或重发已保存的决定。 */
+  bot.on("callback_query:data", async (ctx) => {
+    const match = ctx.callbackQuery.data.match(
+      /^i:([0-9a-f-]{36}):(accept|decline|stop|q(\d+)_(\d+))$/,
+    );
+    let reply = "Button expired.";
+    if (match?.[1] && ctx.chat && ctx.callbackQuery.message) {
+      reply =
+        (await handleMessage({
+          channel: {
+            platform: "telegram",
+            accountId: String(ctx.me.id),
+            chatId: String(ctx.chat.id),
+            userId: String(ctx.from.id),
+          },
+          eventId: String(ctx.update.update_id),
+          content: {
+            type: "interaction",
+            id: match[1],
+            action: match[3] !== undefined ? "option" : (match[2] as "accept" | "decline" | "stop"),
+            messageId: ctx.callbackQuery.message.message_id,
+            ...(match[3] !== undefined
+              ? { questionIndex: Number(match[3]), optionIndex: Number(match[4]) }
+              : {}),
+          },
+        })) ?? "Received.";
+    }
+    /** 回调提示不占用入站循环，慢网络下 /status 和 /stop 仍能立即处理。 */
+    void ctx.answerCallbackQuery({ text: reply }).catch((error: unknown) => {
+      logger.warn(
+        { errorType: error instanceof Error ? error.name : "UnknownError" },
+        "Callback acknowledgement failed; saved choice remains valid",
+      );
     });
   });
 
@@ -166,7 +216,7 @@ export function createTelegramConnection(
               for (const update of await bot.api.getUpdates({
                 offset,
                 timeout: 30,
-                allowed_updates: ["message"],
+                allowed_updates: ["message", "callback_query"],
               })) {
                 if (polling.signal.aborted) return;
                 await bot.handleUpdate(update);
@@ -219,8 +269,50 @@ export function createTelegramConnection(
                 continue;
               }
               try {
-                await bot.api.sendMessage(reply.chatId, reply.text);
-                store.removeReply(reply.id);
+                if (reply.messageId) {
+                  await bot.api.editMessageText(reply.chatId, reply.messageId, reply.text, {
+                    reply_markup: { inline_keyboard: [] },
+                  });
+                  store.removeReply(reply.id);
+                } else {
+                  const interaction = reply.interaction;
+                  const sent = await bot.api.sendMessage(reply.chatId, reply.text, {
+                    ...(reply.promptEnd &&
+                    interaction?.status === "pending" &&
+                    interaction.expiresAt > Date.now()
+                      ? {
+                          reply_markup: {
+                            inline_keyboard: [
+                              ...(interaction.kind === "approval"
+                                ? interaction.choices.map((choice) => [
+                                    {
+                                      text: choice === "accept" ? "Allow once" : "Decline",
+                                      callback_data: `i:${interaction.id}:${choice}`,
+                                    },
+                                  ])
+                                : (
+                                    interaction.questions[reply.questionIndex ?? -1]?.options ?? []
+                                  ).map((option, index) => [
+                                    {
+                                      text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
+                                      callback_data: `i:${interaction.id}:q${reply.questionIndex}_${index}`,
+                                    },
+                                  ])),
+                              [{ text: "Stop", callback_data: `i:${interaction.id}:stop` }],
+                            ],
+                          },
+                        }
+                      : {}),
+                  });
+                  store.removeReply(reply.id, {
+                    messageId: sent.message_id,
+                    text: reply.text,
+                    ...(reply.interactionId ? { interactionId: reply.interactionId } : {}),
+                    ...(reply.questionIndex !== undefined
+                      ? { questionIndex: reply.questionIndex }
+                      : {}),
+                  });
+                }
                 /** 普通消息会清除客户端草稿；任务仍执行时允许再次显示最新内容。 */
                 sentDraft = undefined;
               } catch (error) {
@@ -254,7 +346,8 @@ export function createTelegramConnection(
             while (!polling.signal.aborted) {
               if (
                 Date.now() >= nextTypingAt &&
-                ["dispatching", "running"].includes(store.activeTask()?.status ?? "")
+                ["dispatching", "running"].includes(store.activeTask()?.status ?? "") &&
+                !store.activeTask()?.interactions.some((item) => item.blocking)
               ) {
                 nextTypingAt = Date.now() + 4_000;
                 try {

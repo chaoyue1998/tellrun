@@ -16,9 +16,10 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Continuous conversations**: keep the current conversation context, select a project with `/cwd`, and start fresh with `/new`.
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
 - **Task control**: check status and recent results, stop a task and pause new work, and retain conversation and task records across restarts.
+- **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
 - **Personal deployment**: only the configured user's private messages are accepted. Long polling requires no webhook or inbound port configuration.
 
-Currently supports **Telegram + Codex** for one user, with one task at a time. A session picker, a queue of separate tasks, approval and structured question interfaces, and image or file input are not yet supported.
+Currently supports **Telegram + Codex** for one user, with one task at a time. A session picker, a queue of separate tasks, tool progress summaries, and image or file input are not yet supported.
 
 
 ## Install and connect Codex to Telegram
@@ -122,7 +123,7 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 | Path                         | Contents                                                                              |
 | ---------------------------- | ------------------------------------------------------------------------------------- |
 | `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                         |
-| `~/.tellrun/state.json`      | Current conversation, working directory, task inputs and results, and pending replies |
+| `~/.tellrun/state.json`      | Current conversation, working directory, task inputs and results, interactions, and pending replies |
 | `~/.tellrun/tellrun.service` | Linux background service definition                                                   |
 
 Codex uses the same operating system user's authentication and model configuration, and manages its own full conversation history. Tellrun does not maintain a project directory allowlist. Access depends on operating system permissions and the Codex sandbox; Tellrun defaults to workspace write access and approvals on request.
@@ -168,7 +169,13 @@ Check that you are using a private chat and that your configured user ID is corr
 
 ### What happens when a task needs approval?
 
-Telegram interfaces for approvals and structured questions are not available yet. Tellrun interrupts the task and explains why. Handle the request locally first, check the task state, then send `/resume` and a new message with the work you want to continue.
+The bot shows the requested operation and offers allow-once, decline, and stop buttons as applicable. Permission grants last only for the current turn. Declining lets Codex decide how to proceed; stopping pauses new tasks. File approvals show paths and diffs; when details are unavailable, only decline and stop are offered.
+
+For structured questions, select an option or use Telegram's Reply action on the corresponding question. All questions must be answered before the response is submitted. Questions with fixed options accept their number or full label; questions allowing custom answers accept free text. Ordinary new messages still steer the task. Use `/status` to view pending interactions or `/stop` to stop while waiting.
+
+Interactions expire after at most 10 minutes, or sooner if the runtime specifies a shorter deadline. Expired approvals and blocking questions interrupt the task; nonblocking questions expire without choosing an answer and execution continues. Old buttons and replies become invalid after cancellation, task completion, or restart. Saved approvals are never replayed automatically.
+
+Secret input, MCP forms or URL requests, and dynamic tool interactions still require local handling. Unsupported requests interrupt the task with an explanation. Check the task state, then send `/resume` and a new message to continue.
 
 ### Will tasks run again after a restart?
 

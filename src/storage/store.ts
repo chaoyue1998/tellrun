@@ -12,7 +12,13 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { appDirectory } from "../config.js";
-import type { AgentResult, ChannelIdentity, IncomingMessage } from "../core/types.js";
+import type {
+  AgentInteraction,
+  AgentResult,
+  ChannelIdentity,
+  IncomingMessage,
+  InteractionAnswer,
+} from "../core/types.js";
 import { writeJson } from "./json.js";
 import { activeTaskStatuses, type State, stateSchema } from "./schema.js";
 
@@ -103,9 +109,11 @@ export function openStore(path = join(appDirectory, "state.json")) {
       chmodSync(path, 0o600);
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-      state = { channels: [], inboundUpdates: [], tasks: [], outbox: [] };
+      state = { channels: [], inboundUpdates: [], tasks: [], interactions: [], outbox: [] };
       writeJson(path, state);
     }
+    /** 交互撤回可能清空发送队列；实例内保持递增，避免迟到发送回执删除新消息。 */
+    let replyId = state.outbox.reduce((max, item) => Math.max(max, item.id), 0);
 
     /** 一次业务操作只保存一个快照；嵌套操作合并写入，失败时回滚内存并停止后续写入。 */
     function update<T>(action: () => T): T {
@@ -135,18 +143,58 @@ export function openStore(path = join(appDirectory, "state.json")) {
     }
 
     /** 无回复时跳过入队；其余按 Unicode 字符拆分，和触发它的状态变更一起保存。 */
-    function enqueueReply(channelId: number, text: string | undefined) {
+    function enqueueReply(
+      channelId: number,
+      text: string | undefined,
+      delivery: Pick<State["outbox"][number], "interactionId" | "questionIndex" | "messageId"> = {},
+    ) {
       if (text === undefined) return;
-      const parts = text.match(/[\s\S]{1,2000}/gu) ?? ["(No text reply)"];
+      const parts = delivery.messageId
+        ? [text]
+        : (text.match(/[\s\S]{1,2000}/gu) ?? ["(No text reply)"]);
       for (const [index, part] of parts.entries()) {
         state.outbox.push({
-          id: state.outbox.reduce((max, item) => Math.max(max, item.id), 0) + 1,
+          id: ++replyId,
           channelId,
           text: parts.length > 1 ? `(${index + 1}/${parts.length})\n${part}` : part,
           attempts: 0,
           retryAt: Date.now(),
+          ...delivery,
+          ...(delivery.interactionId && !delivery.messageId
+            ? { promptEnd: index === parts.length - 1 }
+            : {}),
         });
       }
+    }
+
+    /** 关闭请求或单个已答问题；撤回未发送提示，已发送消息保留正文并移除按钮。 */
+    function closeInteraction(id: string, reason: string, questionIndex?: number) {
+      const interaction = state.interactions.find((item) => item.id === id);
+      if (!interaction || interaction.status === "closed") return;
+      update(() => {
+        const interaction = state.interactions.find((item) => item.id === id);
+        const task = state.tasks.find((task) => task.id === interaction?.taskId);
+        if (!interaction || !task) return;
+        if (questionIndex === undefined) {
+          interaction.status = "closed";
+          interaction.resolution = reason;
+        }
+        state.outbox = state.outbox.filter(
+          (reply) =>
+            reply.interactionId !== id ||
+            (questionIndex !== undefined && reply.questionIndex !== questionIndex),
+        );
+        for (const message of interaction.messages) {
+          if (questionIndex !== undefined && message.questionIndex !== questionIndex) continue;
+          enqueueReply(task.channelId, `${message.text}\n\n${reason}`, {
+            interactionId: id,
+            messageId: message.messageId,
+            ...(message.questionIndex !== undefined
+              ? { questionIndex: message.questionIndex }
+              : {}),
+          });
+        }
+      });
     }
 
     /** 终态与最终回复一起保存，成功时只发送正文；迟到事件不能覆盖已完成结果。 */
@@ -157,6 +205,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
         const task = state.tasks.find((task) => task.id === id);
         if (!task) throw new Error("Task not found.");
         Object.assign(task, { status: result.status, result: result.text });
+        for (const interaction of state.interactions.filter((item) => item.taskId === id))
+          closeInteraction(interaction.id, "Task ended. Request closed.");
         if (result.status === "interrupted") {
           const channel = state.channels.find((channel) => channel.id === task.channelId);
           if (channel) channel.paused = true;
@@ -185,6 +235,21 @@ export function openStore(path = join(appDirectory, "state.json")) {
       if (draft?.taskId === id) draft = undefined;
     }
 
+    /** 命令与交互按钮共用停止逻辑；先使交互失效，再由核心层请求中断。 */
+    function cancelTask(id: number) {
+      if (state.tasks.find((task) => task.id === id)?.status === "queued") {
+        finishTask(id, { status: "cancelled", text: "Cancelled before starting." });
+      } else
+        update(() => {
+          const task = state.tasks.find(
+            (task) => task.id === id && activeTaskStatuses.has(task.status),
+          );
+          if (task) task.status = "cancelling";
+          for (const interaction of state.interactions.filter((item) => item.taskId === id))
+            closeInteraction(interaction.id, "Stopping. Request closed.");
+        });
+    }
+
     return {
       /** 去重标识、任务和必要回复合并保存，成功返回后才能确认入站事件。 */
       accept(
@@ -203,8 +268,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
             (item) => item.channelId === existing.id && item.eventId === message.eventId,
           )
         )
-          return;
-        update(() => {
+          return message.content.type === "interaction" ? "Already handled." : undefined;
+        return update(() => {
           let channel = state.channels.find((channel) => channel.id === existing?.id);
           if (!channel) {
             channel = {
@@ -221,7 +286,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
             channelId: channel.id,
             eventId: message.eventId,
           });
-          enqueueReply(channel.id, handle(channel));
+          const reply = handle(channel);
+          if (message.content.type !== "interaction") enqueueReply(channel.id, reply);
+          return reply;
         });
       },
       /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
@@ -240,7 +307,15 @@ export function openStore(path = join(appDirectory, "state.json")) {
       },
       /** 返回快照，避免调用方直接修改内存中的持久状态。 */
       activeTask() {
-        return structuredClone(state.tasks.find((task) => activeTaskStatuses.has(task.status)));
+        const task = state.tasks.find((task) => activeTaskStatuses.has(task.status));
+        return task
+          ? structuredClone({
+              ...task,
+              interactions: state.interactions.filter(
+                (item) => item.taskId === task.id && item.status !== "closed",
+              ),
+            })
+          : undefined;
       },
       /** 限制预览为末尾 2000 个 Unicode 字符，完整结果仍由最终回复保存。 */
       setDraft(id: number, text: string) {
@@ -250,6 +325,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 仅向当前机器人与授权用户返回执行中的草稿，停止后不再刷新。 */
       pendingDraft(accountId: string, userId: string) {
         if (!draft?.text.trim()) return;
+        if (
+          state.interactions.some(
+            (item) => item.taskId === draft?.taskId && item.blocking && item.status !== "closed",
+          )
+        )
+          return;
         const task = state.tasks.find(
           (task) => task.id === draft?.taskId && task.status === "running",
         );
@@ -357,19 +438,151 @@ export function openStore(path = join(appDirectory, "state.json")) {
           if (task?.status === "dispatching") task.status = "running";
         });
       },
-      /** 未派发任务直接取消；其余等待 Agent 确认终态。 */
-      cancelTask(id: number) {
-        if (state.tasks.find((task) => task.id === id)?.status === "queued") {
-          finishTask(id, { status: "cancelled", text: "Cancelled before starting." });
-        } else
-          update(() => {
-            const task = state.tasks.find(
-              (task) => task.id === id && activeTaskStatuses.has(task.status),
-            );
-            if (task) task.status = "cancelling";
-          });
-      },
+      cancelTask,
       finishTask,
+      /** 交互展示与任务关联一起保存；多题分别发送，任意一段都能明确回复。 */
+      addInteraction(taskId: number, request: AgentInteraction) {
+        update(() => {
+          const task = state.tasks.find((task) => task.id === taskId && task.status === "running");
+          if (!task || state.interactions.some((item) => item.id === request.id)) return;
+          state.interactions.push({
+            ...request,
+            taskId,
+            questions: request.questions.map((question) => ({ ...question, answer: null })),
+            decision: null,
+            status: "pending",
+            resolution: null,
+            messages: [],
+          });
+          if (request.kind === "approval") {
+            enqueueReply(
+              task.channelId,
+              `Task #${taskId} · Approval\n${request.text}\n\nChoose below.`,
+              { interactionId: request.id },
+            );
+          } else {
+            for (const [index, question] of request.questions.entries())
+              enqueueReply(
+                task.channelId,
+                `Task #${taskId} · Question ${index + 1}/${request.questions.length}\n${question.header}\n${question.question}${question.options.map((option, i) => `\n\n${i + 1}. ${option.label}\n${option.description}`).join("")}\n\n${question.allowText ? "Pick an option or reply to this message." : "Pick an option or reply with its number or label."}\nAnswer all questions to submit.`,
+                { interactionId: request.id, questionIndex: index },
+              );
+          }
+        });
+      },
+      /** 与入站去重同一事务领取选择；不把普通消息或旧问题回复误作当前任务输入。 */
+      answerInteraction(
+        channelId: number,
+        content: Extract<IncomingMessage["content"], { type: "interaction" | "text" }>,
+      ) {
+        const interaction = state.interactions.find((item) =>
+          content.type === "interaction"
+            ? item.id === content.id
+            : item.messages.some((message) => message.messageId === content.replyToMessageId) &&
+              state.tasks.some((task) => task.id === item.taskId && task.channelId === channelId),
+        );
+        if (!interaction) return content.type === "interaction" ? "Request expired." : undefined;
+        const task = state.tasks.find(
+          (task) => task.id === interaction.taskId && task.channelId === channelId,
+        );
+        const message = interaction.messages.find(
+          (item) =>
+            item.messageId ===
+            (content.type === "interaction" ? content.messageId : content.replyToMessageId),
+        );
+        if (
+          task?.status !== "running" ||
+          !message ||
+          interaction.status !== "pending" ||
+          interaction.expiresAt <= Date.now()
+        )
+          return "Request closed. Check /status.";
+        if (content.type === "interaction" && content.action === "stop") {
+          update(() => {
+            const channel = state.channels.find((channel) => channel.id === channelId);
+            if (channel) channel.paused = true;
+            cancelTask(task.id);
+          });
+          return "Stopping. Wait for the result.";
+        }
+        if (interaction.kind === "approval") {
+          if (
+            content.type !== "interaction" ||
+            (content.action !== "accept" && content.action !== "decline") ||
+            !interaction.choices.includes(content.action)
+          )
+            return "Use the approval buttons.";
+          update(() => {
+            const current = state.interactions.find((item) => item.id === interaction.id);
+            if (!current) return;
+            current.decision = content.action as "accept" | "decline";
+            current.status = "ready";
+          });
+          return "Saved. Submitting...";
+        }
+        const question =
+          message.questionIndex === undefined
+            ? undefined
+            : interaction.questions[message.questionIndex];
+        if (!question || question.answer !== null) return "Question closed.";
+        let answer: string | undefined;
+        if (content.type === "interaction") {
+          if (
+            content.action !== "option" ||
+            content.questionIndex !== message.questionIndex ||
+            content.optionIndex === undefined
+          )
+            return "Invalid option.";
+          answer = question.options[content.optionIndex]?.label;
+        } else {
+          answer = content.text.trim();
+          answer =
+            question.options.find(
+              (option, index) => String(index + 1) === answer || option.label === answer,
+            )?.label ?? (question.allowText ? answer : undefined);
+        }
+        if (!answer) return "Invalid answer. Try again.";
+        update(() => {
+          const current = state.interactions.find((item) => item.id === interaction.id);
+          const question = current?.questions[message.questionIndex ?? -1];
+          if (!current || !question) return;
+          question.answer = answer;
+          closeInteraction(interaction.id, "Answer saved.", message.questionIndex);
+          if (current.questions.every((question) => question.answer !== null))
+            current.status = "ready";
+        });
+        return "Answer saved.";
+      },
+      /** 提交前持久化 sending；重启不会重放已经领取的批准或答案。 */
+      claimInteraction(taskId: number) {
+        const interaction = state.interactions.find(
+          (item) =>
+            item.taskId === taskId && item.status === "ready" && item.expiresAt > Date.now(),
+        );
+        if (
+          !interaction ||
+          !state.tasks.some((task) => task.id === taskId && task.status === "running")
+        )
+          return;
+        return update(() => {
+          const current = state.interactions.find((item) => item.id === interaction.id);
+          if (!current) return;
+          current.status = "sending";
+          const answer: InteractionAnswer =
+            current.kind === "approval" && current.decision
+              ? { decision: current.decision }
+              : {
+                  answers: Object.fromEntries(
+                    current.questions.map((question) => [
+                      question.id,
+                      { answers: [question.answer ?? ""] },
+                    ]),
+                  ),
+                };
+          return { id: current.id, answer };
+        });
+      },
+      closeInteraction,
       /** 结果不确定的任务暂停并通知用户，不自动重新派发。 */
       recoverTasks() {
         for (const task of state.tasks.filter(
@@ -380,10 +593,22 @@ export function openStore(path = join(appDirectory, "state.json")) {
             text: "Service restarted; task result unknown. Check the project, then /resume and send a new task.",
           });
         }
+        for (const interaction of state.interactions)
+          closeInteraction(interaction.id, "Service restarted. Request closed.");
       },
       /** 按机器人与授权用户取最早回复，重试保持发送顺序。 */
       pendingReply(accountId: string, userId: string) {
         for (const reply of state.outbox) {
+          const interaction = state.interactions.find((item) => item.id === reply.interactionId);
+          if (
+            reply.interactionId &&
+            !reply.messageId &&
+            (interaction?.status !== "pending" ||
+              interaction.expiresAt <= Date.now() ||
+              (reply.questionIndex !== undefined &&
+                interaction.questions[reply.questionIndex]?.answer !== null))
+          )
+            continue;
           const channel = state.channels.find((channel) => channel.id === reply.channelId);
           if (
             channel?.platform === "telegram" &&
@@ -391,15 +616,58 @@ export function openStore(path = join(appDirectory, "state.json")) {
             channel.userId === userId
           ) {
             return reply.retryAt <= Date.now()
-              ? structuredClone({ ...reply, chatId: channel.chatId })
+              ? structuredClone({
+                  ...reply,
+                  chatId: channel.chatId,
+                  interaction,
+                })
               : undefined;
           }
         }
       },
       /** 发送成功或永久拒绝后移出发送队列，任务结果仍保留。 */
-      removeReply(id: number) {
+      removeReply(
+        id: number,
+        delivery?: {
+          messageId: number;
+          text: string;
+          interactionId?: string;
+          questionIndex?: number;
+        },
+      ) {
         update(() => {
           state.outbox = state.outbox.filter((reply) => reply.id !== id);
+          const interaction = state.interactions.find(
+            (item) => item.id === delivery?.interactionId,
+          );
+          const task = state.tasks.find((task) => task.id === interaction?.taskId);
+          if (interaction && task && delivery) {
+            interaction.messages.push({
+              messageId: delivery.messageId,
+              text: delivery.text,
+              ...(delivery.questionIndex !== undefined
+                ? { questionIndex: delivery.questionIndex }
+                : {}),
+            });
+            /** 发送途中请求可能已关闭或该问题已回答；迟到的消息也必须移除按钮。 */
+            if (
+              interaction.status !== "pending" ||
+              interaction.expiresAt <= Date.now() ||
+              (delivery.questionIndex !== undefined &&
+                interaction.questions[delivery.questionIndex]?.answer !== null)
+            )
+              enqueueReply(
+                task.channelId,
+                `${delivery.text}\n\n${interaction.resolution ?? "Request closed."}`,
+                {
+                  interactionId: interaction.id,
+                  messageId: delivery.messageId,
+                  ...(delivery.questionIndex !== undefined
+                    ? { questionIndex: delivery.questionIndex }
+                    : {}),
+                },
+              );
+          }
         });
       },
       /** 发送失败只更新回复的重试信息，不影响任务执行状态。 */

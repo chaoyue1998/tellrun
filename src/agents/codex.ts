@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
@@ -13,13 +14,22 @@ import {
 } from "json-rpc-2.0";
 import WebSocket from "ws";
 import { z } from "zod";
-import type { Agent, AgentResult } from "../core/types.js";
+import type { Agent, AgentInteraction, AgentResult } from "../core/types.js";
 
 /** 由 Codex 0.165.0 的 generate-ts 核对；只校验实际消费的协议字段。 */
 const turnSchema = z.object({
   id: z.string().min(1),
   status: z.enum(["inProgress", "completed", "failed", "interrupted"]),
 });
+
+/** 文件事件与审批提示共用变更格式；审批前必须能展示实际路径与差异。 */
+const fileChangesSchema = z.array(
+  z.object({
+    path: z.string(),
+    kind: z.object({ type: z.enum(["add", "delete", "update"]), move_path: z.string().nullish() }),
+    diff: z.string(),
+  }),
+);
 
 /** 优先连接本机后台服务，否则启动独立进程；续聊使用已持久化的 thread ID。 */
 export async function createCodexAgent(command = "codex"): Promise<Agent> {
@@ -42,6 +52,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
   let active: AbortController | undefined;
   /** 只绑定当前任务的连接，不能把迟到输入送入下一轮或其他客户端的轮次。 */
   let steer: Agent["steer"] | undefined;
+  let respond: Agent["respond"] | undefined;
 
   return {
     name: "Codex",
@@ -83,6 +94,19 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         write({ id, method, params }),
       );
       const messages = new Map<string, { text: string; phase?: string | null | undefined }>();
+      /** 应用随机 ID 隔离每次连接；已见 RPC 编号保留到任务结束，重复请求不生成新按钮。 */
+      const interactions = new Map<
+        string,
+        {
+          requestId: string | number;
+          request: AgentInteraction;
+          timer: ReturnType<typeof setTimeout>;
+          permissions?: Record<string, unknown>;
+          fileReview?: { itemId: string; changes: string };
+        }
+      >();
+      const seenRequests = new Set<string | number>();
+      const fileChanges = new Map<string, z.infer<typeof fileChangesSchema>>();
       let buffer = "";
       /** turn/start 响应前的事件暂存，收到当前 turn ID 后再处理，避免混入其他客户端事件。 */
       let earlyMessages = "";
@@ -96,6 +120,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       function finish(result: AgentResult) {
         if (settled) return;
         settled = true;
+        for (const interaction of interactions.values()) clearTimeout(interaction.timer);
+        interactions.clear();
         completed.resolve(result);
       }
 
@@ -199,6 +225,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       controller.signal.addEventListener(
         "abort",
         () => {
+          for (const interaction of interactions.values()) clearTimeout(interaction.timer);
+          interactions.clear();
           if (settled) return;
           stopTimer = setTimeout(
             () => fail("Stop unconfirmed; Codex disconnected. Check the project before /resume."),
@@ -261,17 +289,166 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 (context.data.turnId !== undefined && context.data.turnId !== runId)
               )
                 continue;
-              /** 暂未接入审批与结构化提问界面，明确拒绝并停止，不能静默批准。 */
-              write({
-                id: message.id,
-                error: {
-                  code: -32601,
-                  message: "This client does not support interactive requests yet",
-                },
+              if (controller.signal.aborted || seenRequests.has(message.id)) continue;
+              seenRequests.add(message.id);
+              const interaction: AgentInteraction = {
+                id: randomUUID(),
+                kind: "approval",
+                text: "",
+                expiresAt: Date.now() + 10 * 60_000,
+                blocking: true,
+                choices: ["accept", "decline"],
+                questions: [],
+              };
+              let permissions: Record<string, unknown> | undefined;
+              let fileReview: { itemId: string; changes: string } | undefined;
+              if (message.method === "item/commandExecution/requestApproval") {
+                const params = z
+                  .object({
+                    turnId: z.string(),
+                    kind: z.enum(["command", "writeStdin"]).default("command"),
+                    command: z.string().nullish(),
+                    cwd: z.string().nullish(),
+                    reason: z.string().nullish(),
+                    networkApprovalContext: z
+                      .object({ host: z.string(), protocol: z.string() })
+                      .nullish(),
+                    additionalPermissions: z.unknown().optional(),
+                    availableDecisions: z.array(z.unknown()).nullish(),
+                  })
+                  .parse(message.params);
+                interaction.text = `${params.kind === "writeStdin" ? "Terminal input" : "Command"}\nDirectory: ${params.cwd ?? input.cwd}\n${params.command ?? "Command unavailable."}${params.reason ? `\nReason: ${params.reason}` : ""}${params.networkApprovalContext ? `\nNetwork: ${params.networkApprovalContext.protocol}://${params.networkApprovalContext.host}` : ""}${params.additionalPermissions ? `\nPermissions: ${JSON.stringify(params.additionalPermissions, null, 2)}` : ""}`;
+                interaction.choices = interaction.choices.filter(
+                  (choice) =>
+                    (params.availableDecisions == null ||
+                      params.availableDecisions.includes(choice)) &&
+                    (choice !== "accept" || !!params.command || !!params.networkApprovalContext),
+                );
+              } else if (message.method === "item/fileChange/requestApproval") {
+                const params = z
+                  .object({
+                    turnId: z.string(),
+                    itemId: z.string(),
+                    reason: z.string().nullish(),
+                    grantRoot: z.string().nullish(),
+                  })
+                  .parse(message.params);
+                const changes = fileChanges.get(params.itemId);
+                if (changes?.length)
+                  fileReview = { itemId: params.itemId, changes: JSON.stringify(changes) };
+                interaction.text = `File changes\nDirectory: ${input.cwd}${params.reason ? `\nReason: ${params.reason}` : ""}${params.grantRoot ? `\nWrite access: ${params.grantRoot}` : ""}\n${changes?.length ? changes.map((change) => `${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}`).join("\n\n") : "Details unavailable. Decline or stop."}`;
+                if (!changes?.length) interaction.choices = ["decline"];
+              } else if (message.method === "item/permissions/requestApproval") {
+                const params = z
+                  .object({
+                    turnId: z.string(),
+                    cwd: z.string(),
+                    reason: z.string().nullish(),
+                    permissions: z.strictObject({
+                      network: z.strictObject({ enabled: z.boolean().nullable() }).nullish(),
+                      fileSystem: z
+                        .strictObject({
+                          read: z.array(z.string()).nullable(),
+                          write: z.array(z.string()).nullable(),
+                          globScanMaxDepth: z.number().int().nonnegative().optional(),
+                          entries: z.array(z.unknown()).optional(),
+                        })
+                        .nullish(),
+                    }),
+                  })
+                  .parse(message.params);
+                permissions = Object.fromEntries(
+                  Object.entries(params.permissions).filter(([, value]) => value != null),
+                );
+                interaction.text = `Permissions (this turn only)\nDirectory: ${params.cwd}${params.reason ? `\nReason: ${params.reason}` : ""}\n${JSON.stringify(permissions, null, 2)}`;
+              } else if (message.method === "item/tool/requestUserInput") {
+                const params = z
+                  .object({
+                    turnId: z.string(),
+                    isBlocking: z.boolean().default(true),
+                    autoResolutionMs: z.number().int().nonnegative().nullish(),
+                    questions: z
+                      .array(
+                        z.object({
+                          id: z.string().min(1),
+                          header: z.string(),
+                          question: z.string(),
+                          isOther: z.boolean().default(false),
+                          isSecret: z.boolean().default(false),
+                          options: z
+                            .array(z.object({ label: z.string().min(1), description: z.string() }))
+                            .max(20)
+                            .nullable(),
+                        }),
+                      )
+                      .min(1)
+                      .max(20),
+                  })
+                  .parse(message.params);
+                if (params.questions.some((question) => question.isSecret)) {
+                  fail("Secret input unsupported. Handle locally, then /resume.");
+                  continue;
+                }
+                if (
+                  new Set(params.questions.map((question) => question.id)).size !==
+                  params.questions.length
+                )
+                  throw new Error("Duplicate question IDs.");
+                interaction.kind = "question";
+                interaction.blocking = params.isBlocking;
+                interaction.choices = [];
+                interaction.expiresAt = Math.min(
+                  interaction.expiresAt,
+                  Date.now() + (params.autoResolutionMs ?? 10 * 60_000),
+                );
+                interaction.questions = params.questions.map((question) => ({
+                  id: question.id,
+                  header: question.header,
+                  question: question.question,
+                  options: question.options ?? [],
+                  allowText: question.isOther || !question.options?.length,
+                }));
+              } else {
+                write({
+                  id: message.id,
+                  error: { code: -32601, message: "Unsupported interactive request" },
+                });
+                fail("Unsupported request. Handle locally, then /resume.");
+                continue;
+              }
+              if (JSON.stringify(interaction).length > 64_000) {
+                fail("Request too large. Handle locally, then /resume.");
+                continue;
+              }
+              interactions.set(interaction.id, {
+                requestId: message.id,
+                request: interaction,
+                timer: setTimeout(
+                  () => {
+                    const pending = interactions.get(interaction.id);
+                    if (!pending) return;
+                    if (interaction.blocking) {
+                      fail("Request timed out. Check /last, then /resume.");
+                    } else {
+                      interactions.delete(interaction.id);
+                      /** 非阻塞问题过期只返回空答案，不替用户选择，也不中断正在执行的任务。 */
+                      try {
+                        input.onInteractionClosed(
+                          interaction.id,
+                          "Question expired. Task continues.",
+                        );
+                        write({ id: pending.requestId, result: { answers: {} } });
+                      } catch {
+                        fail("Cannot save expired question state. Task interrupted.");
+                      }
+                    }
+                  },
+                  Math.max(0, interaction.expiresAt - Date.now()),
+                ),
+                ...(permissions ? { permissions } : {}),
+                ...(fileReview ? { fileReview } : {}),
               });
-              fail(
-                "Task interrupted: approvals and structured questions are unsupported. Handle locally, then /resume.",
-              );
+              input.onInteraction(interaction);
             } else if (typeof message.id === "number") {
               /** 补齐库需要的协议字段；错误来源标记仅用于本地处理，不信任服务端 data。 */
               client.receive(
@@ -284,6 +461,29 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                     )
                   : createJSONRPCSuccessResponse(message.id, message.result),
               );
+            } else if (message.method === "serverRequest/resolved") {
+              const event = z
+                .object({ threadId: z.string(), requestId: z.union([z.string(), z.number()]) })
+                .parse(message.params);
+              if (event.threadId !== sessionId) continue;
+              seenRequests.add(event.requestId);
+              for (const [id, interaction] of interactions) {
+                if (interaction.requestId !== event.requestId) continue;
+                clearTimeout(interaction.timer);
+                interactions.delete(id);
+                input.onInteractionClosed(id, "Request closed.");
+              }
+            } else if (message.method === "item/fileChange/patchUpdated") {
+              const event = z
+                .object({
+                  threadId: z.string(),
+                  turnId: z.string(),
+                  itemId: z.string(),
+                  changes: fileChangesSchema,
+                })
+                .parse(message.params);
+              if (event.threadId === sessionId && event.turnId === runId)
+                fileChanges.set(event.itemId, event.changes);
             } else if (message.method === "item/agentMessage/delta") {
               const event = z
                 .object({
@@ -308,10 +508,13 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                     id: z.string(),
                     text: z.string().optional(),
                     phase: z.string().nullish(),
+                    changes: fileChangesSchema.optional(),
                   }),
                 })
                 .parse(message.params);
               if (event.threadId !== sessionId || !recordRun(event.turnId)) continue;
+              if (event.item.type === "fileChange" && event.item.changes)
+                fileChanges.set(event.item.id, event.item.changes);
               if (event.item.type === "agentMessage" && event.item.text !== undefined) {
                 messages.set(event.item.id, { text: event.item.text, phase: event.item.phase });
                 publishText(event.item.text);
@@ -381,6 +584,59 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       };
 
+      respond = (id, answer) => {
+        const interaction = interactions.get(id);
+        if (
+          !interaction ||
+          settled ||
+          controller.signal.aborted ||
+          interaction.request.expiresAt <= Date.now()
+        )
+          return false;
+        if (interaction.request.kind === "approval") {
+          if (!("decision" in answer) || !interaction.request.choices.includes(answer.decision))
+            return false;
+          if (
+            answer.decision === "accept" &&
+            interaction.fileReview &&
+            JSON.stringify(fileChanges.get(interaction.fileReview.itemId)) !==
+              interaction.fileReview.changes
+          ) {
+            fail("Changes updated. Review locally, then /resume.");
+            return false;
+          }
+        } else if (
+          !("answers" in answer) ||
+          Object.keys(answer.answers).length !== interaction.request.questions.length ||
+          interaction.request.questions.some((question) => {
+            const values = answer.answers[question.id]?.answers;
+            return (
+              values?.length !== 1 ||
+              !values[0]?.trim() ||
+              (!question.allowText &&
+                !question.options.some((option) => option.label === values[0]))
+            );
+          })
+        )
+          return false;
+        /** 在写入前移除映射，失败也不重发批准；任务终态负责说明不确定结果。 */
+        interactions.delete(id);
+        clearTimeout(interaction.timer);
+        write({
+          id: interaction.requestId,
+          result: interaction.permissions
+            ? {
+                permissions:
+                  "decision" in answer && answer.decision === "accept"
+                    ? interaction.permissions
+                    : {},
+                scope: "turn",
+              }
+            : answer,
+        });
+        return !settled;
+      };
+
       try {
         if (controller.signal.aborted)
           return { status: "cancelled", text: "Stopped before starting." };
@@ -393,7 +649,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
             ).version,
           },
-          capabilities: null,
+          capabilities: { experimentalApi: true, requestAttestation: false },
         });
         write({ method: "initialized" });
         if (socket && input.sessionId) {
@@ -455,6 +711,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         return await completed.promise;
       } finally {
         steer = undefined;
+        respond = undefined;
+        for (const interaction of interactions.values()) clearTimeout(interaction.timer);
+        interactions.clear();
         clearTimeout(stopTimer);
         client.rejectAllPendingRequests("Codex connection closed.");
         terminate("SIGTERM");
@@ -472,6 +731,10 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           active = undefined;
         }
       }
+    },
+    /** 外部 ID 必须命中本次连接，不能把旧按钮转交给新一轮任务。 */
+    respond(id, answer) {
+      return respond?.(id, answer) ?? false;
     },
     /** 复用当前连接提交补充消息，由 expectedTurnId 防止误入其他轮次。 */
     steer(prompt) {

@@ -12,7 +12,15 @@ export interface IncomingMessage {
   eventId: string;
   content:
     | { type: "command"; name: string; args: string }
-    | { type: "text"; text: string }
+    | { type: "text"; text: string; replyToMessageId?: number }
+    | {
+        type: "interaction";
+        id: string;
+        action: "accept" | "decline" | "stop" | "option";
+        messageId: number;
+        questionIndex?: number;
+        optionIndex?: number;
+      }
     | { type: "unsupported" };
 }
 
@@ -21,6 +29,28 @@ export interface AgentResult {
   status: "completed" | "failed" | "cancelled" | "interrupted";
   text: string;
 }
+
+/** 面向用户的交互快照；随机 ID 只在当前任务连接内有效，不暴露 RPC 请求编号。 */
+export interface AgentInteraction {
+  id: string;
+  kind: "approval" | "question";
+  text: string;
+  expiresAt: number;
+  blocking: boolean;
+  choices: ("accept" | "decline")[];
+  questions: {
+    id: string;
+    header: string;
+    question: string;
+    options: { label: string; description: string }[];
+    allowText: boolean;
+  }[];
+}
+
+/** 审批决定与按问题 ID 收集的答案分别映射到运行时协议。 */
+export type InteractionAnswer =
+  | { decision: "accept" | "decline" }
+  | { answers: Record<string, { answers: string[] }> };
 
 /** Agent 适配层只暴露任务与会话，不向核心层泄露 RPC 类型。 */
 export interface Agent {
@@ -34,11 +64,15 @@ export interface Agent {
     onStarted: () => void;
     /** 当前回复文本快照，随增量更新；调用方不能等待 IM 发送。 */
     onText: (text: string) => void;
+    onInteraction: (interaction: AgentInteraction) => void;
+    onInteractionClosed: (id: string, reason: string) => void;
   }): Promise<AgentResult>;
+  /** 只提交当前连接仍有效的交互；返回值表示已写入连接，不代表操作已经执行。 */
+  respond(id: string, answer: InteractionAnswer): boolean;
   /** 向当前轮次补充输入，只等待接收确认，不等待任务结束。 */
   steer(prompt: string): Promise<void>;
   stop(): void;
 }
 
 /** 返回时表示消息标识及回复意图已保存，不等待 Agent 执行或 IM 发送。 */
-export type MessageHandler = (message: IncomingMessage) => Promise<void>;
+export type MessageHandler = (message: IncomingMessage) => Promise<string | undefined>;
