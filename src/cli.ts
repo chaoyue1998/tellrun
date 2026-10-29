@@ -7,8 +7,8 @@ import which from "which";
 import { ZodError } from "zod";
 import { createCodexAgent } from "./agents/codex.js";
 import { appDirectory, type Config, configSchema, loadConfig } from "./config.js";
+import { manageService } from "./service.js";
 import { writeJson } from "./storage/json.js";
-import { manageService } from "./systemd.js";
 
 /** 全局入口只注册命令；业务入口仅在 run 时动态加载。 */
 const program = new Command()
@@ -69,11 +69,17 @@ program
             validate: (value) => (value?.trim() ? undefined : "Enter a Codex command or path."),
           }),
         launch: () =>
-          process.platform === "linux"
+          ["linux", "darwin"].includes(process.platform)
             ? p.select({
                 message: "After setup",
                 options: [
-                  { value: "boot", label: "Start or restart, enable at boot" },
+                  {
+                    value: "boot",
+                    label:
+                      process.platform === "darwin"
+                        ? "Start or restart, enable at login"
+                        : "Start or restart, enable at boot",
+                  },
                   { value: "start", label: "Start or restart" },
                   { value: "later", label: "Save only" },
                 ],
@@ -114,9 +120,9 @@ program
       await manageService("restart", { enable: answers.launch === "boot" });
     else
       console.log(
-        process.platform === "linux"
+        ["linux", "darwin"].includes(process.platform)
           ? "Run tellrun start to start the service."
-          : "Run tellrun run. Background mode requires Linux systemd.",
+          : "Run tellrun run. Background mode requires Linux or macOS.",
       );
   });
 
@@ -129,7 +135,7 @@ program
 program
   .command("start")
   .description("Start the background service")
-  .option("--enable", "Enable at boot")
+  .option("--enable", process.platform === "darwin" ? "Enable at login" : "Enable at boot")
   .action(async (options: { enable?: boolean }) => {
     await manageService("start", options);
   });

@@ -25,8 +25,6 @@
 - **Node.js ≥ 24.5.0**。
 - **[Codex CLI](https://github.com/openai/codex)**：在运行 Tellrun 的同一系统用户下安装并完成登录，确认可以在终端正常使用。
 
-后台管理需要支持 **systemd 用户服务的 Linux**。本地调试或使用其他进程管理器时，可通过 `tellrun run` 前台运行。
-
 ### 2. 安装并配置
 
 ```sh
@@ -44,7 +42,7 @@ tellrun setup
 帮我了解这个项目，说明主要模块和启动方式。
 ```
 
-未设置 `/cwd` 时，工作目录默认为服务启动目录；systemd 服务默认使用当前用户的主目录。切换目录会开始新会话。
+未设置 `/cwd` 时，工作目录默认为服务启动目录；后台服务默认使用当前用户的主目录。切换目录会开始新会话。
 
 ## Telegram 命令
 
@@ -63,19 +61,17 @@ tellrun setup
 
 ## 后台服务
 
-以下命令用于 Linux systemd 用户服务：
-
-| 命令                        | 作用                           |
-| --------------------------- | ------------------------------ |
-| `tellrun start`             | 启动后台服务                   |
-| `tellrun start --enable`    | 启动服务并启用开机自启         |
-| `tellrun status`            | 查看服务状态与数据路径         |
-| `tellrun logs`              | 查看最近 100 条日志            |
-| `tellrun logs -f`           | 持续跟随日志                   |
-| `tellrun restart`           | 重启服务，加载新配置或新版本   |
-| `tellrun stop`              | 停止后台服务                   |
-| `tellrun service uninstall` | 停止并移除服务，保留配置和状态 |
-| `tellrun --help`            | 查看命令帮助                   |
+| 命令                        | 作用                                             |
+| --------------------------- | ------------------------------------------------ |
+| `tellrun start`             | 启动后台服务                                     |
+| `tellrun start --enable`    | 启动服务并启用自动启动：Linux 开机、macOS 登录时 |
+| `tellrun status`            | 查看服务状态与数据路径                           |
+| `tellrun logs`              | 查看最近 100 条日志                              |
+| `tellrun logs -f`           | 持续跟随日志                                     |
+| `tellrun restart`           | 重启服务，加载新配置或新版本                     |
+| `tellrun stop`              | 停止后台服务                                     |
+| `tellrun service uninstall` | 停止并移除服务，保留配置和状态                   |
+| `tellrun --help`            | 查看命令帮助                                     |
 
 ### 升级
 
@@ -96,6 +92,8 @@ tellrun restart
 | `~/.tellrun/config.json`     | Bot Token、授权用户 ID、Codex 路径和可选代理                             |
 | `~/.tellrun/state.json`      | 当前会话、工作目录、活动任务、最近结果、待处理交互与回复、未确认事件标识 |
 | `~/.tellrun/tellrun.service` | Linux 后台服务定义                                                       |
+| `~/.tellrun/tellrun.plist`   | macOS 后台服务定义                                                       |
+| `~/.tellrun/tellrun.log`     | macOS 服务诊断日志，可通过 `tellrun logs` 查看                           |
 
 Codex 使用同一系统用户的登录和模型配置，完整会话历史由 Codex 管理。Tellrun 不设置项目目录白名单；可访问范围由运行用户权限和 Codex 沙箱共同决定，默认采用工作区写入与按需审批策略。
 

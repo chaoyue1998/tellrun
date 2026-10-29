@@ -25,8 +25,6 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Node.js ≥ 24.5.0**.
 - **[Codex CLI](https://github.com/openai/codex)**: install and sign in as the same operating system user that will run Tellrun. Confirm that Codex works in your terminal.
 
-Background service management requires **Linux with systemd user services**. Use `tellrun run` in the foreground for local development or with another process manager.
-
 ### 2. Install and configure
 
 ```sh
@@ -44,7 +42,7 @@ Open a private chat with your bot and send these messages one at a time. Replace
 Help me understand this project. Explain its main modules and how to run it.
 ```
 
-Without `/cwd`, the working directory defaults to the directory where the service starts. The systemd service starts in the current user's home directory. Changing directories starts a new conversation.
+Without `/cwd`, the working directory defaults to the directory where the service starts. Background services start in the current user's home directory. Changing directories starts a new conversation.
 
 ## Telegram commands
 
@@ -63,19 +61,17 @@ Wait for the current task to finish before changing directories or starting a ne
 
 ## Background service
 
-These commands manage a Linux systemd user service:
-
-| Command                     | Purpose                                                      |
-| --------------------------- | ------------------------------------------------------------ |
-| `tellrun start`             | Start the background service                                 |
-| `tellrun start --enable`    | Start the service and enable it at boot                      |
-| `tellrun status`            | Show service status and data paths                           |
-| `tellrun logs`              | Show the latest 100 log entries                              |
-| `tellrun logs -f`           | Follow logs                                                  |
-| `tellrun restart`           | Restart with the current configuration or installed version  |
-| `tellrun stop`              | Stop the background service                                  |
-| `tellrun service uninstall` | Stop and remove the service, keeping configuration and state |
-| `tellrun --help`            | Show command help                                            |
+| Command                     | Purpose                                                                 |
+| --------------------------- | ----------------------------------------------------------------------- |
+| `tellrun start`             | Start the background service                                            |
+| `tellrun start --enable`    | Start and enable automatic startup: at boot on Linux, at login on macOS |
+| `tellrun status`            | Show service status and data paths                                      |
+| `tellrun logs`              | Show the latest 100 log entries                                         |
+| `tellrun logs -f`           | Follow logs                                                             |
+| `tellrun restart`           | Restart with the current configuration or installed version             |
+| `tellrun stop`              | Stop the background service                                             |
+| `tellrun service uninstall` | Stop and remove the service, keeping configuration and state            |
+| `tellrun --help`            | Show command help                                                       |
 
 ### Upgrade
 
@@ -96,6 +92,8 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 | `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                                                             |
 | `~/.tellrun/state.json`      | Current conversation, directory, active task, latest result, pending interactions and replies, and unconfirmed update IDs |
 | `~/.tellrun/tellrun.service` | Linux background service definition                                                                                       |
+| `~/.tellrun/tellrun.plist`   | macOS background service definition                                                                                       |
+| `~/.tellrun/tellrun.log`     | macOS service diagnostics; view with `tellrun logs`                                                                       |
 
 Codex uses the same operating system user's authentication and model configuration, and manages its own full conversation history. Tellrun does not maintain a project directory allowlist. Access depends on operating system permissions and the Codex sandbox; Tellrun defaults to workspace write access and approvals on request.
 

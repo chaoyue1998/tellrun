@@ -19,13 +19,13 @@
 | 数据           | Node.js 文件接口 + JSON                                  | 配置与状态分开保存，使用原子替换                         |
 | 调度           | 文件中的任务记录 + 单个 Worker                           | 队列状态可恢复；控制消息不等待编码任务                   |
 | 消息发送       | 本地 outbox + 进度合并                                   | Telegram 故障不改变编码任务的执行结果                    |
-| 部署           | npm 全局安装，Linux 当前用户的 systemd 服务              | 配置向导完成初始化，服务管理器负责后台运行、重启和进程组 |
+| 部署           | npm 全局安装，Linux systemd 或 macOS launchd 用户服务 | 配置向导完成初始化，由系统管理后台运行与故障重启 |
 | 扩展           | 按 Agent、IM、核心业务和存储组织模块，共用必要的消息类型 | 保持职责清晰，不为分层额外引入基类、注册器或重复转发     |
 
 ```mermaid
 flowchart TB
     TG["Telegram 私聊"]
-    subgraph SERVER["Linux 服务器"]
+    subgraph SERVER["Linux 服务器或 Mac"]
         subgraph APP["Node.js 服务"]
             IN["Telegram 适配"]
             CORE["会话与任务协调"]
@@ -90,13 +90,13 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 
 | 命令                      | 目标行为                                                                                    |
 | ------------------------- | ------------------------------------------------------------------------------------------- |
-| tellrun setup             | 交互填写 Bot Token、本人 ID，检查 Codex 路径与运行环境；保存后可启动后台服务并设置开机自启  |
-| tellrun start             | 检查配置、创建或更新本用户的服务定义并启动；重复调用不创建第二个实例；--enable 启用开机自启 |
+| tellrun setup             | 交互填写 Bot Token、本人 ID，检查 Codex 路径与运行环境；保存后可启动后台服务并设置自动启动 |
+| tellrun start             | 检查配置、创建或更新用户服务并启动；重复调用不创建第二个实例；--enable 在 Linux 启用开机自启，在 macOS 启用登录自启 |
 | tellrun stop              | 停止后台服务及受管理子进程，等待实际结束后报告结果                                          |
 | tellrun restart           | 完成停止后重新启动；用于配置变更或 npm 升级后加载新版本                                     |
 | tellrun status            | 查询服务管理器状态并展示配置、数据目录；不启动第二个业务进程                                |
 | tellrun logs              | 展示最近 100 条后台日志；-f 持续跟随，凭据不进入命令行参数                                  |
-| tellrun run               | 前台运行服务，供 systemd 和本地诊断使用；不进行交互配置                                     |
+| tellrun run               | 前台运行服务，供 systemd、launchd 和本地诊断使用；不进行交互配置 |
 | tellrun service uninstall | 停用并移除本应用的用户服务，保留配置和状态文件；之后可通过 npm 卸载程序包                   |
 
 `setup` 由用户显式执行，npm 安装脚本仅承担包安装所需工作。交互取消时保留原配置，Token 使用明文输入，已有配置时留空保留原值；校验成功后再原子写入配置。CLI 的帮助、版本和状态命令不加载会加载运行状态或启动轮询的业务入口。
@@ -110,7 +110,9 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 | 模块                                        | 职责                                                         |
 | ------------------------------------------- | ------------------------------------------------------------ |
 | src/cli.ts                                  | CLI 命令解析与配置向导；只在 run 时动态加载后台业务入口      |
+| src/service.ts | 共用后台命令接口，按操作系统选择服务管理器 |
 | src/systemd.ts                              | systemd 用户服务、linger、启停、状态与日志                   |
+| src/launchd.ts | macOS 用户服务、登录自启、就绪确认、启停与日志 |
 | src/main.ts                                 | 组装组件、状态加载、启动和退出；只在这里选择具体 IM 与 Agent |
 | src/config.ts、src/logger.ts                | Telegram 凭据与本人身份校验、结构化日志                      |
 | src/im/telegram.ts                          | grammY 接入、本人验证、入站标准化、回复与连接生命周期        |
@@ -152,7 +154,7 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 控制路径包括 /status、/stop、审批回调、明确回复补充问题。它们不进入编码任务队列。等待审批占用当前编码任务槽，但不会占用 Node.js 事件循环。入站处理只保存必要状态并派发控制指令，不等待 Codex 完成或普通 Telegram 消息发送，避免慢请求把后续停止指令堵在同一批次中。
 
-未指定目录的会话默认使用 Tellrun 服务启动目录，规范化真实路径后随消息一起保存，用户可直接发送任务；systemd 服务的启动目录默认为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录或 `/new`，目录变化会开始新会话。后续多会话模型再引入独立 conversation_id，不增加目录白名单。
+未指定目录的会话默认使用 Tellrun 服务启动目录，规范化真实路径后随消息一起保存，用户可直接发送任务；systemd 和 launchd 服务的启动目录均为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录或 `/new`，目录变化会开始新会话。后续多会话模型再引入独立 conversation_id，不增加目录白名单。
 
 当前全局最多一个未结束任务，由单实例写入与状态校验约束。同一聊天的新文本直接补充到当前任务：queued 时合并首条输入；dispatching 时持久化保存；running 时通过独立输入循环调用 turn/steer，每 50 毫秒检查一次。补充输入按接收顺序提交，只等待各条 RPC 确认，不等待当前任务结束，也不阻塞入站控制命令。不同聊天和正在停止的任务不能追加输入。独立任务队列留到后续；未来开启并行时，必须增加按可写工作区的互斥。
 
@@ -282,17 +284,23 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 | Telegram 代理                | `telegram.proxyUrl` 可选，由用户自行配置；未指定时继承运行环境的代理，setup 保留已有显式配置        |
 | 工作目录                     | 后续由任务或会话指定，不设置目录白名单                                                              |
 | Codex 命令                   | 配置时解析可执行文件的绝对路径；与后台服务使用同一 OS 用户，沿用其认证与配置                        |
-| 后台运行环境                 | 由用户配置 systemd 服务环境；config.json 不保存 PATH、CODEX_HOME 或代理环境，启动时直接继承进程环境 |
+| 后台运行环境                 | config.json 不保存终端环境；macOS 服务的 PATH 只包含 Node、Codex 所在目录及常见系统、Homebrew 路径，凭据不写入服务定义 |
 | 运行状态                     | `~/.tellrun/state.json`；临时单实例锁为同目录的 `state.json.lock/`                                  |
-| 服务定义                     | `~/.tellrun/tellrun.service`，通过 systemctl --user link 注册；日志保存在系统 journal               |
+| Linux 服务定义 | `~/.tellrun/tellrun.service`，通过 systemctl --user link 注册；日志保存在 journal |
+| macOS 服务定义 | `~/.tellrun/tellrun.plist`；启用登录自启时链接到 `~/Library/LaunchAgents/io.github.chaoyue1998.tellrun.plist` |
+| macOS 服务诊断 | `~/.tellrun/tellrun.log`；`tellrun logs` 显示最近 100 行，`-f` 持续跟随 |
 | 日志级别                     | 当前固定为 info                                                                                     |
 | 队列与交互设置               | 当前串行执行，交互固定最多等待 10 分钟；队列上限和工具进度设置仍未实现，不预建配置项                |
 
 `~/.tellrun/` 按当前运行用户的主目录解析为绝对路径；CLI 与后台服务使用同一用户和同一目录，不受执行命令时的 cwd 影响。状态、锁和配置不得写到全局 npm 包目录，避免升级覆盖、权限问题和从不同 cwd 启动产生多份数据。
 
-后台方案以支持 systemd 用户服务的 Linux 为目标，CLI 生成本用户的服务定义，通过 `systemctl --user` 管理，日志交给 journal。ExecStart 使用解析后的 Node 和 CLI 绝对路径执行 `tellrun run`；后台任务的 cwd 由会话单独指定。Type=notify 在 Telegram 初始化成功后通过 systemd-notify 报告就绪；Restart=on-failure、5 秒重启间隔与启动频率限制负责故障重启，KillMode=control-group 和 45 秒停止期限约束残留子进程。[systemd 服务](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
+Linux 后台使用 systemd 用户服务，CLI 生成服务定义，通过 `systemctl --user` 管理，日志交给 journal。ExecStart 使用解析后的 Node 和 CLI 绝对路径执行 `tellrun run`；后台任务的 cwd 由会话单独指定。Type=notify 在 Telegram 初始化成功后通过 systemd-notify 报告就绪；Restart=on-failure、5 秒重启间隔与启动频率限制负责故障重启，KillMode=control-group 和 45 秒停止期限约束残留子进程。[systemd 服务](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
 
-退出 SSH 后继续运行或开机自启需要检查用户 linger 状态。向导说明设置并在系统权限允许时完成；权限不足时给出所需命令，不能报告后台持久运行已配置成功。不支持 systemd 用户服务的环境仍可使用前台 run，由外部进程管理器托管；首版不自行实现通用守护进程管理器。[loginctl linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)
+Linux 退出 SSH 后继续运行或开机自启需要检查用户 linger 状态。向导说明设置并在系统权限允许时完成；权限不足时给出所需命令，不能报告后台持久运行已配置成功。[loginctl linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)
+
+macOS 使用 `gui/<uid>` 登录域中的 LaunchAgent，服务标识为 `io.github.chaoyue1998.tellrun`，无需管理员权限。`start` 通过 bootstrap 加载当前服务；`--enable` 增加登录目录中的符号链接，注销后服务停止，下次登录重新加载。未登录桌面时提示使用前台 run。原生 plutil 将 JSON 定义转换为 XML，保留路径中的空格和特殊字符；定义与诊断日志权限为 0600。RunAtLoad、KeepAlive 的 SuccessfulExit=false 和 5 秒 ThrottleInterval 负责首次运行与故障重启；ExitTimeOut 为 45 秒。[Apple LaunchAgent 与 launchd 文档](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)
+
+macOS 的启动命令最多等待 60 秒，并核对 launchd 当前 PID 与 `~/.tellrun/launchd.ready`。该临时标记仅在 Telegram 初始化成功后写入，停止或退出时清理，不属于任务状态或历史记录。重启先 bootout 并等待旧进程退出，再加载新定义；后台管理复用文件锁，避免并发启停覆盖就绪标记。同名但不属于 Tellrun 的登录项不覆盖；卸载保留配置、状态及诊断日志。其他环境仍可使用前台 run，由外部进程管理器托管，不引入额外常驻管理进程。
 
 M1 启动 Worker 前必须取得同一状态文件对应的排他运行锁，取得锁后才进行恢复；不能把 Telegram 的 409 冲突当成编码任务互斥。锁须独立于 CLI 命令进程，使前台 run 与后台服务同样不能重复运行。
 
@@ -304,7 +312,7 @@ Codex 子进程只接收必要环境与运行时凭据，不默认继承 Telegra
 
 备份时先停止服务，再复制 `config.json`、`state.json` 和相应 Codex 会话数据；临时锁与临时写入文件无需备份。配置文件和状态文件权限为 0600，用户目录权限为 0700。
 
-日志使用 Pino 输出到标准输出，后台由 journal 保存，仅用于服务启停、连接与存储故障诊断。任务执行、审批和问答历史由 Codex 管理，Tellrun 不重复归档，不记录 prompt、Token 或原始环境变量。首版通过 /status 和 systemd / journalctl 诊断，暂不提供公网管理接口。
+日志使用 Pino 输出到标准输出，Linux 后台由 journal 保存，macOS 后台写入 tellrun.log，仅用于服务启停、连接与存储故障诊断。任务执行、审批和问答历史由 Codex 管理，Tellrun 不重复归档，不记录 prompt、Token 或原始环境变量。通过 /status、tellrun status 和 tellrun logs 诊断，暂不提供公网管理接口。
 
 ## 后续扩展规则
 
@@ -332,3 +340,5 @@ Claude 等 Agent 的新增工作集中在会话创建或恢复、任务输入、
 审批与提问新增 34 项临时模拟验证：覆盖两种传输的命令、文件与权限决定、多题映射、早到及重复请求、先解决后到达、文件差异变化、阻塞与非阻塞超时、停止；存储验证覆盖旧文件兼容、部分答案、失效、重启与落盘失败不重放、迟到回执；Telegram 与核心流程联合验证覆盖鉴权、按钮生成和清理、明确回复、普通消息补充、绝对路径答案以及慢回调期间停止。`npm run check` 与 `npm run build` 通过；真实 Telegram 与 Codex 审批联调仍待目标环境验收。
 
 状态回收另通过 16 项临时模拟验证：包括重新打开当前状态不改写文件、连续 300 个任务后状态大小保持稳定、确认前后与重启后的去重、轮询和写入失败、部分答案保留、迟到发送回执及按钮清理。Telegram 与核心流程联合验证确认旧问题回复不会新建或补充任务，`/last` 可在下一任务运行时查看前一结果，任务与交互过程不重复写日志。检查与构建通过，未向真实 Telegram 发送验证消息。
+
+macOS 后台管理通过 18 项临时验证：17 项模拟覆盖平台分发、无桌面登录、无效路径、系统命令失败、启动超时、并发控制、启动等待期间停止、就绪标记归属与清理、日志跟随，以及 Linux systemd 和 linger 回归；另在本机真实 launchd 登录域运行隔离服务，验证特殊字符路径、重复启动、登录入口加载、停止、重启、崩溃恢复和卸载。隔离服务已卸载；检查与构建通过，真实 Telegram 后台联调及 Linux 实机服务验收仍需单独完成。

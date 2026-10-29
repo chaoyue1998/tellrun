@@ -4,6 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { appDirectory, loadConfig } from "./config.js";
+import type { ServiceAction, ServiceOptions } from "./service.js";
 
 /** 所有后台命令使用同一个用户服务名，服务定义与配置一起保存。 */
 const unit = "tellrun.service";
@@ -33,19 +34,7 @@ async function systemctl(...args: string[]) {
 }
 
 /** CLI 与配置向导共用后台生命周期；不加载运行状态或 Telegram 业务入口。 */
-export async function manageService(
-  action: "start" | "stop" | "restart" | "status" | "logs" | "uninstall",
-  options: { enable?: boolean; follow?: boolean } = {},
-) {
-  if (action === "status") {
-    console.log(
-      `Config: ${join(appDirectory, "config.json")}\nState: ${join(appDirectory, "state.json")}`,
-    );
-  }
-  if (process.platform !== "linux") {
-    throw new Error("Background mode requires Linux systemd. Use tellrun run instead.");
-  }
-
+export async function manageSystemdService(action: ServiceAction, options: ServiceOptions) {
   if (action === "logs") {
     await new Promise<void>((resolve, reject) => {
       const child = spawn(
