@@ -8,7 +8,7 @@
 
 [npm](https://www.npmjs.com/package/tellrun) · [GitHub](https://github.com/chaoyue1998/tellrun) · [问题反馈](https://github.com/chaoyue1998/tellrun/issues)
 
-[快速开始](#安装并通过-telegram-使用-codex) · [Telegram 命令](#telegram-命令) · [配置](#配置与数据) · [常见问题](#常见问题)
+[快速开始](#安装并通过-telegram-使用-codex) · [Telegram 命令](#telegram-命令) · [后台服务](#后台服务) · [配置](#配置与数据) · [常见问题](#常见问题) · [本地开发](#本地开发)
 
 ## 功能
 
@@ -17,10 +17,8 @@
 - **即时反馈**：显示输入状态与流式回复，执行期间可以继续发送文字补充要求。
 - **任务控制**：查看状态和最近结果，停止任务并暂停接收；重启后保留当前会话与任务状态。
 - **审批与提问**：通过按钮处理命令、文件和权限审批；点击选项或明确回复对应问题，多题全部回答后提交。
-- **个人部署**：仅响应指定用户的私聊，使用长轮询接收消息，无需配置 Webhook 或开放入站端口。
 
 当前支持 **Telegram + Codex**，面向单用户，每次处理一个任务。多会话列表、独立任务排队、工具进度摘要、图片和文件输入暂未支持。
-
 
 ## 安装并通过 Telegram 使用 Codex
 
@@ -28,8 +26,6 @@
 
 - **Node.js ≥ 24.5.0**。
 - **[Codex CLI](https://github.com/openai/codex)**：在运行 Tellrun 的同一系统用户下安装并完成登录，确认可以在终端正常使用。
-- **Telegram Bot Token**：向 [@BotFather](https://t.me/BotFather) 发送 `/newbot`，按提示创建机器人并获取 Token。参见 [Telegram 官方教程](https://core.telegram.org/bots/tutorial#obtain-your-bot-token)。
-- **本人 Telegram 数字用户 ID**：不是 `@用户名`，参见[获取方法](#如何获取-telegram-用户-id)。
 
 后台管理需要支持 **systemd 用户服务的 Linux**。本地调试或使用其他进程管理器时，可通过 `tellrun run` 前台运行。
 
@@ -40,20 +36,6 @@ npm install -g tellrun
 tellrun setup
 ```
 
-按向导填写 Bot Token、本人数字用户 ID 和 Codex 命令或可执行文件路径。Linux 下可以在配置完成后直接启动后台服务，并选择开机自启。
-
-如果选择了仅保存配置，之后运行：
-
-```sh
-tellrun start --enable
-```
-
-前台运行时使用：
-
-```sh
-tellrun run
-```
-
 ### 3. 在 Telegram 中开始对话
 
 打开与机器人的私聊，依次发送以下消息，将示例目录替换为服务器上实际存在的项目绝对路径：
@@ -62,12 +44,6 @@ tellrun run
 /start
 /cwd /home/you/projects/my-app
 帮我了解这个项目，说明主要模块和启动方式。
-```
-
-之后直接发送文字即可继续当前会话；任务执行中发送的新消息会补充到当前任务。例如：
-
-```text
-重点看一下登录流程，先分析问题并给出修改建议。
 ```
 
 未设置 `/cwd` 时，工作目录默认为服务启动目录；systemd 服务默认使用当前用户的主目录。切换目录会开始新会话。
@@ -101,12 +77,9 @@ tellrun run
 | `tellrun restart`           | 重启服务，加载新配置或新版本   |
 | `tellrun stop`              | 停止后台服务                   |
 | `tellrun service uninstall` | 停止并移除服务，保留配置和状态 |
-
-启动时会检查并启用用户 linger，使服务在退出 SSH 后继续运行。若权限不足，CLI 会显示需要在服务器执行的命令。完整命令帮助见 `tellrun --help`。
+| `tellrun --help`            | 查看命令帮助                   |
 
 ### 升级
-
-等待当前任务结束后执行：
 
 ```sh
 tellrun stop
@@ -120,64 +93,34 @@ tellrun restart
 
 运行 `tellrun setup` 创建或更新配置，已有 Bot Token 可留空保留原值。
 
-| 路径                         | 内容                                           |
-| ---------------------------- | ---------------------------------------------- |
-| `~/.tellrun/config.json`     | Bot Token、授权用户 ID、Codex 路径和可选代理   |
+| 路径                         | 内容                                                                     |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `~/.tellrun/config.json`     | Bot Token、授权用户 ID、Codex 路径和可选代理                             |
 | `~/.tellrun/state.json`      | 当前会话、工作目录、活动任务、最近结果、待处理交互与回复、未确认事件标识 |
-| `~/.tellrun/tellrun.service` | Linux 后台服务定义                             |
+| `~/.tellrun/tellrun.service` | Linux 后台服务定义                                                       |
 
 Codex 使用同一系统用户的登录和模型配置，完整会话历史由 Codex 管理。Tellrun 不设置项目目录白名单；可访问范围由运行用户权限和 Codex 沙箱共同决定，默认采用工作区写入与按需审批策略。
 
 Tellrun 只保留活动任务和每个聊天的最近结果，供 `/last` 查看。已确认的去重标识、关闭的交互在不再需要时回收；待发送回复保留到发送成功或永久拒绝。任务历史由 Codex 保存，Tellrun 日志仅用于服务启停、连接和存储故障诊断。
 
-### 环境变量
+### 配置参数
 
-前台运行或自行托管进程时，可以使用环境变量覆盖配置：
+`~/.tellrun/config.json` 的参数配置：
 
-| 变量                 | 用途                                            |
-| -------------------- | ----------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN` | 机器人 Token                                    |
-| `TELEGRAM_OWNER_ID`  | 允许操作机器人的数字用户 ID                     |
-| `CODEX_PATH`         | Codex 命令名或可执行文件路径                    |
-| `TELEGRAM_PROXY_URL` | Telegram 的 HTTP/HTTPS 代理，非空时覆盖配置文件 |
+| 参数                | 类型               | 要求 / 默认行为                | 说明                                                                                       |
+| ------------------- | ------------------ | ------------------------------ | ------------------------------------------------------------------------------------------ |
+| `telegram.token`    | 字符串             | 必填，无默认值                 | 从 BotFather 获取的机器人 Token。                                                          |
+| `telegram.ownerId`  | 正整数或数字字符串 | 必填，无默认值                 | 本人 Telegram 数字用户 ID，用于授权访问，不是 `@用户名`。建议使用数字形式。                |
+| `telegram.proxyUrl` | 字符串             | 可选；省略时继承运行环境的代理 | 支持 `http://` 或 `https://` 代理地址；设为 `""` 时明确直连。                              |
+| `codexPath`         | 字符串             | 可选，默认 `"codex"`           | Codex 命令名或可执行文件路径。命令名按 `PATH` 查找；`tellrun setup` 保存解析后的绝对路径。 |
 
-内置后台服务不会自动读取当前终端的环境变量或项目 `.env`，请使用 `tellrun setup` 保存必要配置。
-
-### Telegram 代理
-
-需要代理时，在已有 `~/.tellrun/config.json` 的 `telegram` 对象中添加 `"proxyUrl": "http://127.0.0.1:7890"`，再重启服务。端口和地址按实际代理调整；设置为 `""` 表示明确直连。
-
-代理优先级为：非空 `TELEGRAM_PROXY_URL` → 配置文件中的 `telegram.proxyUrl` → 运行进程的 `https_proxy` / `HTTPS_PROXY`。使用代理时遵循 `no_proxy` / `NO_PROXY`，同名变量以小写优先。此配置仅影响 Telegram；Codex 使用其进程自身的代理环境。
+配置在进程启动时读取。手动修改后运行 `tellrun restart`。
 
 ## 常见问题
-
-### 可以在手机上使用 Codex 编程吗？
-
-可以。先在服务器上安装 Codex CLI 和 Tellrun，再通过手机或电脑上的 Telegram 与机器人私聊。代码读取、修改和命令执行都在服务器上完成，Telegram 用于发送任务、查看回复和继续对话。
-
-### 如何获取 Telegram 用户 ID？
-
-在启动 Tellrun 前，先向新建的机器人发送一条私聊消息，再通过 Telegram 的 [getUpdates](https://core.telegram.org/bots/api#getupdates) 接口查看该消息的 `message.from.id`：
-
-```text
-https://api.telegram.org/bot<BOT_TOKEN>/getUpdates
-```
-
-将 `<BOT_TOKEN>` 替换为自己的 Token。若 Tellrun 已在运行，先停止服务，避免同时轮询。
 
 ### 机器人没有回复怎么办？
 
 确认是在私聊中使用、配置的用户 ID 正确，并查看 `tellrun logs`；前台运行时查看终端输出。同一个 Bot 不能同时由多个轮询实例使用，也不能在已有 Webhook 的情况下启动 Tellrun。
-
-### 任务需要审批时会怎样？
-
-机器人会展示操作内容，并根据请求提供 “Allow once”“Decline”“Stop” 按钮。权限请求的授权仅在本轮有效；拒绝后由 Codex 决定后续方案，停止会暂停接收新任务。文件审批展示路径和差异，缺少详情时只提供拒绝和停止。
-
-结构化问题可点击选项，或使用 Telegram 的“回复”功能回答对应问题；有多个问题时，全部回答后一起提交。限定选项的问题支持回复编号或完整选项文字，允许自定义答案的问题支持自由文字。普通新消息仍补充当前任务，不会被当成审批或问题答案。等待期间可用 `/status` 查看待处理交互，或用 `/stop` 停止。
-
-交互最多等待 10 分钟，运行时给出更短期限时采用该期限。审批或阻塞问题超时会中断任务；非阻塞问题过期时不提交任何选项，任务继续。任务结束、请求取消或服务重启后，旧按钮和问题回复失效，已记录的批准不会自动重发。回复机器人消息仅用于回答仍有效的问题；其他情况请另发新消息继续。
-
-敏感输入、MCP 表单／URL 和动态工具交互仍需在本机处理。遇到不支持的请求时会中断并说明原因，检查状态后发送 `/resume` 再提交需要继续的内容。
 
 ### 服务重启后会重新执行任务吗？
 
@@ -204,12 +147,6 @@ npm run dev
 | `npm start`     | 运行编译产物             |
 
 如果让 Codex 修改 Tellrun 自身，使用 `npm run build` 后执行 `npm start`，避免源码监听重启打断任务。
-
-## 文档与反馈
-
-- [架构与技术选型](https://github.com/chaoyue1998/tellrun/blob/main/docs/architecture.md)：实现、存储和部署细节。
-- [产品需求与规划](https://github.com/chaoyue1998/tellrun/blob/main/docs/prd.md)：包含尚未实现的功能，当前能力以本 README 为准。
-- [GitHub Issues](https://github.com/chaoyue1998/tellrun/issues)：提交问题或建议，请附上版本、复现步骤和去除凭据后的日志。
 
 ## 许可证
 

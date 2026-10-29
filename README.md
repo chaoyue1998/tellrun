@@ -8,7 +8,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 
 [npm](https://www.npmjs.com/package/tellrun) · [GitHub](https://github.com/chaoyue1998/tellrun) · [Report an issue](https://github.com/chaoyue1998/tellrun/issues)
 
-[Quick start](#install-and-connect-codex-to-telegram) · [Telegram commands](#telegram-commands) · [Configuration](#configuration-and-data) · [FAQ](#faq)
+[Quick start](#install-and-connect-codex-to-telegram) · [Telegram commands](#telegram-commands) · [Background service](#background-service) · [Configuration](#configuration-and-data) · [FAQ](#faq) · [Local development](#local-development)
 
 ## Features
 
@@ -17,10 +17,8 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
-- **Personal deployment**: only the configured user's private messages are accepted. Long polling requires no webhook or inbound port configuration.
 
 Currently supports **Telegram + Codex** for one user, with one task at a time. A session picker, a queue of separate tasks, tool progress summaries, and image or file input are not yet supported.
-
 
 ## Install and connect Codex to Telegram
 
@@ -28,8 +26,6 @@ Currently supports **Telegram + Codex** for one user, with one task at a time. A
 
 - **Node.js ≥ 24.5.0**.
 - **[Codex CLI](https://github.com/openai/codex)**: install and sign in as the same operating system user that will run Tellrun. Confirm that Codex works in your terminal.
-- **Telegram Bot Token**: send `/newbot` to [@BotFather](https://t.me/BotFather), follow the prompts, and save the token. See the [official Telegram tutorial](https://core.telegram.org/bots/tutorial#obtain-your-bot-token).
-- **Your numeric Telegram user ID**: this is not your `@username`. See [how to find it](#how-do-i-find-my-telegram-user-id).
 
 Background service management requires **Linux with systemd user services**. Use `tellrun run` in the foreground for local development or with another process manager.
 
@@ -40,20 +36,6 @@ npm install -g tellrun
 tellrun setup
 ```
 
-Enter your Bot Token, numeric user ID, and Codex command or executable path. On Linux, the setup wizard can start the background service and optionally enable it at boot.
-
-If you choose to save the configuration without starting the service, run this later:
-
-```sh
-tellrun start --enable
-```
-
-To run in the foreground instead:
-
-```sh
-tellrun run
-```
-
 ### 3. Start chatting in Telegram
 
 Open a private chat with your bot and send these messages one at a time. Replace the example path with an existing absolute project path on your server:
@@ -62,12 +44,6 @@ Open a private chat with your bot and send these messages one at a time. Replace
 /start
 /cwd /home/you/projects/my-app
 Help me understand this project. Explain its main modules and how to run it.
-```
-
-Send more text to continue the same conversation. Messages sent while a task is running become additional instructions for that task. For example:
-
-```text
-Focus on the login flow. Analyze the problem and suggest changes first.
 ```
 
 Without `/cwd`, the working directory defaults to the directory where the service starts. The systemd service starts in the current user's home directory. Changing directories starts a new conversation.
@@ -101,12 +77,9 @@ These commands manage a Linux systemd user service:
 | `tellrun restart`           | Restart with the current configuration or installed version  |
 | `tellrun stop`              | Stop the background service                                  |
 | `tellrun service uninstall` | Stop and remove the service, keeping configuration and state |
-
-On startup, Tellrun checks and enables user lingering so the service can continue after you disconnect from SSH. If permissions are insufficient, the CLI prints the command to run on your server. Use `tellrun --help` for full CLI help.
+| `tellrun --help`            | Show command help                                            |
 
 ### Upgrade
-
-Wait for the current task to finish, then run:
 
 ```sh
 tellrun stop
@@ -120,64 +93,34 @@ Configuration and state live in `~/.tellrun/` and are preserved when upgrading t
 
 Run `tellrun setup` to create or update your configuration. Leave the Bot Token blank to keep the existing value.
 
-| Path                         | Contents                                                                              |
-| ---------------------------- | ------------------------------------------------------------------------------------- |
-| `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                         |
+| Path                         | Contents                                                                                                                  |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                                                             |
 | `~/.tellrun/state.json`      | Current conversation, directory, active task, latest result, pending interactions and replies, and unconfirmed update IDs |
-| `~/.tellrun/tellrun.service` | Linux background service definition                                                   |
+| `~/.tellrun/tellrun.service` | Linux background service definition                                                                                       |
 
 Codex uses the same operating system user's authentication and model configuration, and manages its own full conversation history. Tellrun does not maintain a project directory allowlist. Access depends on operating system permissions and the Codex sandbox; Tellrun defaults to workspace write access and approvals on request.
 
 Tellrun keeps only active tasks and each chat's latest result for `/last`. Confirmed update IDs and closed interactions are removed once they are no longer needed; pending replies remain until sent or permanently rejected. Task history stays with Codex; Tellrun logs only service startup, shutdown, and connection or storage diagnostics.
 
-### Environment variables
+### Configuration parameters
 
-When running in the foreground or managing the process yourself, you can override configuration with environment variables:
+Parameters in `~/.tellrun/config.json`:
 
-| Variable             | Purpose                                                                       |
-| -------------------- | ----------------------------------------------------------------------------- |
-| `TELEGRAM_BOT_TOKEN` | Bot token                                                                     |
-| `TELEGRAM_OWNER_ID`  | Numeric ID of the user allowed to interact with the bot                       |
-| `CODEX_PATH`         | Codex command name or executable path                                         |
-| `TELEGRAM_PROXY_URL` | HTTP/HTTPS proxy for Telegram; overrides the configuration file when nonempty |
+| Parameter           | Type                               | Requirement / default behavior                             | Description                                                                                                                 |
+| ------------------- | ---------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `telegram.token`    | String                             | Required; no default                                       | Bot token obtained from BotFather.                                                                                          |
+| `telegram.ownerId`  | Positive integer or numeric string | Required; no default                                       | Your numeric Telegram user ID for authorized access, not your `@username`. A numeric value is recommended.                  |
+| `telegram.proxyUrl` | String                             | Optional; inherits environment proxy settings when omitted | Supports `http://` or `https://` proxy URLs; set to `""` to connect directly.                                               |
+| `codexPath`         | String                             | Optional; defaults to `"codex"`                            | Codex command name or executable path. Names are resolved through `PATH`; `tellrun setup` saves the resolved absolute path. |
 
-The built-in background service does not automatically load your current terminal's environment variables or a project's `.env` file. Save the required configuration with `tellrun setup`.
-
-### Telegram proxy
-
-To use a proxy, add `"proxyUrl": "http://127.0.0.1:7890"` to the existing `telegram` object in `~/.tellrun/config.json`, then restart the service. Adjust the address and port to match your proxy. Set it to `""` to explicitly connect directly.
-
-Proxy precedence is: nonempty `TELEGRAM_PROXY_URL` → `telegram.proxyUrl` in the configuration file → the running process's `https_proxy` / `HTTPS_PROXY`. Proxy connections honor `no_proxy` / `NO_PROXY`; lowercase variables take precedence. This setting only affects Telegram. Codex uses its own process's proxy environment.
+Configuration is read when the process starts. Run `tellrun restart` after editing the file manually.
 
 ## FAQ
-
-### Can I use Codex for coding from my phone?
-
-Yes. Install Codex CLI and Tellrun on your server, then chat with your bot through Telegram on your phone or desktop. Code inspection, file edits, and commands run on the server. Telegram is the interface for sending tasks, reading replies, and continuing the conversation.
-
-### How do I find my Telegram user ID?
-
-Before starting Tellrun, send a private message to your new bot. Use Telegram's [getUpdates](https://core.telegram.org/bots/api#getupdates) endpoint and find `message.from.id` for that message:
-
-```text
-https://api.telegram.org/bot<BOT_TOKEN>/getUpdates
-```
-
-Replace `<BOT_TOKEN>` with your token. If Tellrun is already running, stop it first to avoid polling conflicts.
 
 ### Why is the bot not replying?
 
 Check that you are using a private chat and that your configured user ID is correct. Inspect `tellrun logs`, or the terminal output if running in the foreground. The same bot cannot be used by multiple polling instances at once, and Tellrun cannot start while the bot has an active webhook.
-
-### What happens when a task needs approval?
-
-The bot shows the requested operation and offers allow-once, decline, and stop buttons as applicable. Permission grants last only for the current turn. Declining lets Codex decide how to proceed; stopping pauses new tasks. File approvals show paths and diffs; when details are unavailable, only decline and stop are offered.
-
-For structured questions, select an option or use Telegram's Reply action on the corresponding question. All questions must be answered before the response is submitted. Questions with fixed options accept their number or full label; questions allowing custom answers accept free text. Ordinary new messages still steer the task. Use `/status` to view pending interactions or `/stop` to stop while waiting.
-
-Interactions expire after at most 10 minutes, or sooner if the runtime specifies a shorter deadline. Expired approvals and blocking questions interrupt the task; nonblocking questions expire without choosing an answer and execution continues. Old buttons and replies become invalid after cancellation, task completion, or restart. Saved approvals are never replayed automatically. Replies to bot messages are reserved for open questions; otherwise, send a new message to continue.
-
-Secret input, MCP forms or URL requests, and dynamic tool interactions still require local handling. Unsupported requests interrupt the task with an explanation. Check the task state, then send `/resume` and a new message to continue.
 
 ### Will tasks run again after a restart?
 
@@ -204,12 +147,6 @@ Choose to save configuration without starting a background service in the setup 
 | `npm start`     | Run the compiled application                     |
 
 When asking Codex to modify Tellrun itself, run `npm run build` followed by `npm start` so source changes do not trigger a restart during the task.
-
-## Documentation and feedback
-
-- [Architecture and technical design](https://github.com/chaoyue1998/tellrun/blob/main/docs/architecture.md) (Chinese): implementation, storage, and deployment details.
-- [Product requirements and roadmap](https://github.com/chaoyue1998/tellrun/blob/main/docs/prd.md) (Chinese): includes planned features; this README describes what is currently available.
-- [GitHub Issues](https://github.com/chaoyue1998/tellrun/issues): report bugs or suggest improvements. Include versions, reproduction steps, and logs with credentials removed.
 
 ## License
 
