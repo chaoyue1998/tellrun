@@ -13,7 +13,7 @@ import {
 } from "json-rpc-2.0";
 import WebSocket from "ws";
 import { z } from "zod";
-import type { Agent, AgentInteraction, AgentResult } from "../core/types.js";
+import type { Agent, AgentInteraction, AgentModel, AgentResult } from "../core/types.js";
 import { fileChangesSchema, parseCodexInteraction } from "./codex-interaction.js";
 
 /** 由 Codex 0.165.0 的 generate-ts 核对；只校验实际消费的协议字段。 */
@@ -73,48 +73,170 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
   let steer: Agent["steer"] | undefined;
   let respond: Agent["respond"] | undefined;
 
+  /** 任务与模型查询使用同一客户端身份和协议能力。 */
+  const initialization = {
+    clientInfo: {
+      name: "tellrun",
+      title: "Tellrun",
+      version: JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"))
+        .version,
+    },
+    capabilities: { experimentalApi: true, requestAttestation: false },
+  };
+
+  /** 任务与只读查询共用连接流程；各自使用独立 socket，不争用会话。 */
+  async function connectServer(cwd: string, signal: AbortSignal): Promise<WebSocket> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      signal.throwIfAborted();
+      const socket = await new Promise<WebSocket | undefined>((resolve) => {
+        const connection = new WebSocket("ws://localhost", {
+          createConnection: () =>
+            connect(
+              join(
+                env.CODEX_HOME ?? join(homedir(), ".codex"),
+                "app-server-control",
+                "app-server-control.sock",
+              ),
+            ),
+          handshakeTimeout: 5_000,
+          maxPayload: 8_000_000,
+        });
+        /** 连接尚未建立时也能响应关停，不等待握手超时。 */
+        const abort = () => connection.terminate();
+        signal.addEventListener("abort", abort, { once: true });
+        connection.once("open", () => {
+          signal.removeEventListener("abort", abort);
+          resolve(connection);
+        });
+        connection.once("error", () => {
+          signal.removeEventListener("abort", abort);
+          connection.terminate();
+          resolve(undefined);
+        });
+      });
+      if (socket) {
+        if (signal.aborted) {
+          socket.terminate();
+          signal.throwIfAborted();
+        }
+        return socket;
+      }
+      signal.throwIfAborted();
+      if (attempt === 0) {
+        /** bootstrap 由系统管理独立 daemon，避免随 Tellrun 的进程组退出。 */
+        await promisify(execFile)(command, ["app-server", "daemon", "bootstrap"], {
+          cwd,
+          env,
+          timeout: 30_000,
+          maxBuffer: 1_048_576,
+          signal,
+        });
+      }
+    }
+    throw new Error("Codex daemon unavailable.");
+  }
+
   return {
     name: "Codex",
     version: stdout.trim().replace(/^codex-cli /, ""),
     permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
+    /** 分页读取模型目录；不恢复会话、不发起轮次，也不影响任务连接。 */
+    async listModels(cwd, signal) {
+      signal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+      const socket = await connectServer(cwd, signal);
+      const client = new JSONRPCClient(({ id, method, params }: JSONRPCRequest) => {
+        socket.send(JSON.stringify({ id, method, params }), (error) => {
+          if (error) client.rejectAllPendingRequests("Codex model query failed.");
+        });
+      });
+      /** 取消仅关闭目录查询，不能向正在运行的轮次发送中断。 */
+      const abort = () => {
+        client.rejectAllPendingRequests("Codex model query cancelled.");
+        socket.terminate();
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      socket.on("error", () => client.rejectAllPendingRequests("Codex model query failed."));
+      socket.on("close", () => client.rejectAllPendingRequests("Codex model query closed."));
+      socket.on("message", (data) => {
+        try {
+          const message = z
+            .object({
+              id: z.number().optional(),
+              result: z.unknown().optional(),
+              error: z.object({ code: z.number(), message: z.string() }).optional(),
+            })
+            .parse(JSON.parse(data.toString()));
+          if (message.id !== undefined)
+            client.receive(
+              message.error
+                ? createJSONRPCErrorResponse(
+                    message.id,
+                    message.error.code,
+                    "Codex model query rejected.",
+                  )
+                : createJSONRPCSuccessResponse(message.id, message.result),
+            );
+        } catch {
+          client.rejectAllPendingRequests("Invalid Codex model response.");
+          socket.terminate();
+        }
+      });
+      try {
+        signal.throwIfAborted();
+        await client.request("initialize", initialization);
+        socket.send(JSON.stringify({ method: "initialized" }));
+        const models: AgentModel[] = [];
+        let cursor: string | null = null;
+        do {
+          signal.throwIfAborted();
+          const page = z
+            .object({
+              data: z.array(
+                z.object({
+                  model: z.string().min(1),
+                  displayName: z.string(),
+                  hidden: z.boolean(),
+                  supportedReasoningEfforts: z.array(
+                    z.object({
+                      reasoningEffort: z.string().min(1),
+                      description: z.string(),
+                    }),
+                  ),
+                  defaultReasoningEffort: z.string().min(1),
+                }),
+              ),
+              nextCursor: z.string().nullable(),
+            })
+            .parse(
+              await client.request("model/list", { limit: 100, includeHidden: false, cursor }),
+            );
+          for (const model of page.data)
+            if (!model.hidden && !models.some((option) => option.id === model.model))
+              models.push({
+                id: model.model,
+                label: model.displayName || model.model,
+                reasoningEfforts: model.supportedReasoningEfforts.map((effort) => ({
+                  id: effort.reasoningEffort,
+                  label: effort.description,
+                })),
+                defaultReasoningEffort: model.defaultReasoningEffort,
+              });
+          cursor = page.nextCursor;
+        } while (cursor);
+        return models;
+      } finally {
+        signal.removeEventListener("abort", abort);
+        client.rejectAllPendingRequests("Codex model query closed.");
+        socket.terminate();
+      }
+    },
     async run(input) {
       if (active) throw new Error("Codex is already running a task.");
       const controller = new AbortController();
       active = controller;
-      /** 复用后台的 Unix socket，避免把编码进程放进 Tellrun 的服务控制组。 */
-      const socketPath = join(
-        env.CODEX_HOME ?? join(homedir(), ".codex"),
-        "app-server-control",
-        "app-server-control.sock",
-      );
       let socket: WebSocket | undefined;
       try {
-        for (let attempt = 0; attempt < 2 && !controller.signal.aborted; attempt++) {
-          socket = await new Promise<WebSocket | undefined>((resolve) => {
-            const connection = new WebSocket("ws://localhost", {
-              createConnection: () => connect(socketPath),
-              handshakeTimeout: 5_000,
-              maxPayload: 8_000_000,
-            });
-            connection.once("open", () => resolve(connection));
-            connection.once("error", () => {
-              connection.terminate();
-              resolve(undefined);
-            });
-          });
-          if (socket) break;
-          if (attempt === 0) {
-            /** bootstrap 交给系统管理独立 daemon；普通 detached 子进程仍会被 systemd 清理。 */
-            await promisify(execFile)(command, ["app-server", "daemon", "bootstrap"], {
-              cwd: input.cwd,
-              env,
-              timeout: 30_000,
-              maxBuffer: 1_048_576,
-              signal: controller.signal,
-            });
-          }
-        }
-        if (!socket) throw new Error("Codex daemon unavailable.");
+        socket = await connectServer(input.cwd, controller.signal);
       } catch {
         active = undefined;
         if (controller.signal.aborted)
@@ -552,17 +674,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           throw new Error(
             "Codex permission mode unavailable. Choose another mode with /permissions.",
           );
-        await request("initialize", {
-          clientInfo: {
-            name: "tellrun",
-            title: "Tellrun",
-            /** 源码和编译产物都读取包版本，与 CLI 的版本显示保持一致。 */
-            version: JSON.parse(
-              readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
-            ).version,
-          },
-          capabilities: { experimentalApi: true, requestAttestation: false },
-        });
+        await request("initialize", initialization);
         write({ method: "initialized" });
         if (input.runId) {
           if (!sessionId) throw new Error("Codex task session missing. Task not resubmitted.");
@@ -637,16 +749,21 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             approvalPolicy: z.unknown(),
             approvalsReviewer: z.string(),
             sandbox: z.object({ type: z.string() }),
+            model: z.string().optional(),
           })
           .parse(
             await request(input.sessionId ? "thread/resume" : "thread/start", {
               ...(input.sessionId ? { threadId: input.sessionId, excludeTurns: true } : {}),
               cwd: input.cwd,
               ...permissionMode.config,
+              ...(input.model ? { model: input.model } : {}),
             }),
           );
         if (response.thread.status?.type !== "idle")
           throw new Error("Codex session busy. Message not sent; wait until it is idle.");
+        /** 模型被服务端替换时停止派发，避免悄悄使用其他模型。 */
+        if (input.model && response.model !== input.model)
+          throw new Error("Codex did not apply the selected model. Open /model and choose again.");
         /** 使用服务端实际返回值核实预设，不能在权限被改写时仍启动任务。 */
         if (
           response.approvalPolicy !== permissionMode.config.approvalPolicy ||
@@ -668,6 +785,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           request("turn/start", {
             threadId: sessionId,
             input: [{ type: "text", text: input.prompt, text_elements: [] }],
+            ...(input.model ? { model: input.model } : {}),
+            ...(input.reasoningEffort ? { effort: input.reasoningEffort } : {}),
           }),
           completed.promise.then(() => null),
         ]);

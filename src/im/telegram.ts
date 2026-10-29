@@ -13,6 +13,7 @@ const commands = [
   { command: "help", description: "Show available commands" },
   { command: "cwd", description: "Show or change the working directory" },
   { command: "new", description: "Start a new conversation" },
+  { command: "model", description: "Select model and reasoning effort for future tasks" },
   { command: "permissions", description: "Select the permission mode for future tasks" },
   { command: "status", description: "Show session and task status" },
   { command: "last", description: "Show the latest task result" },
@@ -141,9 +142,9 @@ export function createTelegramConnection(
     const match = ctx.callbackQuery.data.match(
       /^i:([0-9a-f-]{36}):(accept|decline|stop|q(\d+)_(\d+))$/,
     );
-    const permissions = ctx.callbackQuery.data.match(/^p:([0-9a-f-]{36}):(\d+)$/);
+    const selection = ctx.callbackQuery.data.match(/^([pm]):([0-9a-f-]{36}):(\d+)$/);
     let reply = "Button expired.";
-    if ((match?.[1] || permissions?.[1]) && ctx.chat && ctx.callbackQuery.message) {
+    if ((match?.[1] || selection?.[2]) && ctx.chat && ctx.callbackQuery.message) {
       reply =
         (await handleMessage({
           channel: {
@@ -153,11 +154,11 @@ export function createTelegramConnection(
             userId: String(ctx.from.id),
           },
           eventId: String(ctx.update.update_id),
-          content: permissions?.[1]
+          content: selection?.[2]
             ? {
-                type: "permissions",
-                id: permissions[1],
-                optionIndex: Number(permissions[2]),
+                type: selection[1] === "p" ? "permissions" : "model",
+                id: selection[2],
+                optionIndex: Number(selection[3]),
                 messageId: ctx.callbackQuery.message.message_id,
               }
             : {
@@ -313,16 +314,15 @@ export function createTelegramConnection(
                   store.removeReply(reply.id);
                 } else {
                   const interaction = reply.interaction;
+                  const menu = reply.permissionMenu ?? reply.modelMenu;
                   const sent = await bot.api.sendMessage(reply.chatId, reply.text, {
-                    ...(reply.promptEnd &&
-                    reply.permissionMenu &&
-                    reply.permissionMenu.expiresAt > Date.now()
+                    ...(reply.promptEnd && menu?.options.length && menu.expiresAt > Date.now()
                       ? {
                           reply_markup: {
-                            inline_keyboard: reply.permissionMenu.options.map((option, index) => [
+                            inline_keyboard: menu.options.map((option, index) => [
                               {
                                 text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
-                                callback_data: `p:${reply.permissionMenu?.id}:${index}`,
+                                callback_data: `${reply.modelMenu ? "m" : "p"}:${menu.id}:${index}`,
                               },
                             ]),
                           },
@@ -364,6 +364,9 @@ export function createTelegramConnection(
                       : {}),
                     ...(reply.promptEnd && reply.permissionMenuId
                       ? { permissionMenuId: reply.permissionMenuId }
+                      : {}),
+                    ...(reply.promptEnd && reply.modelMenuId
+                      ? { modelMenuId: reply.modelMenuId }
                       : {}),
                   });
                 }

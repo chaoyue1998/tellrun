@@ -2,11 +2,13 @@ import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import type { Store } from "../storage/store.js";
-import type { Agent, ChannelIdentity, IncomingMessage } from "./types.js";
+import type { Agent, AgentModel, ChannelIdentity, IncomingMessage } from "./types.js";
 
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
 export function createRelayService(options: { store: Store; agent: Agent }) {
   let stopping = false;
+  /** 菜单查询独立于任务，关停时取消查询并等待退出后再关闭存储。 */
+  const modelLoading = new AbortController();
   /** 状态查询与历史结果共用面向用户的状态名称。 */
   const statuses = {
     queued: "Queued",
@@ -28,8 +30,8 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
         /** 未指定目录时沿用服务启动目录，并随消息一同保存，后续可用 /cwd 切换。 */
         if (!channel.cwd) options.store.setSession(channel.id, realpathSync(process.cwd()));
         const task = options.store.activeTask();
-        if (message.content.type === "permissions")
-          return options.store.choosePermissions(channel.id, message.content);
+        if (message.content.type === "permissions" || message.content.type === "model")
+          return options.store.chooseOption(channel.id, message.content);
         if (
           message.content.type === "interaction" ||
           (message.content.type === "text" && message.content.replyToMessageId !== undefined)
@@ -41,9 +43,13 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/permissions — Select permission mode\n/status — Task status\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Answer questions with buttons or replies. Requests expire within 10 minutes.";
+              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Task status\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Answer questions with buttons or replies. Requests expire within 10 minutes.";
+            case "model":
+              if (message.content.args) return "Use /model to choose a model with the buttons.";
+              options.store.openMenu(channel.id, "model");
+              return;
             case "permissions":
-              options.store.openPermissions(channel.id, options.agent.permissionModes);
+              options.store.openMenu(channel.id, "permissions", options.agent.permissionModes);
               return;
             case "status":
               return `Service: connected\n${options.agent.name}: ${options.agent.version}\nDirectory: ${channel.cwd}\nSession: ${channel.sessionId ? "existing" : "new"}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === channel.permissionMode)?.label ?? channel.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== channel.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nNew tasks: ${channel.paused ? "paused (/resume)" : "enabled"}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}`;
@@ -108,6 +114,23 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
         options.agent.stop();
       return reply;
     },
+    /** 慢模型列表请求不占用入站或任务循环；迟到结果由菜单 ID 校验丢弃。 */
+    async loadModels(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+      while (!stopping) {
+        const menu = options.store.pendingModels(source);
+        if (!menu) {
+          await setTimeout(100);
+          continue;
+        }
+        let models: AgentModel[] | undefined;
+        try {
+          models = await options.agent.listModels(menu.cwd, modelLoading.signal);
+        } catch {
+          /** 查询失败只提示重新打开菜单，不影响任务和已有选择。 */
+        }
+        if (!stopping) options.store.fillModels(menu.channelId, menu.id, models);
+      }
+    },
     /** 领取任务后再次检查目录；运行结果与最终回复在同一个快照中保存。 */
     async run(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       while (!stopping) {
@@ -134,6 +157,8 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
             sessionId: task.sessionId,
             runId: task.runId,
             permissionMode: task.permissionMode,
+            model: task.model,
+            reasoningEffort: task.reasoningEffort,
             onSession: (id) => options.store.recordSession(task.id, id),
             onStarted: (runId) => {
               options.store.markRunning(task.id, runId);
@@ -199,6 +224,7 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
     /** 服务退出只断开客户端；后台任务继续运行，重启后按已保存轮次接回。 */
     stop() {
       stopping = true;
+      modelLoading.abort();
       options.agent.disconnect();
     },
   };

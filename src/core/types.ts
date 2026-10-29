@@ -13,7 +13,7 @@ export interface IncomingMessage {
   content:
     | { type: "command"; name: string; args: string }
     | { type: "text"; text: string; replyToMessageId?: number }
-    | { type: "permissions"; id: string; optionIndex: number; messageId: number }
+    | { type: "permissions" | "model"; id: string; optionIndex: number; messageId: number }
     | {
         type: "interaction";
         id: string;
@@ -53,18 +53,26 @@ export type InteractionAnswer =
   | { decision: "accept" | "decline" }
   | { answers: Record<string, { answers: string[] }> };
 
-/** Agent 提供可选模式；核心层与 IM 只处理标识和展示信息。 */
-export interface PermissionMode {
+/** 模型与权限菜单共用选项；核心层与 IM 只处理标识和展示信息。 */
+export interface AgentOption {
   id: string;
   label: string;
 }
 
-/** Agent 适配层暴露任务、会话和权限模式，不向核心层泄露 RPC 类型。 */
+/** 推理选项与默认值由 Agent 返回，不能假设所有模型支持相同档位。 */
+export interface AgentModel extends AgentOption {
+  reasoningEfforts: AgentOption[];
+  defaultReasoningEffort: string;
+}
+
+/** Agent 适配层暴露任务、会话与菜单选项，不向核心层泄露 RPC 类型。 */
 export interface Agent {
   name: string;
   version: string;
   /** 第一项为默认模式；模式 ID 由各 Agent 自行解释。 */
-  permissionModes: readonly PermissionMode[];
+  permissionModes: readonly AgentOption[];
+  /** 只读取可选模型，不创建会话；独立连接避免影响正在执行的任务。 */
+  listModels(cwd: string, signal: AbortSignal): Promise<AgentModel[]>;
   run(input: {
     cwd: string;
     prompt: string;
@@ -73,6 +81,10 @@ export interface Agent {
     runId?: string | null;
     /** 未选择时由 Agent 使用默认模式，任务提交后不受后续选择影响。 */
     permissionMode?: string | null;
+    /** 空值沿用 Codex 配置；选择在任务提交时固定。 */
+    model?: string | null;
+    /** 与模型一起形成任务快照；空值沿用 Agent 配置。 */
+    reasoningEffort?: string | null;
     onSession: (sessionId: string) => void;
     onStarted: (runId: string) => void;
     /** 当前回复文本快照，随增量更新；调用方不能等待 IM 发送。 */

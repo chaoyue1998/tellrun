@@ -3,11 +3,12 @@ import { dirname, join } from "node:path";
 import { appDirectory } from "../config.js";
 import type {
   AgentInteraction,
+  AgentModel,
+  AgentOption,
   AgentResult,
   ChannelIdentity,
   IncomingMessage,
   InteractionAnswer,
-  PermissionMode,
 } from "../core/types.js";
 import { writeJson } from "./json.js";
 import { acquireLock } from "./lock.js";
@@ -97,7 +98,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       text: string | undefined,
       delivery: Pick<
         State["outbox"][number],
-        "interactionId" | "questionIndex" | "messageId" | "permissionMenuId"
+        "interactionId" | "questionIndex" | "messageId" | "permissionMenuId" | "modelMenuId"
       > = {},
     ) {
       if (text === undefined) return;
@@ -112,7 +113,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
           attempts: 0,
           retryAt: Date.now(),
           ...delivery,
-          ...((delivery.interactionId || delivery.permissionMenuId) && !delivery.messageId
+          ...((delivery.interactionId || delivery.permissionMenuId || delivery.modelMenuId) &&
+          !delivery.messageId
             ? { promptEnd: index === parts.length - 1 }
             : {}),
         });
@@ -120,15 +122,16 @@ export function openStore(path = join(appDirectory, "state.json")) {
     }
 
     /** 新建、使用或失效菜单时清理按钮，发送途中的旧消息由回执继续清理。 */
-    function closePermissionMenu(channelId: number) {
+    function closeMenu(channelId: number, key: "permissionMenu" | "modelMenu") {
       const channel = state.channels.find((item) => item.id === channelId);
-      if (!channel?.permissionMenu) return;
+      const menu = channel?.[key];
+      if (!channel || !menu) return;
       state.outbox = state.outbox.filter(
-        (reply) => reply.permissionMenuId !== channel.permissionMenu?.id,
+        (reply) => reply.permissionMenuId !== menu.id && reply.modelMenuId !== menu.id,
       );
-      for (const message of channel.permissionMenu.messages)
-        enqueueReply(channel.id, message.text, { messageId: message.messageId });
-      channel.permissionMenu = null;
+      for (const message of menu.messages)
+        enqueueReply(channelId, message.text, { messageId: message.messageId });
+      channel[key] = null;
     }
 
     /** 关闭请求或单个已答问题；撤回未发送提示，已发送消息保留正文并移除按钮。 */
@@ -232,7 +235,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             (item) => item.channelId === existing.id && item.eventId === message.eventId,
           )
         )
-          return ["interaction", "permissions"].includes(message.content.type)
+          return ["interaction", "permissions", "model"].includes(message.content.type)
             ? "Already handled."
             : undefined;
         return update(() => {
@@ -246,6 +249,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
               paused: false,
               permissionMode: null,
               permissionMenu: null,
+              model: null,
+              reasoningEffort: null,
+              modelMenu: null,
             };
             state.channels.push(channel);
           }
@@ -255,7 +261,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             eventId: message.eventId,
           });
           const reply = handle(channel);
-          if (!["interaction", "permissions"].includes(message.content.type))
+          if (!["interaction", "permissions", "model"].includes(message.content.type))
             enqueueReply(channel.id, reply);
           return reply;
         });
@@ -280,55 +286,140 @@ export function openStore(path = join(appDirectory, "state.json")) {
         update(() => {
           const channel = state.channels.find((channel) => channel.id === channelId);
           if (channel) {
-            closePermissionMenu(channelId);
-            if (cwd !== channel.cwd) channel.permissionMode = null;
+            closeMenu(channelId, "permissionMenu");
+            closeMenu(channelId, "modelMenu");
+            if (cwd !== channel.cwd) {
+              channel.permissionMode = null;
+              channel.model = null;
+              channel.reasoningEffort = null;
+            }
             Object.assign(channel, { cwd, sessionId: null });
           }
         });
       },
-      /** 菜单只依赖通用模式信息；不启动 Agent 或调用模型。 */
-      openPermissions(channelId: number, modes: readonly PermissionMode[]) {
+      /** 权限直接展示；模型菜单先保存查询意图，由独立循环补齐选项。 */
+      openMenu(
+        channelId: number,
+        kind: "permissions" | "model",
+        modes: readonly AgentOption[] = [],
+      ) {
         update(() => {
           const channel = state.channels.find((item) => item.id === channelId);
           if (!channel) return;
-          closePermissionMenu(channelId);
-          channel.permissionMenu = {
+          const key = kind === "permissions" ? "permissionMenu" : "modelMenu";
+          closeMenu(channelId, key);
+          channel[key] = {
             id: crypto.randomUUID(),
             expiresAt: Date.now() + 600_000,
             options: modes.map(({ id, label }) => ({ id, label })),
             messages: [],
           };
+          if (kind === "model") return;
           enqueueReply(
             channelId,
             `Permissions\nCurrent selection: ${modes.find((mode) => mode.id === channel.permissionMode)?.label ?? channel.permissionMode ?? modes[0]?.label ?? "Not set"}\n\n${modes.map((mode, index) => `${index + 1}. ${mode.label}`).join("\n")}\n\nApplies to future tasks. The current task keeps its permissions. Modes are subject to local configuration.`,
-            { permissionMenuId: channel.permissionMenu.id },
+            { permissionMenuId: channel[key].id },
           );
         });
       },
-      /** 校验聊天、原消息、菜单和有效期；只保存模式，不改变已提交任务的快照。 */
-      choosePermissions(
+      /** 只读取本实例的待查询菜单；选项为空表示尚未完成查询。 */
+      pendingModels(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+        const channel = state.channels.find(
+          (channel) =>
+            channel.platform === source.platform &&
+            channel.accountId === source.accountId &&
+            channel.userId === source.userId &&
+            channel.cwd &&
+            channel.modelMenu?.options.length === 0 &&
+            channel.modelMenu.expiresAt > Date.now(),
+        );
+        if (channel?.modelMenu && channel.cwd)
+          return { channelId: channel.id, cwd: channel.cwd, id: channel.modelMenu.id };
+      },
+      /** 新菜单、换目录和过期后丢弃旧查询；失败时保留原模型选择。 */
+      fillModels(channelId: number, id: string, models: readonly AgentModel[] | undefined) {
+        const menu = state.channels.find((channel) => channel.id === channelId)?.modelMenu;
+        if (menu?.id !== id || menu.expiresAt <= Date.now()) return;
+        update(() => {
+          const channel = state.channels.find((channel) => channel.id === channelId);
+          if (!channel?.modelMenu) return;
+          closeMenu(channelId, "modelMenu");
+          if (!models?.length) {
+            enqueueReply(
+              channelId,
+              `Model\nCurrent selection: ${channel.model ?? "Codex default"}\nReasoning effort: ${channel.reasoningEffort ?? "Codex default"}\n\n${
+                models
+                  ? "No models available. Check Codex configuration, then open /model again."
+                  : "Could not load models. Check Codex on the host, then open /model again."
+              }`,
+            );
+            return;
+          }
+          channel.modelMenu = { ...menu, options: [...models], messages: [] };
+          enqueueReply(
+            channelId,
+            `Model\nCurrent selection: ${models.find((model) => model.id === channel.model)?.label ?? channel.model ?? "Codex default"}\nReasoning effort: ${channel.reasoningEffort ?? "Codex default"}\n\nChoose a model, then its reasoning effort. Applies to future tasks.`,
+            { modelMenuId: id },
+          );
+        });
+      },
+      /** 校验聊天、原消息、菜单和有效期；选择不改变已提交任务的快照。 */
+      chooseOption(
         channelId: number,
-        content: Extract<IncomingMessage["content"], { type: "permissions" }>,
+        content: Extract<IncomingMessage["content"], { type: "permissions" | "model" }>,
       ) {
         const channel = state.channels.find((item) => item.id === channelId);
-        const menu = channel?.permissionMenu;
+        const key = content.type === "permissions" ? "permissionMenu" : "modelMenu";
+        const menu = channel?.[key];
         if (
           !menu ||
           menu.id !== content.id ||
           menu.expiresAt <= Date.now() ||
           !menu.messages.some((message) => message.messageId === content.messageId)
         )
-          return "Menu expired. Open /permissions again.";
+          return `Menu expired. Open /${content.type} again.`;
         const option = menu.options[content.optionIndex];
-        if (!option) return "Invalid permission option.";
-        update(() => {
+        if (!option)
+          return content.type === "permissions"
+            ? "Invalid permission option."
+            : "Invalid model option.";
+        return update(() => {
           const current = state.channels.find((item) => item.id === channelId);
           if (!current) return;
-          current.permissionMode = option.id;
-          closePermissionMenu(channelId);
-          enqueueReply(channelId, `Selected: ${option.label}. Applies to the next task.`);
+          if (content.type === "permissions") current.permissionMode = option.id;
+          else {
+            const model = current.modelMenu?.options[content.optionIndex];
+            if (!current.modelMenu?.model && model?.reasoningEfforts?.length) {
+              /** 第二步更换菜单 ID，旧模型按钮不能被当作推理档位重复提交。 */
+              closeMenu(channelId, key);
+              current.modelMenu = {
+                id: crypto.randomUUID(),
+                expiresAt: menu.expiresAt,
+                model: { id: model.id, label: model.label },
+                options: model.reasoningEfforts.map((effort) => ({
+                  id: effort.id,
+                  label: `${effort.id}${effort.id === model.defaultReasoningEffort ? " (default)" : ""}`,
+                })),
+                messages: [],
+              };
+              enqueueReply(
+                channelId,
+                `Model: ${model.label}\nChoose reasoning effort\n\n${model.reasoningEfforts.map((effort) => `${effort.id}${effort.id === model.defaultReasoningEffort ? " (default)" : ""}${effort.label ? ` — ${effort.label}` : ""}`).join("\n")}\n\nApplies to future tasks after selection. Use /model to choose a different model.`,
+                { modelMenuId: current.modelMenu.id },
+              );
+              return "Choose reasoning effort.";
+            }
+            /** 只有选完第二步才一起保存；无推理选项的模型沿用 Agent 配置。 */
+            current.model = current.modelMenu?.model?.id ?? option.id;
+            current.reasoningEffort = current.modelMenu?.model ? option.id : null;
+          }
+          closeMenu(channelId, key);
+          enqueueReply(
+            channelId,
+            `Selected: ${content.type === "permissions" ? option.label : `${current.model} (${current.reasoningEffort ?? "Codex default"})`}. Applies to the next task.`,
+          );
+          return content.type === "permissions" ? "Permission mode saved." : "Model saved.";
         });
-        return "Permission mode saved.";
       },
       /** 暂停状态跨重启保留，恢复须由用户明确触发。 */
       setPaused(channelId: number, paused: boolean) {
@@ -396,6 +487,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
             runId: null,
             prompt,
             permissionMode: channel.permissionMode,
+            model: channel.model,
+            reasoningEffort: channel.reasoningEffort,
             inputs: [],
             status: "queued",
             result: null,
@@ -635,9 +728,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
       closeInteraction,
       /** 有轮次 ID 的任务重新连接；未确认派发和在途输入不自动重放。 */
       recoverTasks() {
-        if (state.channels.some((channel) => channel.permissionMenu))
+        if (state.channels.some((channel) => channel.permissionMenu || channel.modelMenu))
           update(() => {
-            for (const channel of state.channels) closePermissionMenu(channel.id);
+            for (const channel of state.channels) {
+              closeMenu(channel.id, "permissionMenu");
+              closeMenu(channel.id, "modelMenu");
+            }
           });
         for (const task of state.tasks.filter(
           (task) => activeTaskStatuses.has(task.status) && task.status !== "queued",
@@ -667,9 +763,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
       /** 按机器人与授权用户领取最早回复，内存关联保留到发送成功或失败。 */
       claimReply(accountId: string, userId: string) {
         if (delivering) return;
-        for (const channel of state.channels)
+        for (const channel of state.channels) {
           if (channel.permissionMenu && channel.permissionMenu.expiresAt <= Date.now())
-            update(() => closePermissionMenu(channel.id));
+            update(() => closeMenu(channel.id, "permissionMenu"));
+          if (channel.modelMenu && channel.modelMenu.expiresAt <= Date.now())
+            update(() => closeMenu(channel.id, "modelMenu"));
+        }
         for (const reply of state.outbox) {
           const interaction = state.interactions.find((item) => item.id === reply.interactionId);
           if (
@@ -697,6 +796,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
                 channel.permissionMenu?.id === reply.permissionMenuId
                   ? channel.permissionMenu
                   : undefined,
+              modelMenu:
+                channel.modelMenu?.id === reply.modelMenuId ? channel.modelMenu : undefined,
             });
           }
         }
@@ -710,6 +811,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           interactionId?: string;
           questionIndex?: number;
           permissionMenuId?: string;
+          modelMenuId?: string;
         },
       ) {
         update(() => {
@@ -719,13 +821,15 @@ export function openStore(path = join(appDirectory, "state.json")) {
               : state.outbox.find((reply) => reply.id === id)?.channelId;
           if (delivering?.id === id) delivering = undefined;
           state.outbox = state.outbox.filter((reply) => reply.id !== id);
-          if (delivery?.permissionMenuId && channelId !== undefined) {
+          if ((delivery?.permissionMenuId || delivery?.modelMenuId) && channelId !== undefined) {
             const channel = state.channels.find((item) => item.id === channelId);
+            const menu = delivery.modelMenuId ? channel?.modelMenu : channel?.permissionMenu;
             if (
-              channel?.permissionMenu?.id === delivery.permissionMenuId &&
-              channel.permissionMenu.expiresAt > Date.now()
+              menu &&
+              menu.id === (delivery.modelMenuId ?? delivery.permissionMenuId) &&
+              menu.expiresAt > Date.now()
             )
-              channel.permissionMenu.messages.push({
+              menu.messages.push({
                 messageId: delivery.messageId,
                 text: delivery.text,
               });

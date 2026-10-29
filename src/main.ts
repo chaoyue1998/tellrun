@@ -71,7 +71,7 @@ try {
       }
       if (readyFile) writeFileSync(readyFile, String(process.pid), { mode: 0o600 });
       phase = "Processing messages";
-      running = [im.start(), relay.run(source)];
+      running = [im.start(), relay.run(source), relay.loadModels(source)];
       await Promise.all(running);
     }
   }

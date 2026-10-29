@@ -49,17 +49,18 @@ Without `/cwd`, the working directory defaults to the directory where the servic
 
 At startup, Tellrun registers an English command menu. Use the menu button beside the chat input or type `/` to select a command.
 
-| Command               | Purpose                                                      |
-| --------------------- | ------------------------------------------------------------ |
-| `/start`, `/help`     | Show usage instructions                                      |
-| `/cwd`                | Show the current working directory                           |
-| `/cwd /absolute/path` | Change the working directory and start a new conversation    |
-| `/new`                | Start a new conversation while keeping the working directory |
-| `/permissions`        | Choose the permission mode for subsequent tasks             |
-| `/status`             | Show connection, conversation, directory, and task status    |
-| `/last`               | Show the latest finished task's status and result            |
-| `/stop`               | Request that the current task stop and pause new tasks       |
-| `/resume`             | Accept new tasks again without rerunning an interrupted task |
+| Command               | Purpose                                                          |
+| --------------------- | ---------------------------------------------------------------- |
+| `/start`, `/help`     | Show usage instructions                                          |
+| `/cwd`                | Show the current working directory                               |
+| `/cwd /absolute/path` | Change the working directory and start a new conversation        |
+| `/new`                | Start a new conversation while keeping the working directory     |
+| `/model`              | Show the current selection and choose model and reasoning effort |
+| `/permissions`        | Choose the permission mode for subsequent tasks                  |
+| `/status`             | Show connection, conversation, directory, and task status        |
+| `/last`               | Show the latest finished task's status and result                |
+| `/stop`               | Request that the current task stop and pause new tasks           |
+| `/resume`             | Accept new tasks again without rerunning an interrupted task     |
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
 

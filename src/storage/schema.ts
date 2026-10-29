@@ -13,6 +13,17 @@ const id = z.number().int().positive();
 /** 重试次数和时间均为非负整数。 */
 const nonnegativeInteger = z.number().int().nonnegative();
 
+/** 权限、模型和推理档位共用展示选项。 */
+const optionSchema = z.strictObject({ id: z.string().min(1), label: z.string() });
+
+/** 菜单共用有效期和消息清理记录，模型菜单扩展第二步所需的信息。 */
+const menuSchema = z.strictObject({
+  id: z.uuid(),
+  expiresAt: nonnegativeInteger,
+  options: z.array(optionSchema),
+  messages: z.array(z.strictObject({ messageId: id, text: z.string() })),
+});
+
 /** 只保存重启所需的业务状态；文件损坏时拒绝启动，不重置为空状态。 */
 export const stateSchema = z
   .strictObject({
@@ -28,12 +39,20 @@ export const stateSchema = z
         paused: z.boolean(),
         /** 模式标识属于 Agent；空值沿用默认模式，兼容旧状态文件。 */
         permissionMode: z.string().min(1).nullable().default(null),
-        permissionMenu: z
-          .strictObject({
-            id: z.uuid(),
-            expiresAt: nonnegativeInteger,
-            options: z.array(z.strictObject({ id: z.string().min(1), label: z.string() })),
-            messages: z.array(z.strictObject({ messageId: id, text: z.string() })),
+        permissionMenu: menuSchema.nullable().default(null),
+        /** 旧状态没有模型选择时沿用 Codex 配置。 */
+        model: z.string().min(1).nullable().default(null),
+        reasoningEffort: z.string().min(1).nullable().default(null),
+        modelMenu: menuSchema
+          .extend({
+            options: z.array(
+              optionSchema.extend({
+                reasoningEfforts: z.array(optionSchema).optional(),
+                defaultReasoningEffort: z.string().min(1).optional(),
+              }),
+            ),
+            /** 第二步只暂存模型，选定推理强度后再一起应用。 */
+            model: optionSchema.optional(),
           })
           .nullable()
           .default(null),
@@ -55,6 +74,8 @@ export const stateSchema = z
         runId: z.string().min(1).nullable().default(null),
         prompt: z.string(),
         permissionMode: z.string().min(1).nullable().default(null),
+        model: z.string().min(1).nullable().default(null),
+        reasoningEffort: z.string().min(1).nullable().default(null),
         /** 旧状态文件没有补充输入；发送中记录用于重启后避免不确定重放。 */
         inputs: z
           .array(
@@ -124,6 +145,7 @@ export const stateSchema = z
         /** 有消息 ID 时编辑原消息并移除按钮，否则发送新消息。 */
         messageId: id.optional(),
         permissionMenuId: z.uuid().optional(),
+        modelMenuId: z.uuid().optional(),
       }),
     ),
   })
