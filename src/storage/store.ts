@@ -149,7 +149,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       }
     }
 
-    /** 终态与最终回复一起保存，迟到事件不能覆盖已完成结果。 */
+    /** 终态与最终回复一起保存，成功时只发送正文；迟到事件不能覆盖已完成结果。 */
     function finishTask(id: number, result: AgentResult) {
       if (!state.tasks.some((task) => task.id === id && activeTaskStatuses.has(task.status)))
         return;
@@ -163,14 +163,15 @@ export function openStore(path = join(appDirectory, "state.json")) {
         }
         enqueueReply(
           task.channelId,
-          `Task #${id} ${
-            {
-              completed: "Completed",
-              failed: "Failed",
-              cancelled: "Stopped",
-              interrupted: "Unconfirmed",
-            }[result.status]
-          }\n${result.text}`,
+          result.status === "completed"
+            ? result.text
+            : `Task #${id} ${
+                {
+                  failed: "Failed",
+                  cancelled: "Stopped",
+                  interrupted: "Unconfirmed",
+                }[result.status]
+              }\n${result.text}`,
         );
         for (const [index, input] of task.inputs.entries()) {
           if (input.status !== "pending" && input.status !== "sending") continue;
