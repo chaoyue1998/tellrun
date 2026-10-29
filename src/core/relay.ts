@@ -132,9 +132,13 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
             cwd: task.cwd,
             prompt: task.prompt,
             sessionId: task.sessionId,
+            runId: task.runId,
             permissionMode: task.permissionMode,
             onSession: (id) => options.store.recordSession(task.id, id),
-            onStarted: () => options.store.markRunning(task.id),
+            onStarted: (runId) => {
+              options.store.markRunning(task.id, runId);
+              if (options.store.activeTask()?.status === "cancelling") options.agent.stop();
+            },
             onText: (text) => options.store.setDraft(task.id, text),
             onInteraction: (request) => options.store.addInteraction(task.id, request),
             onInteractionClosed: (id, reason) => options.store.closeInteraction(id, reason),
@@ -180,9 +184,9 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
         })();
         try {
           const [result] = await Promise.all([running, steering, answering]);
-          options.store.finishTask(task.id, result);
+          if (result) options.store.finishTask(task.id, result);
         } catch (error) {
-          options.agent.stop();
+          options.agent.disconnect();
           await Promise.allSettled([running, steering, answering]);
           options.store.finishTask(task.id, {
             status: "interrupted",
@@ -192,10 +196,10 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
         }
       }
     },
-    /** 停止领取新任务；未派发记录保留，当前任务等待 Agent 确认退出。 */
+    /** 服务退出只断开客户端；后台任务继续运行，重启后按已保存轮次接回。 */
     stop() {
       stopping = true;
-      options.agent.stop();
+      options.agent.disconnect();
     },
   };
 }

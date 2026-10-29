@@ -182,15 +182,15 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 ## Codex 协议与生命周期
 
-每次任务先检查 `CODEX_HOME`（默认 `~/.codex`）下的 `app-server-control/app-server-control.sock`，通过 ws 建立 Unix socket 上的 WebSocket 连接，握手最多等待 5 秒。没有套接字、连接失败或运行在 Windows 时，使用内置 child_process.spawn 启动 codex app-server，参数以数组传入且 shell 为 false。两种传输共用双向 RPC 处理：WebSocket 一帧一条消息，stdin/stdout 使用 JSONL，均省略 `jsonrpc` 字段。独立进程 stderr 不转存，stdout 不能混入应用日志。[传输协议](https://learn.chatgpt.com/docs/app-server#protocol)
+每次任务连接 `CODEX_HOME`（默认 `~/.codex`）下的 `app-server-control/app-server-control.sock`，通过 ws 建立 Unix socket 上的 WebSocket 连接，握手最多等待 5 秒。连接失败时调用 Codex 0.165.0 的 `app-server daemon bootstrap`，由系统管理独立后台，再尝试连接一次。bootstrap 最多等待 30 秒，可随 Tellrun 退出取消；失败时明确提示，不回退到随 Tellrun 服务一起退出的子进程。WebSocket 一帧一条 RPC 消息，省略 `jsonrpc` 字段。[传输协议](https://learn.chatgpt.com/docs/app-server#protocol)
 
 每个连接先发送 `initialize` 并等待响应，再发送 `initialized` 通知，之后才能创建或恢复 thread；空闲时的普通消息启动 turn，执行中的补充消息使用 turn/steer，并传入当前 threadId 与 expectedTurnId、校验返回的 turnId；中断通过 turn/interrupt 请求。只根据 turn/completed 的实际状态判定完成、失败或中断。请求超时、进程退出和没有收到事件，都不等价于成功。[协议与生命周期](https://learn.chatgpt.com/docs/app-server)
 
-请求管理使用 `json-rpc-2.0` 的 `JSONRPCClient`，收发边界适配 Codex 省略 `jsonrpc` 字段的消息格式。单次请求超时仍为 30 秒，超时会中断当前任务并释放等待中的请求。Zod 校验、事件归属与任务状态由应用处理；服务端拒绝和本地连接故障分别映射提示，补充输入在断线后保持“提交状态不确定”，不自动重试。
+请求管理使用 `json-rpc-2.0` 的 `JSONRPCClient`，收发边界适配 Codex 省略 `jsonrpc` 字段的消息格式。单次请求超时为 30 秒，超时结束本次跟踪并释放等待中的请求，不自动取消后台任务。Zod 校验、事件归属与任务状态由应用处理；服务端拒绝和本地连接故障分别映射提示，补充输入在断线后保持“提交状态不确定”，不自动重试。
 
 Codex 后台会在最后一个订阅者断开且会话无活动 30 分钟后才卸载，因此客户端关闭后仍可能持有空闲会话的写锁。Tellrun 复用该后台连接；恢复前通过 `thread/read` 检查状态，恢复后再次确认空闲，再提交任务。对其他进程仍持有写锁的情况保留原 thread ID 并提示连接问题，不自动创建新会话或重跑任务，不转发原始错误内容。[会话卸载规则](https://learn.chatgpt.com/docs/app-server#unsubscribe-from-a-loaded-thread)
 
-RPC 和待响应请求按每次连接隔离，按持久化 thread ID 恢复上下文。早于 turn/start 响应的事件先暂存，取得本次 turn ID 后再按 threadId 与 turnId 处理；其他会话或轮次的交互请求不代为拒绝。共享后台中的停止请求只针对本次 turn，连接中断且无法确认执行结果时仍记为 interrupted。返回结果前关闭自己的连接；仅独立进程模式等待子进程退出并清理进程组，不停止共享后台。协议字段由 Codex 0.165.0 的 generate-ts 输出核对，并用 Zod 校验。
+RPC 和待响应请求按每次连接隔离，thread ID 与已确认的 turn ID 随任务状态保存。新任务在 turn/start 响应前暂存事件；重启恢复通过 thread/resume 订阅原会话，不覆盖权限，也不发送 turn/start。随后按 thread/turns/list 分页读取完整轮次，匹配保存的 turn ID，补回离线输出并继续实时跟踪；已结束的轮次直接保存原结果。缓冲增量不重复拼接，仍处理服务端重发的交互与终态。其他会话或轮次的事件不能改变归属。服务退出只关闭自己的连接，run 返回 undefined，核心层保留任务；显式停止任务才发送 turn/interrupt。协议字段由 Codex 0.165.0 的 generate-ts 输出核对，并用 Zod 校验。
 
 | 协议工作       | 首版要求                                                                                                           |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -251,13 +251,13 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 停止操作把当前聊天的 paused 设为 true，先保存停止状态并作废其待处理按钮，再请求中断活动 turn。收到实际终态后再更新界面。无法确认退出时，清理本连接或受管理进程组并记录 interrupted；检查项目与本机进程后由用户恢复接收。
 
-正常关停先停止入站轮询、保存已接收数据，再请求活动任务中断并等待退出。异常重启后，queued 记录保留；dispatching、running 和 cancelling 统一进入 interrupted，旧交互失效。对应聊天保持暂停，用户检查已有结果后明确恢复。
+正常关停先停止入站轮询，断开 Agent 连接后释放状态锁，Codex 后台与任务继续运行。重启后 queued 记录保留；已有 thread ID 与 turn ID 的任务重新连接并恢复跟踪，cancelling 继续提交原轮次的明确停止请求。尚未确认轮次 ID 的 dispatching、running 和 cancelling 仍进入 interrupted，暂停对应聊天，不猜测或重跑。旧交互失效，服务端重新发出的请求生成新按钮；在途补充输入标记提交不确定，不自动重发，尚未发送的输入待恢复连接后继续发送。
 
-恢复上下文可以使用保存的 Agent 会话 ID；原来的活动 RPC 等待不能跨进程恢复。继续或重试创建新的 task，保留与原任务的关联。
+恢复上下文与活动任务使用保存的 Agent 会话和轮次 ID；原来的 RPC 等待对象不能跨进程恢复，客户端重新订阅与读取快照。无法确认原轮次时提示本机检查，不创建替代轮次。
 
 一致性目标是：同一入站事件只创建一个任务，明确的终态只生效一次，结果不确定的执行不自动重放。Telegram、状态文件和 Codex 的变更无法一次原子提交，因此不宣称端到端 exactly-once。
 
-尤其在“Codex 已收到 turn/start，但 Tellrun 尚未收到响应”这一窗口崩溃时，必须保留不确定状态，不能因为没拿到响应就自动重发。持久化的 dispatching 状态用于识别这种情况，turnId 无需跨进程保存。
+尤其在“Codex 已收到 turn/start，但 Tellrun 尚未收到响应”这一窗口崩溃时，必须保留不确定状态，不能因为没拿到响应就自动重发。持久化的 dispatching 状态与空 runId 用于识别这种情况；只有已保存的轮次 ID 才能自动恢复跟踪。
 
 补充输入保存在任务的 inputs 中，旧状态文件缺少该字段时默认为空数组。与入站事件一起保存 pending，发送前先保存 sending，收到接收确认后保存 accepted，失败保存 failed 并提示。重启或任务结束时，对仍为 pending 或 sending 的输入分别提示尚未提交或结果待确认，不自动重放；成功补充不生成固定回执。补充请求被拒绝不改变原任务结果，通信故障仍按连接中断处理。
 
@@ -312,7 +312,7 @@ M1 启动 Worker 前必须取得同一状态文件对应的排他运行锁，取
 
 当前通过原子创建 `state.json.lock/` 目录争取单实例写入权，目录内记录 PID 与随机所有权标识。正常退出仅清理自己的锁；异常退出后确认旧 PID 不存在才回收。尚未写入所有权的空锁目录保留 30 秒，避免抢占正在初始化的实例。状态加载和恢复在取得锁后进行。发送与任务领取按机器人账号和授权用户过滤。
 
-Codex 子进程只接收必要环境与运行时凭据，不默认继承 Telegram Token。启动时在其 `PATH` 前补入当前 Node 可执行文件所在目录，使 npm 版 Codex 的启动脚本在 systemd 环境下也能找到 `node`；版本检查与 app-server 使用同一份环境，不保存交互终端的完整 `PATH`。Tellrun 直接向 Agent 传递任务工作目录，不通过项目清单限制目录；实际文件访问仍沿用 Codex 与 OS 的权限配置。
+Codex 版本检查和 daemon bootstrap 只接收必要环境与运行时凭据，不默认继承 Telegram Token；保留 XDG_RUNTIME_DIR 与 DBUS_SESSION_BUS_ADDRESS，使启动命令能连接当前用户的服务管理器。启动时在 `PATH` 前补入当前 Node 可执行文件所在目录，使 npm 版 Codex 的启动脚本在 systemd 环境下也能找到 `node`。Tellrun 直接向 Agent 传递任务工作目录，不通过项目清单限制目录；实际文件访问仍沿用 Codex 与 OS 的权限配置。Tellrun 的 KillMode=control-group 保留，独立 Codex daemon 由自己的系统服务管理，停止消息服务不会停止编码任务。
 
 当前启动检查包括 Telegram 配置、单实例锁、状态文件校验、Codex CLI 版本格式、Telegram 连接和 Webhook 状态；认证与模型访问在实际任务调用时验证，失败会保存并回复。已在本机通过真实 Codex 调用，目标 Linux 的 M0 仍待验证。遇到 Webhook 或另一轮询实例时给出明确错误，不自动接管其他部署；日志不记录原始凭据或网络 URL。
 
@@ -350,3 +350,5 @@ Claude 等 Agent 的新增工作集中在会话创建或恢复、任务输入、
 状态回收另通过 16 项临时模拟验证：包括重新打开当前状态不改写文件、连续 300 个任务后状态大小保持稳定、确认前后与重启后的去重、轮询和写入失败、部分答案保留、迟到发送回执及按钮清理。Telegram 与核心流程联合验证确认旧问题回复不会新建或补充任务，`/last` 可在下一任务运行时查看前一结果，任务与交互过程不重复写日志。检查与构建通过，未向真实 Telegram 发送验证消息。
 
 macOS 后台管理通过 18 项临时验证：17 项模拟覆盖平台分发、无桌面登录、无效路径、系统命令失败、启动超时、并发控制、启动等待期间停止、就绪标记归属与清理、日志跟随，以及 Linux systemd 和 linger 回归；另在本机真实 launchd 登录域运行隔离服务，验证特殊字符路径、重复启动、登录入口加载、停止、重启、崩溃恢复和卸载。隔离服务已卸载；检查与构建通过，真实 Telegram 后台联调及 Linux 实机服务验收仍需单独完成。
+
+服务与任务生命周期分离通过 15 项临时回归：服务退出不发取消、恢复离线结果且不重跑、恢复后的补充输入与明确停止、历史分页与轮次隔离、未知轮次、忙碌会话、审批映射、初始化期间退出、权限校验、在途输入不重放、旧状态兼容、环境隔离、daemon 启动失败、重连后完成已保存的取消，以及连接前停止不能误报原任务已取消。另使用本机 Codex 0.165.0 与本机模拟模型服务，验证适配器断开后任务仍执行、新适配器接回同一轮次、实时完成与离线结果恢复。未调用真实模型、发送 Telegram 消息或操作现有 Codex daemon；目标 Linux 的 systemd 停止与升级仍需实机验收。

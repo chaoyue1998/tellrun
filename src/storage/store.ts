@@ -393,6 +393,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             channelId: channel.id,
             cwd: channel.cwd,
             sessionId: channel.sessionId,
+            runId: null,
             prompt,
             permissionMode: channel.permissionMode,
             inputs: [],
@@ -436,22 +437,26 @@ export function openStore(path = join(appDirectory, "state.json")) {
             enqueueReply(task.channelId, `Task #${id}, message ${index + 1}: ${error}`);
         });
       },
-      /** 先保存派发状态再调用 Agent；空闲时仅查询，不反复写文件。 */
+      /** 领取新任务或已保存轮次；恢复只连接后台，不能重发原始输入。 */
       claimTask(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-        const index = state.tasks.findIndex((task) => task.status === "queued");
+        const index = state.tasks.findIndex((task) => activeTaskStatuses.has(task.status));
         const task = state.tasks[index];
         const channel = state.channels.find((channel) => channel.id === task?.channelId);
         if (
           !task ||
           !channel ||
-          channel.paused ||
+          (channel.paused && !task.runId) ||
           channel.platform !== source.platform ||
           channel.accountId !== source.accountId ||
           channel.userId !== source.userId
         )
           return;
         return update(() => {
-          const claimed = { ...task, status: "dispatching" as const };
+          const claimed = {
+            ...task,
+            status:
+              task.status === "cancelling" ? ("cancelling" as const) : ("dispatching" as const),
+          };
           state.tasks[index] = claimed;
           return claimed;
         });
@@ -468,11 +473,14 @@ export function openStore(path = join(appDirectory, "state.json")) {
           if (channel) channel.sessionId = sessionId;
         });
       },
-      /** 确认开始执行；迟到通知不能撤销停止请求。 */
-      markRunning(id: number) {
+      /** 轮次 ID 与执行状态一起落盘；迟到通知不能撤销停止请求。 */
+      markRunning(id: number, runId: string) {
         update(() => {
           const task = state.tasks.find((task) => task.id === id);
-          if (task?.status === "dispatching") task.status = "running";
+          if (!task || !activeTaskStatuses.has(task.status)) return;
+          if (task.runId && task.runId !== runId) throw new Error("Task turn changed.");
+          task.runId = runId;
+          if (task.status === "dispatching") task.status = "running";
         });
       },
       cancelTask,
@@ -625,7 +633,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         });
       },
       closeInteraction,
-      /** 结果不确定的任务暂停并通知用户，不自动重新派发。 */
+      /** 有轮次 ID 的任务重新连接；未确认派发和在途输入不自动重放。 */
       recoverTasks() {
         if (state.channels.some((channel) => channel.permissionMenu))
           update(() => {
@@ -634,6 +642,20 @@ export function openStore(path = join(appDirectory, "state.json")) {
         for (const task of state.tasks.filter(
           (task) => activeTaskStatuses.has(task.status) && task.status !== "queued",
         )) {
+          if (task.sessionId && task.runId) {
+            for (const [index, input] of task.inputs.entries()) {
+              if (input.status !== "sending") continue;
+              update(() => {
+                const current = state.tasks.find((item) => item.id === task.id)?.inputs[index];
+                if (current) current.status = "failed";
+                enqueueReply(
+                  task.channelId,
+                  `Task #${task.id}, message ${index + 1}: delivery unconfirmed after restart. Not retried; check the session before resending.`,
+                );
+              });
+            }
+            continue;
+          }
           finishTask(task.id, {
             status: "interrupted",
             text: "Service restarted; task result unknown. Check the project, then /resume and send a new task.",

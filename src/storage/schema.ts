@@ -51,6 +51,8 @@ export const stateSchema = z
         channelId: id,
         cwd: z.string(),
         sessionId: z.string().nullable(),
+        /** 旧任务没有轮次 ID，仍按结果不确定处理，不能猜测或重跑。 */
+        runId: z.string().min(1).nullable().default(null),
         prompt: z.string(),
         permissionMode: z.string().min(1).nullable().default(null),
         /** 旧状态文件没有补充输入；发送中记录用于重启后避免不确定重放。 */

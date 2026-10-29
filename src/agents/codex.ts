@@ -1,5 +1,5 @@
-import { execFile, spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -50,12 +50,12 @@ const permissionModes = [
   },
 ] as const;
 
-/** 优先连接本机后台服务，否则启动独立进程；续聊使用已持久化的 thread ID。 */
+/** 连接独立的 Codex 后台服务；Tellrun 退出不结束后台轮次。 */
 export async function createCodexAgent(command = "codex"): Promise<Agent> {
   /** 保留运行时、认证和代理环境，不向子进程传入 Telegram 凭据。 */
   const env = Object.fromEntries(
     Object.entries(process.env).filter(([key]) =>
-      /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_.*|TERM|TMPDIR|TEMP|TMP|SYSTEMROOT|WINDIR|CODEX_HOME|OPENAI_API_KEY|OPENAI_BASE_URL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR)$/.test(
+      /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_.*|TERM|TMPDIR|TEMP|TMP|SYSTEMROOT|WINDIR|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|CODEX_HOME|OPENAI_API_KEY|OPENAI_BASE_URL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR)$/.test(
         key,
       ),
     ),
@@ -81,34 +81,57 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       if (active) throw new Error("Codex is already running a task.");
       const controller = new AbortController();
       active = controller;
-      /** 后台服务会保留空闲会话的写锁，复用其连接才能立即恢复同一会话。 */
+      /** 复用后台的 Unix socket，避免把编码进程放进 Tellrun 的服务控制组。 */
       const socketPath = join(
         env.CODEX_HOME ?? join(homedir(), ".codex"),
         "app-server-control",
         "app-server-control.sock",
       );
-      const socket =
-        process.platform !== "win32" && existsSync(socketPath)
-          ? await new Promise<WebSocket | undefined>((resolve) => {
-              const connection = new WebSocket("ws://localhost", {
-                createConnection: () => connect(socketPath),
-                handshakeTimeout: 5_000,
-                maxPayload: 8_000_000,
-              });
-              connection.once("open", () => resolve(connection));
-              connection.once("error", () => resolve(undefined));
-            })
-          : undefined;
-      const child = socket
-        ? undefined
-        : spawn(command, ["app-server"], {
-            cwd: input.cwd,
-            env,
-            detached: process.platform !== "win32",
-            stdio: ["pipe", "pipe", "ignore"],
+      let socket: WebSocket | undefined;
+      try {
+        for (let attempt = 0; attempt < 2 && !controller.signal.aborted; attempt++) {
+          socket = await new Promise<WebSocket | undefined>((resolve) => {
+            const connection = new WebSocket("ws://localhost", {
+              createConnection: () => connect(socketPath),
+              handshakeTimeout: 5_000,
+              maxPayload: 8_000_000,
+            });
+            connection.once("open", () => resolve(connection));
+            connection.once("error", () => {
+              connection.terminate();
+              resolve(undefined);
+            });
           });
-      const closed = Promise.withResolvers<void>();
-      const completed = Promise.withResolvers<AgentResult>();
+          if (socket) break;
+          if (attempt === 0) {
+            /** bootstrap 交给系统管理独立 daemon；普通 detached 子进程仍会被 systemd 清理。 */
+            await promisify(execFile)(command, ["app-server", "daemon", "bootstrap"], {
+              cwd: input.cwd,
+              env,
+              timeout: 30_000,
+              maxBuffer: 1_048_576,
+              signal: controller.signal,
+            });
+          }
+        }
+        if (!socket) throw new Error("Codex daemon unavailable.");
+      } catch {
+        active = undefined;
+        if (controller.signal.aborted)
+          return controller.signal.reason === "disconnect"
+            ? undefined
+            : input.runId
+              ? {
+                  status: "interrupted",
+                  text: "Codex stop unconfirmed. Could not reconnect to the task.",
+                }
+              : { status: "cancelled", text: "Stopped before connecting." };
+        return {
+          status: input.runId ? "interrupted" : "failed",
+          text: "Codex daemon unavailable. Run codex app-server daemon bootstrap on the host, then retry. Existing work was not stopped or resubmitted.",
+        };
+      }
+      const completed = Promise.withResolvers<AgentResult | undefined>();
       /** 库管理请求关联和超时；Codex 线上消息省略 jsonrpc 字段。 */
       const client = new JSONRPCClient(({ id, method, params }: JSONRPCRequest) =>
         write({ id, method, params }),
@@ -128,16 +151,16 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       const seenRequests = new Set<string | number>();
       const fileChanges = new Map<string, z.infer<typeof fileChangesSchema>>();
       let buffer = "";
-      /** turn/start 响应前的事件暂存，收到当前 turn ID 后再处理，避免混入其他客户端事件。 */
+      /** 新任务等启动响应，恢复任务等完整快照，再处理当前轮次的早到事件。 */
       let earlyMessages = "";
-      let sessionId: string | undefined;
+      let sessionId = input.sessionId ?? undefined;
       let runId: string | undefined;
-      let dispatched = false;
+      let dispatched = Boolean(input.runId);
       let settled = false;
       let stopTimer: ReturnType<typeof setTimeout> | undefined;
 
       /** 只接受第一个终态，避免退出事件覆盖已经确认的执行结果。 */
-      function finish(result: AgentResult) {
+      function finish(result?: AgentResult) {
         if (settled) return;
         settled = true;
         for (const interaction of interactions.values()) clearTimeout(interaction.timer);
@@ -154,54 +177,26 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         input.onText(text);
       }
 
-      /** 共享后台仅断开自己的连接；独立进程按进程组清理。 */
-      function terminate(signal: NodeJS.Signals) {
-        if (socket) {
-          socket.terminate();
-          return;
-        }
-        if (!child?.pid) return;
-        try {
-          if (process.platform === "win32") child.kill(signal);
-          else process.kill(-child.pid, signal);
-        } catch (error) {
-          if (!(error instanceof Error && "code" in error && error.code === "ESRCH")) {
-            finish({
-              status: "interrupted",
-              text: "Codex stop unconfirmed. Check local processes.",
-            });
-          }
-        }
-      }
-
       /** 通信故障不等于执行失败；保留不确定状态并结束当前连接。 */
       function fail(text: string) {
         if (settled) return;
         finish({ status: "interrupted", text });
-        /** 共享服务不会随连接退出；仅中断已经确认归属本次任务的 turn。 */
-        if (socket?.readyState === WebSocket.OPEN && sessionId && runId)
-          void request("turn/interrupt", { threadId: sessionId, turnId: runId }).catch(() => {});
         client.rejectAllPendingRequests(text);
         controller.abort();
       }
 
-      /** 请求、通知和交互应答共用发送入口，适配 JSONL 与 WebSocket 帧。 */
+      /** 请求、通知和交互应答共用发送入口，一帧对应一条 RPC 消息。 */
       function write(message: unknown) {
         try {
-          if (socket)
-            socket.send(JSON.stringify(message), (error) => {
-              if (error) fail("Codex connection write failed. Task status unknown.");
-            });
-          else
-            child?.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-              if (error) fail("Codex connection write failed. Task status unknown.");
-            });
+          socket?.send(JSON.stringify(message), (error) => {
+            if (error) fail("Codex connection write failed. Task status unknown.");
+          });
         } catch {
           fail("Codex connection write failed. Task status unknown.");
         }
       }
 
-      /** 超时仍终止任务；区分服务端拒绝与连接故障，保留补充输入的不确定状态。 */
+      /** 超时结束本次跟踪；区分服务端拒绝与连接故障，保留输入的不确定状态。 */
       async function request(method: string, params: unknown): Promise<unknown> {
         if (controller.signal.aborted && method !== "turn/interrupt")
           throw new Error("Task stopped.");
@@ -232,12 +227,12 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       }
 
-      /** 以 turn/start 响应确认本次任务的 run ID，其他客户端的事件不能改变归属。 */
+      /** 启动响应或已保存轮次确定任务归属；其他客户端的事件不能改变关联。 */
       function recordRun(id: string) {
         if (runId && runId !== id) return false;
         if (!runId) {
           runId = id;
-          input.onStarted();
+          input.onStarted(id);
         }
         return true;
       }
@@ -248,29 +243,34 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           for (const interaction of interactions.values()) clearTimeout(interaction.timer);
           interactions.clear();
           if (settled) return;
+          if (controller.signal.reason === "disconnect") {
+            finish();
+            client.rejectAllPendingRequests("Tellrun disconnected. Task continues in Codex.");
+            socket?.terminate();
+            return;
+          }
           stopTimer = setTimeout(
             () => fail("Stop unconfirmed; Codex disconnected. Check the project before /resume."),
             5_000,
           );
           if (sessionId && runId) {
             void request("turn/interrupt", { threadId: sessionId, turnId: runId }).catch(() =>
-              terminate("SIGTERM"),
+              socket?.terminate(),
             );
-          } else terminate("SIGTERM");
+          } else socket?.terminate();
         },
         { once: true },
       );
-      /** 两种传输共用关闭处理；连接中断不能当作共享后台中的任务已经停止。 */
-      function onClose(code: number | null) {
-        closed.resolve();
+      /** 连接关闭不能当作后台任务已停止，更不能向后台补发取消。 */
+      function onClose() {
         if (controller.signal.aborted && !dispatched)
           finish({ status: "cancelled", text: "Stopped before starting." });
         if (!settled)
-          fail(`Codex disconnected (${code ?? "signal"}). Check sign-in and local setup.`);
+          fail("Codex disconnected. Task may still be running; check the local session.");
         else client.rejectAllPendingRequests("Codex connection closed.");
       }
 
-      /** 两种传输与提前到达的通知共用协议处理，始终只消费当前任务的事件。 */
+      /** 实时事件与恢复快照共用协议处理，始终只消费当前任务的事件。 */
       function onData(chunk: string) {
         if (settled) return;
         buffer += chunk;
@@ -462,15 +462,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       }
 
-      child?.on("error", () =>
-        fail("Cannot start Codex app-server. Check CLI and working directory."),
-      );
-      child?.stdin.on("error", () => fail("Codex input closed. Task status unknown."));
-      child?.on("close", onClose);
-      child?.stdout.setEncoding("utf8");
-      child?.stdout.on("data", onData);
       socket?.on("error", () => fail("Codex connection failed. Task status unknown."));
-      socket?.on("close", () => onClose(null));
+      socket?.on("close", onClose);
       socket?.on("message", (data) => onData(`${data.toString()}\n`));
 
       steer = async (prompt) => {
@@ -544,7 +537,14 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
       try {
         if (controller.signal.aborted)
-          return { status: "cancelled", text: "Stopped before starting." };
+          return controller.signal.reason === "disconnect"
+            ? undefined
+            : input.runId
+              ? {
+                  status: "interrupted",
+                  text: "Codex stop unconfirmed. Could not reconnect to the task.",
+                }
+              : { status: "cancelled", text: "Stopped before starting." };
         const permissionMode = permissionModes.find(
           (mode) => mode.id === (input.permissionMode ?? "default"),
         );
@@ -564,7 +564,61 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           capabilities: { experimentalApi: true, requestAttestation: false },
         });
         write({ method: "initialized" });
-        if (socket && input.sessionId) {
+        if (input.runId) {
+          if (!sessionId) throw new Error("Codex task session missing. Task not resubmitted.");
+          /** 恢复订阅时不覆盖权限或提交输入；只接回本任务已确认的轮次。 */
+          const resumed = z
+            .object({
+              thread: z.object({ id: z.string(), status: z.object({ type: z.string() }) }),
+            })
+            .parse(await request("thread/resume", { threadId: sessionId, excludeTurns: true }));
+          if (resumed.thread.id !== sessionId)
+            throw new Error("Codex resumed a different session. Check the local session.");
+          let cursor: string | null = null;
+          do {
+            const page = z
+              .object({
+                data: z.array(turnSchema.extend({ items: z.array(z.unknown()) })),
+                nextCursor: z.string().nullable(),
+              })
+              .parse(
+                await request("thread/turns/list", {
+                  threadId: sessionId,
+                  limit: 1,
+                  itemsView: "full",
+                  ...(cursor ? { cursor } : {}),
+                }),
+              );
+            const turn = page.data.find((turn) => turn.id === input.runId);
+            if (turn) {
+              if (turn.status === "inProgress" && resumed.thread.status.type !== "active")
+                throw new Error("Codex task is no longer active. Check the local session.");
+              recordRun(turn.id);
+              /** 完整快照补回离线输出；缓冲增量已包含在快照中，不再次拼接。 */
+              for (const item of turn.items)
+                onData(
+                  `${JSON.stringify({ method: "item/completed", params: { threadId: sessionId, turnId: turn.id, item } })}\n`,
+                );
+              onData(
+                `${earlyMessages
+                  .split("\n")
+                  .filter((line) => line && JSON.parse(line).method !== "item/agentMessage/delta")
+                  .join("\n")}\n`,
+              );
+              earlyMessages = "";
+              if (turn.status !== "inProgress")
+                onData(
+                  `${JSON.stringify({ method: "turn/completed", params: { threadId: sessionId, turn } })}\n`,
+                );
+              return await completed.promise;
+            }
+            cursor = page.nextCursor;
+          } while (cursor && !controller.signal.aborted);
+          throw new Error(
+            "Codex task turn missing. Task not resubmitted; check the local session.",
+          );
+        }
+        if (input.sessionId) {
           /** 先查询共享会话，忙碌时不恢复配置、不追加输入，也不中断其他客户端任务。 */
           const current = z
             .object({ thread: z.object({ status: z.object({ type: z.string() }) }) })
@@ -591,7 +645,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               ...permissionMode.config,
             }),
           );
-        if (socket && response.thread.status?.type !== "idle")
+        if (response.thread.status?.type !== "idle")
           throw new Error("Codex session busy. Message not sent; wait until it is idle.");
         /** 使用服务端实际返回值核实预设，不能在权限被改写时仍启动任务。 */
         if (
@@ -606,7 +660,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         sessionId = response.thread.id;
         input.onSession(sessionId);
         if (controller.signal.aborted)
-          return { status: "cancelled", text: "Stopped before starting." };
+          return controller.signal.reason === "disconnect"
+            ? undefined
+            : { status: "cancelled", text: "Stopped before starting." };
         dispatched = true;
         const started = await Promise.race([
           request("turn/start", {
@@ -640,20 +696,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         interactions.clear();
         clearTimeout(stopTimer);
         client.rejectAllPendingRequests("Codex connection closed.");
-        terminate("SIGTERM");
-        const force = setTimeout(() => terminate("SIGKILL"), 3_000);
-        const deadline = setTimeout(
-          () => closed.reject(new Error("Codex exit unconfirmed. Service must stop.")),
-          8_000,
-        );
-        try {
-          await closed.promise;
-          terminate("SIGKILL");
-        } finally {
-          clearTimeout(force);
-          clearTimeout(deadline);
-          active = undefined;
-        }
+        socket?.terminate();
+        active = undefined;
       }
     },
     /** 外部 ID 必须命中本次连接，不能把旧按钮转交给新一轮任务。 */
@@ -668,7 +712,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         );
       return steer(prompt);
     },
-    /** 中断当前任务；run 会等待终态或子进程退出后才返回。 */
+    /** 服务退出只断开客户端，保留 Codex daemon 和当前任务。 */
+    disconnect() {
+      active?.abort("disconnect");
+    },
+    /** 用户停止等待当前轮次终态；不会退出共享后台服务。 */
     stop() {
       active?.abort();
     },

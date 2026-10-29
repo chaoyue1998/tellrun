@@ -34,7 +34,7 @@ function clearReady() {
   }
 }
 
-/** 两种退出信号共用关停入口；主流程等待消息处理和 Agent 退出后释放状态锁。 */
+/** 退出信号只关闭消息与 Agent 连接；后台任务继续，连接清理后释放状态锁。 */
 function stop() {
   if (stopping) return;
   stopping = true;

@@ -69,19 +69,24 @@ export interface Agent {
     cwd: string;
     prompt: string;
     sessionId: string | null;
+    /** 已派发的轮次只恢复跟踪，不能再次提交原始输入。 */
+    runId?: string | null;
     /** 未选择时由 Agent 使用默认模式，任务提交后不受后续选择影响。 */
     permissionMode?: string | null;
     onSession: (sessionId: string) => void;
-    onStarted: () => void;
+    onStarted: (runId: string) => void;
     /** 当前回复文本快照，随增量更新；调用方不能等待 IM 发送。 */
     onText: (text: string) => void;
     onInteraction: (interaction: AgentInteraction) => void;
     onInteractionClosed: (id: string, reason: string) => void;
-  }): Promise<AgentResult>;
+  }): Promise<AgentResult | undefined>;
   /** 只提交当前连接仍有效的交互；返回值表示已写入连接，不代表操作已经执行。 */
   respond(id: string, answer: InteractionAnswer): boolean;
   /** 向当前轮次补充输入，只等待接收确认，不等待任务结束。 */
   steer(prompt: string): Promise<void>;
+  /** 只断开客户端；run 返回 undefined，后台任务及持久状态继续保留。 */
+  disconnect(): void;
+  /** 用户明确停止时才请求取消当前轮次。 */
   stop(): void;
 }
 
