@@ -64,8 +64,6 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
 
-`/permissions` offers the four presets from Codex CLI 0.165.0: Ask for approval (default), Approve for me (Codex automatic review), Full Access (no Codex sandbox or execution approvals), and Read Only (approval required for edits or network access). Full Access remains subject to operating system permissions.
-
 ## Terminal commands
 
 Run these commands in the terminal on the computer or server running Tellrun.
@@ -125,7 +123,7 @@ Configuration is read when the process starts. Run `tellrun restart` after editi
 
 ### Why is the bot not replying?
 
-Check that you are using a private chat and that your configured user ID is correct. Inspect `tellrun logs`, or the terminal output if running in the foreground. The same bot cannot be used by multiple polling instances at once, and Tellrun cannot start while the bot has an active webhook.
+Check that you are using a private chat and that your configured user ID is correct. Check whether the machine running Tellrun can reach Telegram. If using a proxy, verify its configuration and connectivity. Inspect `tellrun logs` for errors, or the terminal output if running in the foreground.
 
 ### Will tasks run again after a restart?
 

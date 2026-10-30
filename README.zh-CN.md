@@ -64,8 +64,6 @@ tellrun setup
 
 切换目录或新建会话前，需要等待当前任务结束。使用 `/stop` 后，先检查最终状态，再发送 `/resume` 和新的任务内容。
 
-`/permissions` 提供与 Codex CLI 0.165.0 对应的四种模式：Ask for approval（默认，额外权限由你审批）、Approve for me（由 Codex 自动审查）、Full Access（不使用 Codex 沙箱和执行审批）、Read Only（只读，修改或联网时请求审批）。Full Access 仍受系统用户权限约束。
-
 ## 终端命令
 
 在运行 Tellrun 的电脑或服务器上执行以下命令。
@@ -125,7 +123,7 @@ Tellrun 只保留活动任务和每个聊天的最近结果，供 `/last` 查看
 
 ### 机器人没有回复怎么办？
 
-确认是在私聊中使用、配置的用户 ID 正确，并查看 `tellrun logs`；前台运行时查看终端输出。同一个 Bot 不能同时由多个轮询实例使用，也不能在已有 Webhook 的情况下启动 Tellrun。
+确认是在私聊中使用、配置的用户 ID 正确。检查运行 Tellrun 的设备能否正常访问 Telegram；如使用代理，确认代理配置正确且连接可用。查看 `tellrun logs` 排查错误；前台运行时查看终端输出。
 
 ### 服务重启后会重新执行任务吗？
 
