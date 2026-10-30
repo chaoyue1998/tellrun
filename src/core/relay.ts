@@ -335,7 +335,7 @@ export function createRelayService(options: {
           while (!finished && !stopping) {
             const interaction = options.store.claimInteraction(task.id);
             if (interaction) {
-              const submitted = options.agent.respond(interaction.id, interaction.answer);
+              const submitted = await options.agent.respond(interaction.id, interaction.answer);
               options.store.closeInteraction(
                 interaction.id,
                 submitted

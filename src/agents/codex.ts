@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -247,7 +248,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       const interactions = new Map<
         string,
         {
-          requestId: string | number;
+          /** 空值表示异步消息问题，通过用户输入提交，不发送 RPC 响应。 */
+          requestId: string | number | null;
           request: AgentInteraction;
           timer: ReturnType<typeof setTimeout> | undefined;
           approvals: Map<string, CodexApprovalResponse>;
@@ -255,6 +257,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       >();
       const seenRequests = new Set<string | number>();
+      /** 保留已展示或已回答的问题标识，重复事件与恢复快照不能重新打开旧问题。 */
+      const seenQuestions = new Set<string>();
       const fileChanges = new Map<string, z.infer<typeof fileChangesSchema>>();
       /** 新任务等启动响应，恢复任务等完整快照，再处理当前轮次的早到事件。 */
       const earlyMessages: CodexMessage[] = [];
@@ -379,6 +383,75 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         else rpc.close();
       }
 
+      /** RPC 提问与异步消息共用展示和期限管理；异步题逐题提交，不等待其他题。 */
+      function openInteraction(message: CodexMessage) {
+        const parsed = parseCodexInteraction(
+          message.method ?? "",
+          message.params,
+          input.cwd,
+          fileChanges,
+        );
+        if ("error" in parsed) {
+          if (parsed.unsupported && message.id !== undefined)
+            rpc.write({
+              id: message.id,
+              error: { code: -32601, message: "Unsupported interactive request" },
+            });
+          fail(parsed.error);
+          return;
+        }
+        for (const interaction of message.id === undefined
+          ? parsed.request.questions.map((question) => ({
+              ...parsed.request,
+              id: randomUUID(),
+              questions: [question],
+            }))
+          : [parsed.request]) {
+          if (message.id === undefined) {
+            if (
+              interaction.questions.some(
+                (question) =>
+                  seenQuestions.has(question.id) || seenQuestions.has(JSON.parse(question.id)[1]),
+              )
+            )
+              continue;
+            for (const question of interaction.questions) seenQuestions.add(question.id);
+          }
+          interactions.set(interaction.id, {
+            ...parsed,
+            request: interaction,
+            requestId: message.id ?? null,
+            timer:
+              interaction.expiresAt === null
+                ? undefined
+                : setTimeout(
+                    () => {
+                      const pending = interactions.get(interaction.id);
+                      if (!pending) return;
+                      if (interaction.blocking) {
+                        fail("Request timed out. Check /last, then /resume.");
+                      } else {
+                        interactions.delete(interaction.id);
+                        /** 异步问题没有待响应 RPC；过期只关闭按钮，不提交默认答案。 */
+                        try {
+                          input.onInteractionClosed(
+                            interaction.id,
+                            "Question expired. Task continues.",
+                          );
+                          if (pending.requestId !== null)
+                            rpc.write({ id: pending.requestId, result: { answers: {} } });
+                        } catch {
+                          fail("Cannot save expired question state. Task interrupted.");
+                        }
+                      }
+                    },
+                    Math.max(0, interaction.expiresAt - Date.now()),
+                  ),
+          });
+          input.onInteraction(interaction);
+        }
+      }
+
       /** 实时事件与恢复快照共用协议处理，始终只消费当前任务的事件。 */
       function onMessage(message: CodexMessage) {
         if (settled) return;
@@ -405,52 +478,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               return;
             if (controller.signal.aborted || seenRequests.has(message.id)) return;
             seenRequests.add(message.id);
-            const parsed = parseCodexInteraction(
-              message.method,
-              message.params,
-              input.cwd,
-              fileChanges,
-            );
-            if ("error" in parsed) {
-              if (parsed.unsupported)
-                rpc.write({
-                  id: message.id,
-                  error: { code: -32601, message: "Unsupported interactive request" },
-                });
-              fail(parsed.error);
-              return;
-            }
-            const { request: interaction } = parsed;
-            interactions.set(interaction.id, {
-              requestId: message.id,
-              ...parsed,
-              timer:
-                interaction.expiresAt === null
-                  ? undefined
-                  : setTimeout(
-                      () => {
-                        const pending = interactions.get(interaction.id);
-                        if (!pending) return;
-                        if (interaction.blocking) {
-                          fail("Request timed out. Check /last, then /resume.");
-                        } else {
-                          interactions.delete(interaction.id);
-                          /** 非阻塞问题过期只返回空答案，不替用户选择，也不中断正在执行的任务。 */
-                          try {
-                            input.onInteractionClosed(
-                              interaction.id,
-                              "Question expired. Task continues.",
-                            );
-                            rpc.write({ id: pending.requestId, result: { answers: {} } });
-                          } catch {
-                            fail("Cannot save expired question state. Task interrupted.");
-                          }
-                        }
-                      },
-                      Math.max(0, interaction.expiresAt - Date.now()),
-                    ),
-            });
-            input.onInteraction(interaction);
+            openInteraction(message);
           } else if (message.method === "serverRequest/resolved") {
             const event = z
               .object({ threadId: z.string(), requestId: z.union([z.string(), z.number()]) })
@@ -500,6 +528,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   text: z.string().optional(),
                   status: z.string().optional(),
                   changes: fileChangesSchema.optional(),
+                  delivery: z.string().nullish(),
+                  questions: z.array(z.unknown()).nullish(),
+                  content: z.unknown().optional(),
                 }),
               })
               .parse(message.params);
@@ -515,6 +546,57 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             if (event.item.type === "agentMessage" && event.item.text !== undefined) {
               messages.set(event.item.id, event.item.text);
               input.onText(formatOutput());
+            }
+            if (
+              message.method === "item/completed" &&
+              event.item.type === "agentMessage" &&
+              event.item.delivery === "async" &&
+              event.item.questions?.length &&
+              !controller.signal.aborted
+            )
+              openInteraction(message);
+            /** 官方客户端把异步答案作为用户消息广播；其他端已答的题立即关闭。 */
+            if (event.item.type === "userMessage") {
+              for (const content of z
+                .array(z.object({ type: z.string(), text: z.string().optional() }))
+                .parse(event.item.content ?? [])) {
+                if (content.type !== "text") continue;
+                const reply = content.text
+                  ?.trim()
+                  .match(
+                    /^<send_user_message_question_reply>\s*([\s\S]*?)\s*<\/send_user_message_question_reply>$/,
+                  );
+                if (!reply?.[1]) continue;
+                let answers: { questionItemId: string }[];
+                try {
+                  answers = z
+                    .preprocess(
+                      (value) => (Array.isArray(value) ? value : [value]),
+                      z.array(z.object({ questionItemId: z.string(), answer: z.string().min(1) })),
+                    )
+                    .parse(JSON.parse(reply[1]));
+                } catch {
+                  /** 普通用户文字也可能包含该标记；无效封套不影响任务。 */
+                  continue;
+                }
+                for (const answer of answers) {
+                  seenQuestions.add(answer.questionItemId);
+                  for (const [id, interaction] of interactions) {
+                    if (
+                      interaction.requestId !== null ||
+                      !interaction.request.questions.some(
+                        (question) =>
+                          question.id === answer.questionItemId ||
+                          JSON.parse(question.id)[1] === answer.questionItemId,
+                      )
+                    )
+                      continue;
+                    clearTimeout(interaction.timer);
+                    interactions.delete(id);
+                    input.onInteractionClosed(id, "Answered in another client.");
+                  }
+                }
+              }
             }
           } else if (message.method === "turn/started" || message.method === "turn/completed") {
             const event = z
@@ -565,7 +647,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       };
 
-      respond = (id, answer) => {
+      respond = async (id, answer) => {
         const interaction = interactions.get(id);
         if (
           !interaction ||
@@ -604,6 +686,24 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         /** 在写入前移除映射，失败也不重发批准；任务终态负责说明不确定结果。 */
         interactions.delete(id);
         clearTimeout(interaction.timer);
+        if (interaction.requestId === null) {
+          if (!("answers" in answer) || !steer) return false;
+          /** 异步答案沿用官方封套，经当前轮次输入通道提交并等待接收确认。 */
+          try {
+            await steer(
+              `<send_user_message_question_reply>\n${JSON.stringify(
+                interaction.request.questions.map((question) => ({
+                  questionItemId: question.id,
+                  question: question.question,
+                  answer: answer.answers[question.id]?.answers[0],
+                })),
+              )}\n</send_user_message_question_reply>`,
+            );
+            return true;
+          } catch {
+            return false;
+          }
+        }
         if (approval?.result.decision === "cancel") cancelledByApproval = true;
         rpc.write({
           id: interaction.requestId,
@@ -768,7 +868,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       }
     },
     /** 外部 ID 必须命中本次连接，不能把旧按钮转交给新一轮任务。 */
-    respond(id, answer) {
+    async respond(id, answer) {
       return respond?.(id, answer) ?? false;
     },
     /** 复用当前连接提交补充消息，由 expectedTurnId 防止误入其他轮次。 */

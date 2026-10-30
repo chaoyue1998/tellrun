@@ -158,7 +158,33 @@ export function parseCodexInteraction(
     offer("accept", "Allow this turn", { permissions, scope: "turn" }, true);
     offer("acceptForSession", "Allow for session", { permissions, scope: "session" }, true);
     offer("decline", "Decline", { permissions: {}, scope: "turn" }, false);
-  } else if (method === "item/tool/requestUserInput") {
+  } else if (method === "item/tool/requestUserInput" || method === "item/completed") {
+    /** 异步问题来自消息通知；稳定问题标识与官方客户端的答案格式保持一致。 */
+    if (method === "item/completed")
+      value = z
+        .object({
+          turnId: z.string(),
+          item: z.object({
+            type: z.literal("agentMessage"),
+            id: z.string(),
+            delivery: z.literal("async"),
+            questions: z.array(
+              z.object({ title: z.string(), options: z.array(z.string()).nullish() }),
+            ),
+          }),
+        })
+        .transform(({ turnId, item }) => ({
+          turnId,
+          isBlocking: false,
+          questions: item.questions.map((question, index) => ({
+            id: JSON.stringify(["request_user_input_async", item.id, index]),
+            header: "",
+            question: question.title,
+            isOther: true,
+            options: question.options?.map((label) => ({ label, description: "" })) ?? null,
+          })),
+        }))
+        .parse(value);
     const params = z
       .object({
         turnId: z.string(),

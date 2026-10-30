@@ -130,8 +130,8 @@ export interface Agent {
     onInteraction: (interaction: AgentInteraction) => void;
     onInteractionClosed: (id: string, reason: string) => void;
   }): Promise<AgentResult | undefined>;
-  /** 只提交当前连接仍有效的交互；返回值表示已写入连接，不代表操作已经执行。 */
-  respond(id: string, answer: InteractionAnswer): boolean;
+  /** 只提交当前连接仍有效的交互；异步问题等待输入确认，不代表操作已经执行。 */
+  respond(id: string, answer: InteractionAnswer): Promise<boolean>;
   /** 向当前轮次补充输入，只等待接收确认，不等待任务结束。 */
   steer(prompt: string, attachments?: AgentAttachment[]): Promise<void>;
   /** 只断开客户端；run 返回 undefined，后台任务及持久状态继续保留。 */
