@@ -64,13 +64,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
 
-In `/status`, `Model` shows the model name and reasoning effort, for example `GPT-6-Sol · xhigh`. Without a manual selection, Tellrun reads the Codex configuration for the current directory. `Task model` is also shown when the active task uses a different model or effort. If the query fails and no complete selection is saved, the field shows `Unavailable (check /model)`.
-
-Approval buttons follow the Codex request: allow once, allow for the session, remember a command rule, decline, or cancel. Command prefixes are shown before remembering a rule. Permission requests offer turn or session scope. Approval cards have no Stop button; Cancel is passed to Codex without pausing the chat. Use `/stop` to stop the task and pause new tasks.
-
 `/permissions` offers the four presets from Codex CLI 0.165.0: Ask for approval (default), Approve for me (Codex automatic review), Full Access (no Codex sandbox or execution approvals), and Read Only (approval required for edits or network access). Full Access remains subject to operating system permissions.
-
-Selections apply to subsequently submitted tasks; the current task and its follow-up messages retain their original mode. `/status` shows both modes when they differ. Selections survive service restarts and `/new`; changing the working directory resets the mode to its default. Menus expire after 10 minutes and are invalidated when reopened, on a new conversation, on a directory change, or after a restart. Codex validates the selected mode when starting a task. If it rejects the configuration or returns different settings, the task does not start.
 
 ## Terminal commands
 

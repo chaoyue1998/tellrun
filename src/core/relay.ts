@@ -46,7 +46,7 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Task status\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Answer questions with buttons or replies. Requests expire within 10 minutes.";
+              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Task status\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
             case "model":
               if (message.content.args) return "Use /model to choose a model with the buttons.";
               options.store.openMenu(channel.id, "model");

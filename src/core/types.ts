@@ -36,7 +36,8 @@ export interface AgentInteraction {
   id: string;
   kind: "approval" | "question";
   text: string;
-  expiresAt: number;
+  /** 空值表示持续等待，直到用户处理或请求关闭。 */
+  expiresAt: number | null;
   blocking: boolean;
   /** 审批选项由 Agent 提供；索引只在当前交互内有效。 */
   choices: AgentOption[];
@@ -100,7 +101,7 @@ export interface Agent {
     reasoningEffort?: string | null;
     onSession: (sessionId: string) => void;
     onStarted: (runId: string) => void;
-    /** 当前回复文本快照，随增量更新；调用方不能等待 IM 发送。 */
+    /** 完整输出快照，包含过程说明、最终回复和文件差异；调用方不能等待 IM 发送。 */
     onText: (text: string) => void;
     onInteraction: (interaction: AgentInteraction) => void;
     onInteractionClosed: (id: string, reason: string) => void;

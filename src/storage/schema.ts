@@ -131,7 +131,8 @@ export const stateSchema = z
           taskId: id,
           kind: z.enum(["approval", "question"]),
           text: z.string(),
-          expiresAt: nonnegativeInteger,
+          /** 审批没有本地期限；旧快照中的时间戳仍可读取。 */
+          expiresAt: nonnegativeInteger.nullable(),
           blocking: z.boolean(),
           /** 兼容旧审批快照；恢复流程仍会作废旧按钮，不重放批准。 */
           choices: z.array(

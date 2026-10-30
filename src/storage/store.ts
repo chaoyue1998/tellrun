@@ -314,10 +314,10 @@ export function openStore(path = join(appDirectory, "state.json")) {
             })
           : undefined;
       },
-      /** 限制预览为末尾 2000 个 Unicode 字符，完整结果仍由最终回复保存。 */
+      /** 内存预览保留完整内容；IM 决定能否展示草稿，正式结果始终完整分段发送。 */
       setDraft(id: number, text: string) {
         if (state.tasks.some((task) => task.id === id && task.status === "running"))
-          draft = { taskId: id, text: [...text].slice(-2000).join("") };
+          draft = { taskId: id, text };
       },
       /** 仅向当前机器人与授权用户返回执行中的草稿，停止后不再刷新。 */
       pendingDraft(accountId: string, userId: string) {
@@ -511,7 +511,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           task?.status !== "running" ||
           !message ||
           interaction.status !== "pending" ||
-          interaction.expiresAt <= Date.now()
+          (interaction.expiresAt !== null && interaction.expiresAt <= Date.now())
         )
           return "Request closed. Check /status.";
         if (content.type === "interaction" && content.action === "stop") {
@@ -578,7 +578,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
       claimInteraction(taskId: number) {
         const interaction = state.interactions.find(
           (item) =>
-            item.taskId === taskId && item.status === "ready" && item.expiresAt > Date.now(),
+            item.taskId === taskId &&
+            item.status === "ready" &&
+            (item.expiresAt === null || item.expiresAt > Date.now()),
         );
         if (
           !interaction ||
@@ -653,7 +655,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             reply.interactionId &&
             !reply.messageId &&
             (interaction?.status !== "pending" ||
-              interaction.expiresAt <= Date.now() ||
+              (interaction.expiresAt !== null && interaction.expiresAt <= Date.now()) ||
               (reply.questionIndex !== undefined &&
                 interaction.questions[reply.questionIndex]?.answer !== null))
           )
@@ -735,7 +737,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             /** 发送途中请求可能已关闭或该问题已回答；迟到的消息也必须移除按钮。 */
             if (
               interaction.status !== "pending" ||
-              interaction.expiresAt <= Date.now() ||
+              (interaction.expiresAt !== null && interaction.expiresAt <= Date.now()) ||
               (delivery.questionIndex !== undefined &&
                 interaction.questions[delivery.questionIndex]?.answer !== null)
             )

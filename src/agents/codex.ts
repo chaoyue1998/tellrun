@@ -240,14 +240,15 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         };
       }
       const completed = Promise.withResolvers<AgentResult | undefined>();
-      const messages = new Map<string, { text: string; phase?: string | null | undefined }>();
+      /** 按首次出现顺序保存全部回复与文件变更标题，完整事件覆盖同一条增量。 */
+      const messages = new Map<string, string>();
       /** 应用随机 ID 隔离每次连接；已见 RPC 编号保留到任务结束，重复请求不生成新按钮。 */
       const interactions = new Map<
         string,
         {
           requestId: string | number;
           request: AgentInteraction;
-          timer: ReturnType<typeof setTimeout>;
+          timer: ReturnType<typeof setTimeout> | undefined;
           approvals: Map<string, CodexApprovalResponse>;
           fileReview?: { itemId: string; changes: string };
         }
@@ -271,16 +272,34 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         settled = true;
         for (const interaction of interactions.values()) clearTimeout(interaction.timer);
         interactions.clear();
-        completed.resolve(result);
+        completed.resolve(
+          result
+            ? {
+                ...result,
+                text:
+                  [formatOutput(), result.text].filter(Boolean).join("\n\n") ||
+                  "Codex finished with no text output.",
+              }
+            : undefined,
+        );
       }
 
-      /** 增量与完整消息共用输出上限；只推送回复文本，不推送思考或工具原始输出。 */
-      function publishText(text: string) {
-        if ([...messages.values()].reduce((sum, item) => sum + item.text.length, 0) > 256_000) {
-          fail("Codex output limit exceeded. Task interrupted; check the local session.");
-          return;
-        }
-        input.onText(text);
+      /** 预览和结果共用完整内容；保留过程说明、最终回复及文件差异，由 IM 分段发送。 */
+      function formatOutput() {
+        return [...messages]
+          .map(([id, text]) =>
+            [
+              text,
+              ...(fileChanges.get(id) ?? []).map(
+                (change) =>
+                  `${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}`,
+              ),
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          )
+          .filter(Boolean)
+          .join("\n\n");
       }
 
       /** 通信故障不等于执行失败；保留不确定状态并结束当前连接。 */
@@ -404,28 +423,31 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             interactions.set(interaction.id, {
               requestId: message.id,
               ...parsed,
-              timer: setTimeout(
-                () => {
-                  const pending = interactions.get(interaction.id);
-                  if (!pending) return;
-                  if (interaction.blocking) {
-                    fail("Request timed out. Check /last, then /resume.");
-                  } else {
-                    interactions.delete(interaction.id);
-                    /** 非阻塞问题过期只返回空答案，不替用户选择，也不中断正在执行的任务。 */
-                    try {
-                      input.onInteractionClosed(
-                        interaction.id,
-                        "Question expired. Task continues.",
-                      );
-                      rpc.write({ id: pending.requestId, result: { answers: {} } });
-                    } catch {
-                      fail("Cannot save expired question state. Task interrupted.");
-                    }
-                  }
-                },
-                Math.max(0, interaction.expiresAt - Date.now()),
-              ),
+              timer:
+                interaction.expiresAt === null
+                  ? undefined
+                  : setTimeout(
+                      () => {
+                        const pending = interactions.get(interaction.id);
+                        if (!pending) return;
+                        if (interaction.blocking) {
+                          fail("Request timed out. Check /last, then /resume.");
+                        } else {
+                          interactions.delete(interaction.id);
+                          /** 非阻塞问题过期只返回空答案，不替用户选择，也不中断正在执行的任务。 */
+                          try {
+                            input.onInteractionClosed(
+                              interaction.id,
+                              "Question expired. Task continues.",
+                            );
+                            rpc.write({ id: pending.requestId, result: { answers: {} } });
+                          } catch {
+                            fail("Cannot save expired question state. Task interrupted.");
+                          }
+                        }
+                      },
+                      Math.max(0, interaction.expiresAt - Date.now()),
+                    ),
             });
             input.onInteraction(interaction);
           } else if (message.method === "serverRequest/resolved") {
@@ -449,8 +471,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 changes: fileChangesSchema,
               })
               .parse(message.params);
-            if (event.threadId === sessionId && event.turnId === runId)
+            if (event.threadId === sessionId && event.turnId === runId) {
               fileChanges.set(event.itemId, event.changes);
+              if (!messages.has(event.itemId)) messages.set(event.itemId, "File changes");
+              input.onText(formatOutput());
+            }
           } else if (message.method === "item/agentMessage/delta") {
             const event = z
               .object({
@@ -461,10 +486,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               })
               .parse(message.params);
             if (event.threadId !== sessionId || !recordRun(event.turnId)) return;
-            const item = messages.get(event.itemId) ?? { text: "" };
-            item.text += event.delta;
-            messages.set(event.itemId, item);
-            publishText(item.text);
+            messages.set(event.itemId, (messages.get(event.itemId) ?? "") + event.delta);
+            input.onText(formatOutput());
           } else if (message.method === "item/started" || message.method === "item/completed") {
             const event = z
               .object({
@@ -474,17 +497,23 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   type: z.string(),
                   id: z.string(),
                   text: z.string().optional(),
-                  phase: z.string().nullish(),
+                  status: z.string().optional(),
                   changes: fileChangesSchema.optional(),
                 }),
               })
               .parse(message.params);
             if (event.threadId !== sessionId || !recordRun(event.turnId)) return;
-            if (event.item.type === "fileChange" && event.item.changes)
-              fileChanges.set(event.item.id, event.item.changes);
+            if (event.item.type === "fileChange") {
+              if (event.item.changes) fileChanges.set(event.item.id, event.item.changes);
+              messages.set(
+                event.item.id,
+                `File changes${event.item.status ? ` (${event.item.status})` : ""}`,
+              );
+              input.onText(formatOutput());
+            }
             if (event.item.type === "agentMessage" && event.item.text !== undefined) {
-              messages.set(event.item.id, { text: event.item.text, phase: event.item.phase });
-              publishText(event.item.text);
+              messages.set(event.item.id, event.item.text);
+              input.onText(formatOutput());
             }
           } else if (message.method === "turn/started" || message.method === "turn/completed") {
             const event = z
@@ -492,7 +521,6 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               .parse(message.params);
             if (event.threadId !== sessionId || !recordRun(event.turn.id)) return;
             if (message.method === "turn/completed") {
-              const final = [...messages.values()].filter((item) => item.phase === "final_answer");
               finish({
                 status:
                   event.turn.status === "completed"
@@ -503,14 +531,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                         ? "cancelled"
                         : "interrupted",
                 text:
-                  (final.length ? final : [...messages.values()])
-                    .map((item) => item.text)
-                    .join("\n\n") ||
-                  (event.turn.status === "completed"
-                    ? "Codex finished with no text output."
+                  event.turn.status === "completed"
+                    ? ""
                     : event.turn.status === "failed"
                       ? "Codex task failed. Check sign-in, model access, and network."
-                      : "Task interrupted. File changes were not reverted."),
+                      : "Task interrupted. File changes were not reverted.",
               });
             }
           }
@@ -545,7 +570,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           !interaction ||
           settled ||
           controller.signal.aborted ||
-          interaction.request.expiresAt <= Date.now()
+          (interaction.request.expiresAt !== null && interaction.request.expiresAt <= Date.now())
         )
           return false;
         const approval =

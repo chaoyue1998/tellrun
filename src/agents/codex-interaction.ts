@@ -44,7 +44,7 @@ export function parseCodexInteraction(
     id: randomUUID(),
     kind: "approval",
     text: "",
-    expiresAt: Date.now() + 10 * 60_000,
+    expiresAt: null,
     blocking: true,
     choices: [],
     questions: [],
@@ -189,10 +189,9 @@ export function parseCodexInteraction(
     interaction.kind = "question";
     interaction.blocking = params.isBlocking;
     interaction.choices = [];
-    interaction.expiresAt = Math.min(
-      interaction.expiresAt,
-      Date.now() + (params.autoResolutionMs ?? 10 * 60_000),
-    );
+    /** 只有提问设置本地期限；审批持续等待用户决定。 */
+    interaction.expiresAt =
+      Date.now() + Math.min(10 * 60_000, params.autoResolutionMs ?? 10 * 60_000);
     interaction.questions = params.questions.map((question) => ({
       id: question.id,
       header: question.header,

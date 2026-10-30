@@ -274,6 +274,8 @@ export function createTelegramConnection(
                 const draft = store.pendingDraft(String(bot.botInfo.id), String(config.ownerId));
                 if (
                   draft &&
+                  /** 超出单条草稿容量时等待完整分段发送，不截取内容。 */
+                  draft.text.length <= 4096 &&
                   Date.now() >= nextDraftAt &&
                   (draft.taskId !== sentDraft?.taskId ||
                     draft.text !== sentDraft.text ||
@@ -327,7 +329,7 @@ export function createTelegramConnection(
                     : !reply.messageId &&
                         reply.promptEnd &&
                         interaction?.status === "pending" &&
-                        interaction.expiresAt > Date.now()
+                        (interaction.expiresAt === null || interaction.expiresAt > Date.now())
                       ? {
                           reply_markup: {
                             inline_keyboard: [
