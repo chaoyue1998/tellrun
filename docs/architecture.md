@@ -319,7 +319,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 delivery 通过 claimReply 从 outbox 领取已持久化的回复，内存中保留发送中的消息关联，成功或失败处理后释放。即使发送期间交互关闭，也保留交互到迟到回执触发的按钮清理完成，随后回收。任务结果与 /last 回复标记为 Markdown，通过 sendRichMessage 的 markdown 字段发送；没有到期回复时通过 sendRichMessageDraft 发送当前任务的流式草稿。草稿与正式回复在同一个发送循环中串行调用，避免终态消息发送后又出现迟到草稿；入站、Codex 事件读取与输入提示仍独立运行。
 
-草稿使用任务 ID 作为非零 draft_id，同一 ID 的新增文字由 Telegram 客户端动画展示。最多每秒更新一次，只发送最新完整文本；无变化时每 20 秒刷新，维持 30 秒的草稿预览。预览采用 32768 的字符串长度上限，超过后停止更新，等待任务结束后完整分段发送，不截取尾部。输出包括过程说明、最终回复和文件差异，差异使用 diff 代码块展示；不按 final_answer 阶段筛掉前文，也不设置累计文本截断上限。草稿只存内存，不逐字写盘。任务结束后清除内存预览，并通过 outbox 发送同一份完整结果，供 /last 再次查看；正式消息会清除客户端草稿。审批与问题仍由独立交互流程处理。[富消息草稿 API](https://core.telegram.org/bots/api#sendrichmessagedraft)、[Rich Markdown 格式](https://core.telegram.org/bots/api#rich-markdown-style)
+草稿使用非零 draft_id，连续更新复用同一 ID，由 Telegram 客户端动画展示新增文字；切换任务、草稿过期或被新消息清除后，换用新 ID 恢复展示，避免重播整段生成动画。编辑已有消息不重置草稿。最多每秒更新一次，只发送最新完整文本；无变化时每 10 秒续期，为 30 秒有效期留出慢请求和重试余量。预览采用 32768 的字符串长度上限，超过后继续续期最近一次有效预览，等待任务结束后完整分段发送；首次输出已超限时不展示草稿，不截取正文。输出包括过程说明、最终回复和文件差异，差异使用 diff 代码块展示；不按 final_answer 阶段筛掉前文，也不设置累计文本截断上限。草稿只存内存，不逐字写盘。任务结束后清除内存预览，并通过 outbox 发送同一份完整结果，供 /last 再次查看；正式消息会清除客户端草稿，因此中途通知仍可能造成短暂切换。审批与问题仍由独立交互流程处理。[富消息草稿 API](https://core.telegram.org/bots/api#sendrichmessagedraft)、[Rich Markdown 格式](https://core.telegram.org/bots/api#rich-markdown-style)
 
 草稿单次调用最多 4 秒，可随关停取消，不经过 auto-retry。429 延后到 retry_after，网络或服务端故障等待 5 秒后尝试最新文本；永久拒绝暂停本次连接的预览，401 退出服务。失败不写入 outbox、不重放旧草稿，不改变任务结果；停止中的任务不再刷新预览。
 

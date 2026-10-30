@@ -1,3 +1,4 @@
+import { randomInt } from "node:crypto";
 import { Agent } from "node:https";
 import { setTimeout } from "node:timers/promises";
 import { autoRetry } from "@grammyjs/auto-retry";
@@ -299,25 +300,32 @@ export function createTelegramConnection(
             }
           })(),
           (async () => {
-            /** 草稿最多每秒更新一次；无新内容时每 20 秒续期，最终回复与草稿串行发送。 */
+            /** 每 10 秒续期，为慢请求和重试留余量；草稿与正式回复始终串行发送。 */
             let nextDraftAt = 0;
             let sentDraft: { taskId: number; text: string; at: number } | undefined;
+            /** 连续更新复用 ID；重新展示时换 ID，避免客户端重播整段生成动画。 */
+            let draftId = randomInt(1, 2_147_483_647);
             while (!polling.signal.aborted) {
               const reply = store.claimReply(String(bot.botInfo.id), String(config.ownerId));
               if (!reply) {
                 const draft = store.pendingDraft(String(bot.botInfo.id), String(config.ownerId));
+                /** 超长输出继续续期最近的有效预览，避免停止刷新后整段消失。 */
+                if (draft && draft.text.length > 32768 && draft.taskId === sentDraft?.taskId)
+                  draft.text = sentDraft.text;
                 if (
                   draft &&
-                  /** 超出单条草稿容量时等待完整分段发送，不截取内容。 */
+                  /** 首次输出已超限时等待最终分段发送，不截取正文。 */
                   draft.text.length <= 32768 &&
                   Date.now() >= nextDraftAt &&
                   (draft.taskId !== sentDraft?.taskId ||
                     draft.text !== sentDraft.text ||
-                    Date.now() - sentDraft.at >= 20_000)
+                    Date.now() - sentDraft.at >= 10_000)
                 ) {
                   nextDraftAt = Date.now() + 1000;
+                  if (draft.taskId !== sentDraft?.taskId || Date.now() - sentDraft.at >= 30_000)
+                    draftId = (draftId % 2_147_483_647) + 1;
                   try {
-                    await bot.api.sendRichMessageDraft(Number(draft.chatId), draft.taskId, {
+                    await bot.api.sendRichMessageDraft(Number(draft.chatId), draftId, {
                       markdown: draft.text,
                     });
                     sentDraft = { ...draft, at: Date.now() };
@@ -436,8 +444,8 @@ export function createTelegramConnection(
                           : {}),
                       },
                 );
-                /** 普通消息会清除客户端草稿；任务仍执行时允许再次显示最新内容。 */
-                sentDraft = undefined;
+                /** 新消息清除草稿，编辑消息不会；保留有效正文并让下一次恢复换用新 ID。 */
+                if (!reply.messageId && sentDraft) sentDraft.at = 0;
               } catch (error) {
                 if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
                 if (error instanceof GrammyError && error.error_code === 401) throw error;
