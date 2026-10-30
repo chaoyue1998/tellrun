@@ -15,7 +15,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Remote coding**: send tasks in a private Telegram chat and let Codex execute them on your server.
 - **Images and files**: send screenshots, photos, or files with task instructions, including while a task is running.
 - **Session management**: select a project with `/cwd`, create named sessions with `/new`, and use the buttons in `/list` to select and resume conversations.
-- **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
+- **Live feedback**: see typing indicators and Markdown streaming replies with headings, lists, tables, and code blocks, and send additional instructions while a task is running.
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
 - **Scheduled tasks**: create five-field cron schedules with `/cron`, using the server timezone, and receive results in Telegram.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.

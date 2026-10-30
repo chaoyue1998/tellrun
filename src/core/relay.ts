@@ -257,9 +257,13 @@ export function createRelayService(options: {
               return "Ready for new tasks. Interrupted tasks will not be rerun.";
             case "last": {
               const last = options.store.lastTask(channel.id);
-              return last
-                ? `Task #${last.id}${last.cron ? ` · Cron #${last.cron.id}` : ""} ${statuses[last.status]}\n${last.result ?? "No result yet."}`
-                : "No tasks yet.";
+              if (!last) return "No tasks yet.";
+              options.store.reply(
+                channel.id,
+                `Task #${last.id}${last.cron ? ` · Cron #${last.cron.id}` : ""} ${statuses[last.status]}\n\n${last.result ?? "No result yet."}`,
+                { markdown: true },
+              );
+              return;
             }
             default:
               return "Unknown command. See /help.";

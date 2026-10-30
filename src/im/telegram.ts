@@ -50,7 +50,7 @@ export function createTelegramConnection(
   let started = false;
   /** 输入提示与流式草稿只发送最新状态，避免自动重发已过期的内容。 */
   bot.api.config.use((prev, method, payload, signal) =>
-    ["sendChatAction", "sendMessageDraft", "answerCallbackQuery"].includes(method)
+    ["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"].includes(method)
       ? prev(method, payload, signal)
       : autoRetry({ maxRetryAttempts: 2, maxDelaySeconds: 5, rethrowHttpErrors: true })(
           prev,
@@ -59,6 +59,27 @@ export function createTelegramConnection(
           signal,
         ),
   );
+  /** Markdown 被拒绝时保留原文，草稿与正式回复共用同一富消息降级方式。 */
+  bot.api.config.use(async (prev, method, payload, signal) => {
+    const result = await prev(method, payload, signal);
+    if (
+      !result.ok &&
+      result.error_code === 400 &&
+      "rich_message" in payload &&
+      payload.rich_message?.markdown
+    )
+      return prev(
+        method,
+        {
+          ...payload,
+          rich_message: {
+            blocks: [{ type: "paragraph", text: payload.rich_message.markdown }],
+          },
+        },
+        signal,
+      );
+    return result;
+  });
   /** 超时覆盖整次调用及重试；signal 使用当前 grammY 请求接口的类型。 */
   bot.api.config.use((prev, method, payload, signal) =>
     prev(
@@ -69,7 +90,7 @@ export function createTelegramConnection(
           AbortSignal.timeout(
             method === "getUpdates"
               ? 40_000
-              : ["sendChatAction", "sendMessageDraft", "answerCallbackQuery"].includes(method)
+              : ["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"].includes(method)
                 ? 4_000
                 : 15_000,
           ),
@@ -80,7 +101,7 @@ export function createTelegramConnection(
             "setChatMenuButton",
             "getUpdates",
             "sendChatAction",
-            "sendMessageDraft",
+            "sendRichMessageDraft",
             "answerCallbackQuery",
           ].includes(method)
             ? [polling.signal]
@@ -287,7 +308,7 @@ export function createTelegramConnection(
                 if (
                   draft &&
                   /** 超出单条草稿容量时等待完整分段发送，不截取内容。 */
-                  draft.text.length <= 4096 &&
+                  draft.text.length <= 32768 &&
                   Date.now() >= nextDraftAt &&
                   (draft.taskId !== sentDraft?.taskId ||
                     draft.text !== sentDraft.text ||
@@ -295,7 +316,9 @@ export function createTelegramConnection(
                 ) {
                   nextDraftAt = Date.now() + 1000;
                   try {
-                    await bot.api.sendMessageDraft(Number(draft.chatId), draft.taskId, draft.text);
+                    await bot.api.sendRichMessageDraft(Number(draft.chatId), draft.taskId, {
+                      markdown: draft.text,
+                    });
                     sentDraft = { ...draft, at: Date.now() };
                   } catch (error) {
                     if (polling.signal.aborted) return;
@@ -377,10 +400,22 @@ export function createTelegramConnection(
                   ]);
                 let messageId = reply.messageId;
                 if (messageId)
-                  await bot.api.editMessageText(reply.chatId, messageId, reply.text, markup);
+                  await bot.api.editMessageText(
+                    reply.chatId,
+                    messageId,
+                    reply.markdown ? { markdown: reply.text } : reply.text,
+                    markup,
+                  );
                 else
-                  messageId = (await bot.api.sendMessage(reply.chatId, reply.text, markup))
-                    .message_id;
+                  messageId = (
+                    reply.markdown
+                      ? await bot.api.sendRichMessage(
+                          reply.chatId,
+                          { markdown: reply.text },
+                          markup,
+                        )
+                      : await bot.api.sendMessage(reply.chatId, reply.text, markup)
+                  ).message_id;
                 store.removeReply(
                   reply.id,
                   reply.messageId && !reply.modelMenuId && !reply.permissionMenuId

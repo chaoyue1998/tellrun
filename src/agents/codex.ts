@@ -425,10 +425,16 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           .map(([id, text]) =>
             [
               text,
-              ...(fileChanges.get(id) ?? []).map(
-                (change) =>
-                  `${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}`,
-              ),
+              ...(fileChanges.get(id) ?? []).map((change) => {
+                /** 差异作为代码展示；围栏长于内容中的反引号，避免 Markdown 被误解析。 */
+                const fence = "`".repeat(
+                  (change.diff.match(/`+/g) ?? []).reduce(
+                    (length, marker) => Math.max(length, marker.length + 1),
+                    3,
+                  ),
+                );
+                return `${fence}diff\n${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}${change.diff.endsWith("\n") ? "" : "\n"}${fence}`;
+              }),
             ]
               .filter(Boolean)
               .join("\n\n"),

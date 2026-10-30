@@ -181,6 +181,8 @@ export const stateSchema = z
         id,
         channelId: id,
         text: z.string(),
+        /** 仅任务输出使用 Markdown；旧队列和控制消息默认保留原文。 */
+        markdown: z.boolean().optional(),
         attempts: nonnegativeInteger,
         retryAt: nonnegativeInteger,
         interactionId: z.uuid().optional(),

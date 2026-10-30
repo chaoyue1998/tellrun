@@ -101,7 +101,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       }
     }
 
-    /** 无回复时跳过入队；其余按 Unicode 字符拆分，和触发它的状态变更一起保存。 */
+    /** 回复按展示格式分段，并与触发它的状态变更一起保存。 */
     function enqueueReply(
       channelId: number,
       text: string | undefined,
@@ -113,17 +113,54 @@ export function openStore(path = join(appDirectory, "state.json")) {
         | "permissionMenuId"
         | "modelMenuId"
         | "sessions"
+        | "markdown"
       > = {},
     ) {
       if (text === undefined) return;
       const parts = delivery.messageId
         ? [text]
-        : (text.match(/[\s\S]{1,2000}/gu) ?? ["(No text reply)"]);
+        : delivery.markdown
+          ? [text || "(No text reply)"]
+          : (text.match(/[\s\S]{1,2000}/gu) ?? ["(No text reply)"]);
+      if (delivery.markdown && !delivery.messageId && text.length > 30000) {
+        parts.length = 0;
+        let part = "";
+        /** 保存围栏与语言标记，代码跨段时关闭并在下一段重新打开。 */
+        let fence: { marker: string; opening: string } | undefined;
+        for (const line of text.match(/[^\n]*\n|[^\n]+$/gu) ?? []) {
+          /** 预留编号与围栏空间；超长单行按 Unicode 字符拆分，保留全部内容。 */
+          for (const chunk of line.match(/[\s\S]{1,14000}/gu) ?? []) {
+            if (part.length + chunk.length > 30000) {
+              parts.push(
+                `${part}${fence ? `${part.endsWith("\n") ? "" : "\n"}${fence.marker}` : ""}`,
+              );
+              part = fence ? `${fence.opening}\n` : "";
+            }
+            part += chunk;
+          }
+          const marker = line.match(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)(?:\r?\n)?$/u);
+          if (!fence && marker?.[1] && marker[2] !== undefined) {
+            if (marker[1].startsWith("~") || !marker[2].includes("`"))
+              fence = { marker: marker[1], opening: line.replace(/\r?\n$/u, "") };
+          } else if (
+            fence &&
+            marker?.[1] &&
+            marker[1][0] === fence.marker[0] &&
+            marker[1].length >= fence.marker.length &&
+            !marker[2]?.trim()
+          )
+            fence = undefined;
+        }
+        if (part) parts.push(part);
+      }
       for (const [index, part] of parts.entries()) {
         state.outbox.push({
           id: ++replyId,
           channelId,
-          text: parts.length > 1 ? `(${index + 1}/${parts.length})\n${part}` : part,
+          text:
+            parts.length > 1
+              ? `(${index + 1}/${parts.length})\n${delivery.markdown ? "\n" : ""}${part}`
+              : part,
           attempts: 0,
           retryAt: Date.now(),
           ...delivery,
@@ -252,6 +289,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
                   }[result.status]
                 }\n${result.text}`
           }`,
+          { markdown: true },
         );
         for (const [index, input] of task.inputs.entries()) {
           if (!["pending", "preparing", "sending"].includes(input.status)) continue;
@@ -336,7 +374,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       reply(
         channelId: number,
         text: string,
-        delivery: Pick<State["outbox"][number], "sessions"> = {},
+        delivery: Pick<State["outbox"][number], "sessions" | "markdown"> = {},
       ) {
         update(() => {
           if (state.channels.some((channel) => channel.id === channelId))
