@@ -75,7 +75,9 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — List sessions in the current project\n/switch <id> — Select a session by its full ID\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — List sessions in the current project\n/switch <id> — Select a session by its full ID\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
+            case "cron":
+              return options.store.handleCron(channel.id, message.content.args);
             case "model":
               if (message.content.args) return "Use /model to choose a model with the buttons.";
               options.store.openMenu(channel.id, "model");
@@ -140,7 +142,7 @@ export function createRelayService(options: {
                   : "";
                 options.store.reply(
                   snapshot.id,
-                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
+                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}${task && task.cwd !== snapshot.cwd ? `\nTask directory: ${task.cwd}` : ""}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
                 );
               };
               return;
@@ -264,7 +266,7 @@ export function createRelayService(options: {
             case "last": {
               const last = options.store.lastTask(channel.id);
               return last
-                ? `Task #${last.id} ${statuses[last.status]}\n${last.result ?? "No result yet."}`
+                ? `Task #${last.id}${last.cron ? ` · Cron #${last.cron.id}` : ""} ${statuses[last.status]}\n${last.result ?? "No result yet."}`
                 : "No tasks yet.";
             }
             default:
@@ -325,6 +327,15 @@ export function createRelayService(options: {
           /** 查询失败只提示重新打开菜单，不影响任务和已有选择。 */
         }
         if (!stopping) options.store.fillModels(menu.channelId, menu.id, models);
+      }
+    },
+    /** 调度独立于执行和菜单查询；启动先跳过离线时段，再按持久化时间触发。 */
+    async schedule(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+      if (stopping) return;
+      options.store.recoverCrons(source);
+      while (!stopping) {
+        options.store.tickCrons(source);
+        await setTimeout(1_000);
       }
     },
     /** 领取任务后再次检查目录；运行结果与最终回复在同一个快照中保存。 */

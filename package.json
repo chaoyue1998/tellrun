@@ -51,6 +51,7 @@
     "@clack/prompts": "1.8.1",
     "@grammyjs/auto-retry": "2.0.2",
     "commander": "15.0.0",
+    "croner": "11.0.0",
     "grammy": "1.46.0",
     "json-rpc-2.0": "1.8.1",
     "pino": "10.4.0",

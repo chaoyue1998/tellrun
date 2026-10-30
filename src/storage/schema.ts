@@ -103,10 +103,33 @@ export const stateSchema = z
         eventId: z.string(),
       }),
     ),
+    /** 定时任务 ID 持续递增，删除后不复用；旧状态默认没有定时任务。 */
+    nextCronId: id.default(1),
+    crons: z
+      .array(
+        z.strictObject({
+          id,
+          channelId: id,
+          expression: z.string().min(1),
+          timezone: z.string().min(1),
+          prompt: z.string().min(1),
+          cwd: z.string().min(1),
+          model: z.string().min(1).nullable(),
+          reasoningEffort: z.string().min(1).nullable(),
+          permissionMode: z.string().min(1).nullable(),
+          enabled: z.boolean(),
+          nextRunAt: nonnegativeInteger.nullable(),
+          /** 忙碌时同一计划最多保留一次待执行，不积累每次触发记录。 */
+          pendingAt: nonnegativeInteger.nullable(),
+        }),
+      )
+      .default([]),
     tasks: z.array(
       z.strictObject({
         id,
         channelId: id,
+        /** 执行快照独立于计划，删除计划后仍能跟踪已开始的任务。 */
+        cron: z.strictObject({ id, scheduledAt: nonnegativeInteger }).nullable().default(null),
         cwd: z.string(),
         sessionId: z.string().nullable(),
         /** 旧任务没有轮次 ID，仍按结果不确定处理，不能猜测或重跑。 */
@@ -204,7 +227,7 @@ export const stateSchema = z
   .refine((state) => {
     const channels = new Set(state.channels.map((row) => row.id));
     return (
-      [state.channels, state.tasks, state.outbox].every(
+      [state.channels, state.tasks, state.outbox, state.crons].every(
         (rows) => new Set(rows.map((row) => row.id)).size === rows.length,
       ) &&
       new Set(
@@ -214,6 +237,13 @@ export const stateSchema = z
         .size === state.inboundUpdates.length &&
       state.inboundUpdates.every((row) => channels.has(row.channelId)) &&
       state.tasks.every((row) => channels.has(row.channelId)) &&
+      state.crons.every(
+        (row) =>
+          channels.has(row.channelId) &&
+          row.id < state.nextCronId &&
+          (row.enabled ? row.nextRunAt !== null : row.nextRunAt === null && row.pendingAt === null),
+      ) &&
+      state.tasks.every((row) => !row.cron || row.cron.id < state.nextCronId) &&
       state.outbox.every((row) => channels.has(row.channelId)) &&
       new Set(state.interactions.map((row) => row.id)).size === state.interactions.length &&
       state.interactions.every(

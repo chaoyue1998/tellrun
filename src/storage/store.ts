@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appDirectory } from "../config.js";
+import { createCrons } from "../core/cron.js";
 import { createMenus } from "../core/menus.js";
 import type {
   AgentInteraction,
@@ -38,7 +39,15 @@ export function openStore(path = join(appDirectory, "state.json")) {
       chmodSync(path, 0o600);
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-      state = { channels: [], inboundUpdates: [], tasks: [], interactions: [], outbox: [] };
+      state = {
+        channels: [],
+        inboundUpdates: [],
+        nextCronId: 1,
+        crons: [],
+        tasks: [],
+        interactions: [],
+        outbox: [],
+      };
       writeJson(path, state);
     }
     /** 交互撤回可能清空发送队列；实例内保持递增，避免迟到发送回执删除新消息。 */
@@ -122,6 +131,59 @@ export function openStore(path = join(appDirectory, "state.json")) {
       }
     }
 
+    /** 手动和定时输入共用任务快照，始终只允许一个未结束的编码任务。 */
+    function createTask(
+      channel: State["channels"][number],
+      prompt: string,
+      attachments: Attachment[] = [],
+      cron: State["tasks"][number]["cron"] = null,
+    ) {
+      return update(() => {
+        if (!channel.cwd) throw new Error("Set a working directory first.");
+        if (state.tasks.some((task) => activeTaskStatuses.has(task.status)))
+          throw new Error("A task is already running.");
+        const task: State["tasks"][number] = {
+          id: state.tasks.reduce((max, item) => Math.max(max, item.id), 0) + 1,
+          channelId: channel.id,
+          cron,
+          cwd: channel.cwd,
+          sessionId: channel.sessionId,
+          runId: null,
+          prompt,
+          attachments,
+          permissionMode: channel.permissionMode,
+          model: channel.model,
+          reasoningEffort: channel.reasoningEffort,
+          inputs: [],
+          status: "queued",
+          result: null,
+        };
+        state.tasks.push(task);
+        return task;
+      });
+    }
+
+    /** 定时执行固定创建时的选择，每次新建会话，不改变聊天当前会话。 */
+    const crons = createCrons({
+      read: () => state,
+      update,
+      enqueueReply,
+      createTask: (channel, cron, scheduledAt) =>
+        createTask(
+          {
+            ...channel,
+            cwd: cron.cwd,
+            sessionId: null,
+            model: cron.model,
+            reasoningEffort: cron.reasoningEffort,
+            permissionMode: cron.permissionMode,
+          },
+          cron.prompt,
+          [],
+          { id: cron.id, scheduledAt },
+        ),
+    });
+
     /** 菜单始终读取当前事务快照，避免捕获 update 替换前的状态。 */
     const { closeMenu, ...menus } = createMenus({ read: () => state, update, enqueueReply });
 
@@ -155,7 +217,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
       });
     }
 
-    /** 终态与最终回复一起保存，成功时只发送正文；迟到事件不能覆盖已完成结果。 */
+    /** 终态与最终回复一起保存；定时结果标注来源，迟到事件不能覆盖已完成结果。 */
     function finishTask(id: number, result: AgentResult) {
       if (!state.tasks.some((task) => task.id === id && activeTaskStatuses.has(task.status)))
         return;
@@ -167,19 +229,24 @@ export function openStore(path = join(appDirectory, "state.json")) {
           closeInteraction(interaction.id, "Task ended. Request closed.");
         if (result.status === "interrupted") {
           const channel = state.channels.find((channel) => channel.id === task.channelId);
-          if (channel) channel.paused = true;
+          if (channel) {
+            channel.paused = true;
+            crons.resetCronPending(channel.id);
+          }
         }
         enqueueReply(
           task.channelId,
-          result.status === "completed"
-            ? result.text
-            : `Task #${id} ${
-                {
-                  failed: "Failed",
-                  cancelled: "Stopped",
-                  interrupted: "Unconfirmed",
-                }[result.status]
-              }\n${result.text}`,
+          `${task.cron ? `Cron #${task.cron.id}\n` : ""}${
+            result.status === "completed"
+              ? result.text
+              : `Task #${id} ${
+                  {
+                    failed: "Failed",
+                    cancelled: "Stopped",
+                    interrupted: "Unconfirmed",
+                  }[result.status]
+                }\n${result.text}`
+          }`,
         );
         for (const [index, input] of task.inputs.entries()) {
           if (!["pending", "preparing", "sending"].includes(input.status)) continue;
@@ -309,11 +376,16 @@ export function openStore(path = join(appDirectory, "state.json")) {
         });
       },
       ...menus,
+      ...crons,
       /** 暂停状态跨重启保留，恢复须由用户明确触发。 */
       setPaused(channelId: number, paused: boolean) {
         update(() => {
           const channel = state.channels.find((channel) => channel.id === channelId);
-          if (channel) channel.paused = paused;
+          if (channel) {
+            const wasPaused = channel.paused;
+            channel.paused = paused;
+            if (paused || wasPaused) crons.resetCronPending(channelId);
+          }
         });
       },
       /** 返回快照，避免调用方直接修改内存中的持久状态。 */
@@ -361,35 +433,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           ) ?? state.tasks.findLast((task) => task.channelId === channelId),
         );
       },
-      /** 接收时固定目录、会话与输入，限制全局只有一个未结束任务。 */
-      createTask(
-        channel: State["channels"][number],
-        prompt: string,
-        attachments: Attachment[] = [],
-      ) {
-        return update(() => {
-          if (!channel.cwd) throw new Error("Set a working directory first.");
-          if (state.tasks.some((task) => activeTaskStatuses.has(task.status)))
-            throw new Error("A task is already running.");
-          const task: State["tasks"][number] = {
-            id: state.tasks.reduce((max, item) => Math.max(max, item.id), 0) + 1,
-            channelId: channel.id,
-            cwd: channel.cwd,
-            sessionId: channel.sessionId,
-            runId: null,
-            prompt,
-            attachments,
-            permissionMode: channel.permissionMode,
-            model: channel.model,
-            reasoningEffort: channel.reasoningEffort,
-            inputs: [],
-            status: "queued",
-            result: null,
-          };
-          state.tasks.push(task);
-          return task;
-        });
-      },
+      createTask,
       /** 尚未派发时合并首条输入；执行中的补充输入与入站去重标识一起保存。 */
       appendTaskInput(id: number, text: string, attachments: Attachment[] = []) {
         update(() => {
@@ -475,7 +519,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           return true;
         });
       },
-      /** 新建会话后立即保存关联，后续消息与重启均可续聊。 */
+      /** 新建会话后立即保存关联；定时任务只更新执行快照，保留手动聊天的上下文。 */
       recordSession(id: number, sessionId: string) {
         update(() => {
           const task = state.tasks.find(
@@ -484,7 +528,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           if (!task) return;
           task.sessionId = sessionId;
           const channel = state.channels.find((channel) => channel.id === task.channelId);
-          if (channel) channel.sessionId = sessionId;
+          if (channel && !task.cron) channel.sessionId = sessionId;
         });
       },
       /** 轮次 ID 与执行状态一起落盘；迟到通知不能撤销停止请求。 */
@@ -566,7 +610,10 @@ export function openStore(path = join(appDirectory, "state.json")) {
           if (interaction.kind === "approval") return "Button expired. Use /stop to stop the task.";
           update(() => {
             const channel = state.channels.find((channel) => channel.id === channelId);
-            if (channel) channel.paused = true;
+            if (channel) {
+              channel.paused = true;
+              crons.resetCronPending(channel.id);
+            }
             cancelTask(task.id);
           });
           return "Stopping. Wait for the result.";

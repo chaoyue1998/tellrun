@@ -17,6 +17,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 - **Session management**: select a project with `/cwd`, create named sessions with `/new`, and find or resume conversations with `/list` and `/switch`.
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
+- **Scheduled tasks**: create five-field cron schedules with `/cron`, using the server timezone, and receive results in Telegram.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
 - **Permission modes**: use `/permissions` to choose one of four Codex modes, saved for subsequent tasks.
 
@@ -60,6 +61,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/switch <id>`        | Switch to a session using its full ID from `/list`                               |
 | `/model`              | Show the current selection and choose model and reasoning effort                 |
 | `/permissions`        | Choose the permission mode for subsequent tasks                                  |
+| `/cron`               | List, create, delete, enable, or disable scheduled tasks                         |
 | `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
 | `/update`             | Ask Codex to upgrade Tellrun using the installation details                      |
 | `/last`               | Show the latest finished task's status and result                                |
@@ -69,6 +71,14 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 Wait for the current task to finish before changing directories, creating a session, or switching sessions. `/list` remains available while a task runs. After `/stop`, check the final status, then send `/resume` followed by your next task.
 
 Sessions are stored by Codex. `/list` includes non-archived sessions from Tellrun and other Codex clients in the exact current directory, ordered by recent activity, excluding subagents. `/new` without a name uses `New session`; even an empty session is saved. Creating or switching sessions keeps the selected model and permissions. Wait for confirmation before sending a task; if creation cannot be confirmed, check `/list` before retrying.
+
+For example, check the current project at 09:00 server time every weekday:
+
+```text
+/cron add 0 9 * * 1-5 Check the project and report issues
+```
+
+Manage schedules with `/cron del <id>`, `/cron enable <id>`, and `/cron disable <id>`. Each schedule saves the current directory, model, and permission selections and starts a fresh conversation for each run. Tellrun must be online; busy periods keep at most one pending run per schedule. `/stop` pauses triggers, and missed triggers during downtime are not replayed.
 
 ## Terminal commands
 
@@ -103,7 +113,7 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 | Path                         | Contents                                                                                                                  |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                                                             |
-| `~/.tellrun/state.json`      | Current conversation, directory, active task, latest result, pending interactions and replies, and unconfirmed update IDs |
+| `~/.tellrun/state.json`      | Conversation, active task, latest result, schedules and pending triggers, interactions, replies, and deduplication state |
 | `~/.tellrun/attachments/`   | Uploaded images and files, stored under unique IDs to prevent filename collisions |
 | `~/.tellrun/tellrun.service` | Linux background service definition                                                                                       |
 | `~/.tellrun/tellrun.plist`   | macOS background service definition                                                                                       |

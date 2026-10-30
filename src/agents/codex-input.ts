@@ -1,10 +1,7 @@
 import type { AgentAttachment } from "../core/types.js";
 
 /** 图片使用原生视觉输入；其他附件提供本地路径，由 Codex 按用户要求读取。 */
-export function createCodexInput(
-  prompt: string,
-  attachments: AgentAttachment[] = [],
-) {
+export function createCodexInput(prompt: string, attachments: AgentAttachment[] = []) {
   const text = attachments.length
     ? [
         prompt.trim() || "files：",

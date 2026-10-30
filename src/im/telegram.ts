@@ -18,6 +18,7 @@ const commands = [
   { command: "switch", description: "Switch to a session by its ID" },
   { command: "model", description: "Select model and reasoning effort for future tasks" },
   { command: "permissions", description: "Select the permission mode for future tasks" },
+  { command: "cron", description: "List, create, enable, disable, or delete scheduled tasks" },
   { command: "status", description: "Show status and check for updates" },
   { command: "update", description: "Ask Codex to upgrade Tellrun" },
   { command: "last", description: "Show the latest task result" },
