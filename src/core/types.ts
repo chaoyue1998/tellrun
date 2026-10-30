@@ -143,6 +143,8 @@ export interface Agent {
     onStarted: (runId: string) => void;
     /** 完整输出快照，包含过程说明、最终回复和文件差异；调用方不能等待 IM 发送。 */
     onText: (text: string) => void;
+    /** 执行异常等通知进入持久化消息队列，不依赖流式草稿或任务结束。 */
+    onNotice: (text: string) => void;
     onInteraction: (interaction: AgentInteraction) => void;
     onInteractionClosed: (id: string, reason: string) => void;
   }): Promise<AgentResult | undefined>;

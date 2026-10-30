@@ -399,6 +399,7 @@ export function createRelayService(options: {
               if (options.store.activeTask()?.status === "cancelling") options.agent.stop();
             },
             onText: (text) => options.store.setDraft(task.id, text),
+            onNotice: (text) => options.store.reply(task.channelId, `Task #${task.id}\n${text}`),
             onInteraction: (request) => options.store.addInteraction(task.id, request),
             onInteractionClosed: (id, reason) => options.store.closeInteraction(id, reason),
           })

@@ -217,6 +217,8 @@ Croner 只用于解析与计算：使用 `mode: "5-part"`、保存的 `timezone`
 
 每个连接先发送 `initialize` 并等待响应，再发送 `initialized` 通知，之后才能创建或恢复 thread；空闲时的普通消息启动 turn，执行中的补充消息使用 turn/steer，并传入当前 threadId 与 expectedTurnId、校验返回的 turnId；中断通过 turn/interrupt 请求。只根据 turn/completed 的实际状态判定完成、失败或中断。请求超时、进程退出和没有收到事件，都不等价于成功。[协议与生命周期](https://learn.chatgpt.com/docs/app-server)
 
+`error` 通知按当前 threadId 与 turnId 过滤，通过现有 outbox 立即通知 IM，不依赖流式草稿。`willRetry: true` 时每轮仅提示一次自动重试并继续跟踪；不可重试错误先通知，再等待最多 5 秒的 `turn/completed`，缺失时以状态未确认结束本次跟踪并暂停聊天，不取消或重跑后台任务。错误期间恢复自动重试、收到正式终态或服务退出时取消该等待。中断结果优先展示异常及 `/status`、`/last`、核对本机状态和 `/resume` 的恢复指引，再附已有输出；原始错误载荷不转发到 IM。
+
 请求管理使用 `json-rpc-2.0` 的 `JSONRPCClient`，收发边界适配 Codex 省略 `jsonrpc` 字段的消息格式。单次请求超时为 30 秒，超时结束本次跟踪并释放等待中的请求，不自动取消后台任务。Zod 校验、事件归属与任务状态由应用处理；服务端拒绝和本地连接故障分别映射提示，补充输入在断线后保持“提交状态不确定”，不自动重试。
 
 Codex 后台会在最后一个订阅者断开且会话无活动 30 分钟后才卸载，因此客户端关闭后仍可能持有空闲会话的写锁。Tellrun 复用该后台连接；恢复前通过 `thread/read` 检查状态，恢复后再次确认空闲，再提交任务。对其他进程仍持有写锁的情况保留原 thread ID 并提示连接问题，不自动创建新会话或重跑任务，不转发原始错误内容。[会话卸载规则](https://learn.chatgpt.com/docs/app-server#unsubscribe-from-a-loaded-thread)

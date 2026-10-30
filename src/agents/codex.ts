@@ -388,6 +388,10 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       /** 原生 Cancel 的已确认中断视为用户取消，不能误报异常并暂停聊天。 */
       let cancelledByApproval = false;
       let stopTimer: ReturnType<typeof setTimeout> | undefined;
+      /** 同一轮的自动重试只提示一次，避免网络抖动刷屏。 */
+      let retryNotified = false;
+      /** 不可重试错误后短暂等待正式终态，缺失时按状态未确认收尾。 */
+      let errorTimer: ReturnType<typeof setTimeout> | undefined;
 
       /** 只接受第一个终态，避免退出事件覆盖已经确认的执行结果。 */
       function finish(result?: AgentResult) {
@@ -400,8 +404,16 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             ? {
                 ...result,
                 text:
-                  [formatOutput(), result.text].filter(Boolean).join("\n\n") ||
-                  "Codex finished with no text output.",
+                  /** 异常和恢复建议放在已有输出之前，避免长回复淹没通知。 */
+                  [
+                    result.text,
+                    result.status === "interrupted"
+                      ? "建议先用 /status 和 /last 查看状态及输出，并在本机确认任务是否已经停止。确认后发送 /resume 恢复接收，再说明如何继续；/resume 不会自动重跑任务。"
+                      : "",
+                    formatOutput(),
+                  ]
+                    .filter(Boolean)
+                    .join("\n\n") || "Codex finished with no text output.",
               }
             : undefined,
         );
@@ -591,6 +603,30 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             if (controller.signal.aborted || seenRequests.has(message.id)) return;
             seenRequests.add(message.id);
             openInteraction(message);
+          } else if (message.method === "error") {
+            const event = z
+              .object({ threadId: z.string(), turnId: z.string(), willRetry: z.boolean() })
+              .parse(message.params);
+            if (event.threadId !== sessionId || event.turnId !== runId) return;
+            if (event.willRetry) {
+              clearTimeout(errorTimer);
+              errorTimer = undefined;
+              if (!retryNotified) {
+                retryNotified = true;
+                input.onNotice(
+                  "Codex 执行遇到异常，正在自动重试。建议暂时等待，无需重复提交任务；可用 /status 查看状态，持续无进展时可用 /stop 停止。",
+                );
+              }
+            } else if (!errorTimer) {
+              /** 原始错误可能含凭据或请求正文，只发送固定提示与操作建议。 */
+              input.onNotice(
+                "Codex 执行遇到异常，正在确认任务是否结束。建议暂勿重复提交任务；可用 /status 查看状态，并检查本机 Codex 的登录、模型权限和网络。",
+              );
+              errorTimer = setTimeout(
+                () => fail("Codex 报告错误后未确认任务终态，后台任务可能仍在运行。"),
+                5_000,
+              );
+            }
           } else if (message.method === "serverRequest/resolved") {
             const event = z
               .object({ threadId: z.string(), requestId: z.union([z.string(), z.number()]) })
@@ -724,8 +760,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   event.turn.status === "completed"
                     ? ""
                     : event.turn.status === "failed"
-                      ? "Codex task failed. Check sign-in, model access, and network."
-                      : "Task interrupted. File changes were not reverted.",
+                      ? "Codex 执行失败。建议用 /last 查看最后输出；检查本机 Codex 的登录、模型权限和网络，排除问题后再发送继续要求。"
+                      : "Codex 会话已中断，已有文件改动未回滚。",
               });
             }
           }
@@ -972,6 +1008,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         for (const interaction of interactions.values()) clearTimeout(interaction.timer);
         interactions.clear();
         clearTimeout(stopTimer);
+        clearTimeout(errorTimer);
         rpc.close();
         active = undefined;
       }
