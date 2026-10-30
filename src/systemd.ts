@@ -1,5 +1,14 @@
 import { execFile, spawn } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -35,6 +44,25 @@ async function systemctl(...args: string[]) {
 
 /** CLI 与配置向导共用后台生命周期；不加载运行状态或 Telegram 业务入口。 */
 export async function manageSystemdService(action: ServiceAction, options: ServiceOptions) {
+  /** 系统未运行 systemd 且没有服务定义或注册链接时，卸载无需连接服务管理器。 */
+  if (action === "uninstall" && !existsSync("/run/systemd/system")) {
+    const userUnits = join(
+      process.env.XDG_CONFIG_HOME || join(homedir(), ".config"),
+      "systemd",
+      "user",
+    );
+    const serviceFiles = [
+      join(appDirectory, unit),
+      join(userUnits, unit),
+      join(userUnits, "default.target.wants", unit),
+    ];
+    /** lstat 同时检查失效链接，避免把残留的自启入口当作从未安装。 */
+    if (!serviceFiles.some((path) => lstatSync(path, { throwIfNoEntry: false }))) {
+      console.log("No systemd service installed.");
+      return;
+    }
+  }
+
   if (action === "logs") {
     await new Promise<void>((resolve, reject) => {
       const child = spawn(

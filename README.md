@@ -122,8 +122,6 @@ tellrun uninstall
 
 Stops and removes the current user's background service, then uninstalls the global npm package from its installation prefix. Configuration, state, attachments, and application logs remain in `~/.tellrun/`; the command reminds you to delete that directory yourself if no longer needed. Linux user linger settings stay unchanged.
 
-This command supports global npm installations on Linux and macOS.
-
 ## Configuration and data
 
 Run `tellrun setup` to create or update your configuration. Leave the Bot Token blank to keep the existing value.

@@ -122,8 +122,6 @@ tellrun uninstall
 
 停止并移除当前用户的后台服务，再从当前安装前缀卸载 Tellrun 的 npm 全局包。配置、状态、附件及应用日志保留在 `~/.tellrun/`，卸载完成后会提示自行删除。Linux 用户 linger 设置保持不变。
 
-此命令适用于 Linux 和 macOS 的 npm 全局安装。
-
 ## 配置与数据
 
 运行 `tellrun setup` 创建或更新配置，已有 Bot Token 可留空保留原值。

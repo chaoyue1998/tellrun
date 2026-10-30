@@ -164,7 +164,7 @@ program
   });
 program
   .command("uninstall")
-  .description("Remove the service and npm package; keep user data")
+  .description("Uninstall Tellrun; keep user data")
   .action(async () => {
     await uninstall();
   });
