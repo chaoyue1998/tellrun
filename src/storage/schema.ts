@@ -190,6 +190,8 @@ export const stateSchema = z
         messageId: id.optional(),
         permissionMenuId: z.uuid().optional(),
         modelMenuId: z.uuid().optional(),
+        /** 会话列表随回复保存，发送成功后释放；按钮直接引用完整会话 ID。 */
+        sessions: z.array(optionSchema).max(10).optional(),
       }),
     ),
   })

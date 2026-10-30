@@ -14,7 +14,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 
 - **Remote coding**: send tasks in a private Telegram chat and let Codex execute them on your server.
 - **Images and files**: send screenshots, photos, or files with task instructions, including while a task is running.
-- **Session management**: select a project with `/cwd`, create named sessions with `/new`, and find or resume conversations with `/list` and `/switch`.
+- **Session management**: select a project with `/cwd`, create named sessions with `/new`, and use the buttons in `/list` to select and resume conversations.
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
 - **Scheduled tasks**: create five-field cron schedules with `/cron`, using the server timezone, and receive results in Telegram.
@@ -57,8 +57,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/cwd`                | Show the current working directory                                                           |
 | `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
 | `/new [name]`         | Create and select a session, with an optional name                                           |
-| `/list`               | List sessions in the current project and mark the current session                            |
-| `/switch <id>`        | Switch to a session using its full ID from `/list`                                           |
+| `/list`               | Show up to 10 recent project sessions as buttons; tap to switch                              |
 | `/model`              | Show the current selection and choose model and reasoning effort                             |
 | `/permissions`        | Choose the permission mode for subsequent tasks                                              |
 | `/cron`               | List, create, delete, enable, or disable scheduled tasks                                     |
@@ -72,7 +71,7 @@ Wait for the current task to finish before changing directories, creating a sess
 
 ### Session management
 
-Sessions are stored by Codex. `/list` includes non-archived sessions from Tellrun and other Codex clients in the exact current directory, ordered by recent activity, excluding subagents. `/new` without a name uses `New session`; even an empty session is saved. Creating or switching sessions keeps the selected model and permissions. Wait for confirmation before sending a task; if creation cannot be confirmed, check `/list` before retrying.
+Sessions are stored by Codex. `/list` shows up to 10 non-archived sessions from Tellrun and other Codex clients in the exact current directory, ordered by recent activity, excluding subagents. It displays session buttons and a prompt to tap to switch, with ✓ marking the current session. `/new` without a name uses `New session`; even an empty session is saved. Creating or switching sessions keeps the selected model and permissions. Wait for confirmation before sending a task; if creation cannot be confirmed, check `/list` before retrying.
 
 ### Scheduled tasks
 

@@ -249,6 +249,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
     async listSessions(cwd, signal) {
       return withSessionConnection(cwd, signal, async (rpc) => {
+        /** 按最近更新时间收集最多 10 个会话；过滤或去重后不足时再取下一页。 */
         const sessions: AgentOption[] = [];
         let cursor: string | null = null;
         do {
@@ -258,7 +259,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               await rpc.request("thread/list", {
                 cwd,
                 cursor,
-                limit: 100,
+                limit: 10 - sessions.length,
                 sortKey: "updated_at",
                 modelProviders: [],
                 /** 默认来源会漏掉 app-server 会话；排除自动生成的子 Agent 会话。 */
@@ -266,9 +267,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 archived: false,
               }),
             );
-          for (const session of page.data)
+          for (const session of page.data) {
             if (session.cwd === cwd && !sessions.some((item) => item.id === session.id))
               sessions.push({ id: session.id, label: session.label });
+            if (sessions.length === 10) return sessions;
+          }
           cursor = page.nextCursor;
         } while (cursor);
         return sessions;
@@ -310,7 +313,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           .object({ thread: sessionSchema })
           .parse(await rpc.request("thread/read", { threadId: sessionId })),
       ).catch(() => {
-        throw new Error("Codex session unavailable. Use a full session ID from /list.");
+        throw new Error("Codex session unavailable. Open /list and choose a session again.");
       });
       if (thread.id !== sessionId || thread.cwd !== cwd)
         throw new Error("Codex session is not in the current directory. Choose one from /list.");

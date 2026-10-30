@@ -34,6 +34,8 @@ export interface IncomingMessage {
   eventId: string;
   content:
     | { type: "command"; name: string; args: string }
+    /** 会话切换由按钮触发，与文本命令分开处理。 */
+    | { type: "session"; id: string }
     | { type: "text"; text: string; replyToMessageId?: number }
     | { type: "attachments"; text: string; attachments: Attachment[] }
     | { type: "permissions" | "model"; id: string; optionIndex: number; messageId: number }
@@ -102,7 +104,7 @@ export interface Agent {
   version: string;
   /** 第一项为默认模式；模式 ID 由各 Agent 自行解释。 */
   permissionModes: readonly AgentOption[];
-  /** 列出当前目录的会话；名称和历史由 Agent 保存。 */
+  /** 按最近更新时间列出当前目录最多 10 个会话；名称和历史由 Agent 保存。 */
   listSessions(cwd: string, signal: AbortSignal): Promise<AgentOption[]>;
   /** 创建并保存空会话，不启动任务；未指定名称时使用默认名称。 */
   createSession(

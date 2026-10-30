@@ -107,7 +107,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
       text: string | undefined,
       delivery: Pick<
         State["outbox"][number],
-        "interactionId" | "questionIndex" | "messageId" | "permissionMenuId" | "modelMenuId"
+        | "interactionId"
+        | "questionIndex"
+        | "messageId"
+        | "permissionMenuId"
+        | "modelMenuId"
+        | "sessions"
       > = {},
     ) {
       if (text === undefined) return;
@@ -124,6 +129,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           ...delivery,
           ...(delivery.permissionMenuId ||
           delivery.modelMenuId ||
+          delivery.sessions?.length ||
           (delivery.interactionId && !delivery.messageId)
             ? { promptEnd: index === parts.length - 1 }
             : {}),
@@ -294,7 +300,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             (item) => item.channelId === existing.id && item.eventId === message.eventId,
           )
         )
-          return ["interaction", "permissions", "model"].includes(message.content.type)
+          return ["interaction", "permissions", "model", "session"].includes(message.content.type)
             ? "Already handled."
             : undefined;
         return update(() => {
@@ -321,16 +327,20 @@ export function openStore(path = join(appDirectory, "state.json")) {
             eventId: message.eventId,
           });
           const reply = handle(channel);
-          if (!["interaction", "permissions", "model"].includes(message.content.type))
+          if (!["interaction", "permissions", "model", "session"].includes(message.content.type))
             enqueueReply(channel.id, reply);
           return reply;
         });
       },
       /** 独立只读查询完成后保存回复；写入失败交给工作循环触发关停。 */
-      reply(channelId: number, text: string) {
+      reply(
+        channelId: number,
+        text: string,
+        delivery: Pick<State["outbox"][number], "sessions"> = {},
+      ) {
         update(() => {
           if (state.channels.some((channel) => channel.id === channelId))
-            enqueueReply(channelId, text);
+            enqueueReply(channelId, text, delivery);
         });
       },
       /** 成功拉取后才能回收已确认更新；空响应也说明服务端已无可重投记录。 */

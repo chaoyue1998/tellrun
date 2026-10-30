@@ -64,16 +64,64 @@ export function createRelayService(options: {
           changingSession &&
           (message.content.type === "text" ||
             message.content.type === "attachments" ||
+            message.content.type === "session" ||
             (message.content.type === "command" &&
-              (["new", "switch", "list", "update"].includes(message.content.name) ||
+              (["new", "list", "update"].includes(message.content.name) ||
                 (message.content.name === "cwd" && message.content.args))))
         )
           return "Session change in progress. Wait for confirmation, then resend your message.";
+        /** 新建命令和会话按钮共用切换保护，仅在接口确认后保存选择。 */
+        if (
+          message.content.type === "session" ||
+          (message.content.type === "command" && message.content.name === "new")
+        ) {
+          if (task) return "Wait for the task to finish, or use /stop first.";
+          const { content } = message;
+          const snapshot = structuredClone(channel);
+          controlQuery = async () => {
+            changingSession = true;
+            let session: AgentOption;
+            try {
+              session =
+                content.type === "command"
+                  ? await options.agent.createSession(
+                      {
+                        cwd: snapshot.cwd,
+                        name: content.args,
+                        model: snapshot.model,
+                        permissionMode: snapshot.permissionMode,
+                      },
+                      modelLoading.signal,
+                    )
+                  : await options.agent.readSession(snapshot.cwd, content.id, modelLoading.signal);
+            } catch (error) {
+              if (!stopping)
+                options.store.reply(
+                  snapshot.id,
+                  error instanceof Error && error.message.startsWith("Codex ")
+                    ? error.message
+                    : "Cannot change sessions. Current session unchanged. Check /list before retrying.",
+                );
+              return;
+            } finally {
+              changingSession = false;
+            }
+            /** 接口成功后才更新绑定；存储错误交给工作循环处理。 */
+            if (!stopping)
+              options.store.setSession(
+                snapshot.id,
+                snapshot.cwd,
+                session.id,
+                `${content.type === "command" ? "New session" : "Switched session"}: ${session.label}\nID: ${session.id}\nDirectory: ${snapshot.cwd}`,
+              );
+          };
+          return;
+        }
         if (message.content.type === "command") {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — List sessions in the current project\n/switch <id> — Select a session by its full ID\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.store.handleCron(channel.id, message.content.args);
             case "model":
@@ -183,62 +231,16 @@ export function createRelayService(options: {
                 if (!stopping)
                   options.store.reply(
                     snapshot.id,
-                    `Directory: ${snapshot.cwd}\n${
-                      sessions.length
-                        ? sessions
-                            .map(
-                              (session) =>
-                                `\n${session.id === snapshot.sessionId ? "[current] " : ""}${session.label}\n${session.id}`,
-                            )
-                            .join("\n")
-                        : "No sessions yet. Create one with /new [name]."
-                    }${sessions.length ? "\n\nUse /switch <full ID> to select a session." : ""}`,
-                  );
-              };
-              return;
-            }
-            case "new":
-            case "switch": {
-              if (task) return "Wait for the task to finish, or use /stop first.";
-              const { name, args } = message.content;
-              if (name === "switch" && (!args || /\s/u.test(args)))
-                return "Use /switch <full session ID>. Find the ID with /list.";
-              const snapshot = structuredClone(channel);
-              controlQuery = async () => {
-                changingSession = true;
-                let session: AgentOption;
-                try {
-                  session =
-                    name === "new"
-                      ? await options.agent.createSession(
-                          {
-                            cwd: snapshot.cwd,
-                            name: args,
-                            model: snapshot.model,
-                            permissionMode: snapshot.permissionMode,
-                          },
-                          modelLoading.signal,
-                        )
-                      : await options.agent.readSession(snapshot.cwd, args, modelLoading.signal);
-                } catch (error) {
-                  if (!stopping)
-                    options.store.reply(
-                      snapshot.id,
-                      error instanceof Error && error.message.startsWith("Codex ")
-                        ? error.message
-                        : "Cannot change sessions. Current session unchanged. Check /list before retrying.",
-                    );
-                  return;
-                } finally {
-                  changingSession = false;
-                }
-                /** 接口成功后才更新绑定；存储错误交给工作循环处理。 */
-                if (!stopping)
-                  options.store.setSession(
-                    snapshot.id,
-                    snapshot.cwd,
-                    session.id,
-                    `${name === "new" ? "New session" : "Switched session"}: ${session.label}\nID: ${session.id}\nDirectory: ${snapshot.cwd}`,
+                    sessions.length
+                      ? "Tap a session to switch."
+                      : "No sessions yet. Create one with /new [name].",
+                    {
+                      /** 当前会话标记与名称一起作为按钮文本。 */
+                      sessions: sessions.map((session) => ({
+                        ...session,
+                        label: `${session.id === snapshot.sessionId ? "✓ " : ""}${session.label}`,
+                      })),
+                    },
                   );
               };
               return;

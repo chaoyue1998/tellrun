@@ -14,8 +14,7 @@ const commands = [
   { command: "help", description: "Show available commands" },
   { command: "cwd", description: "Show or change the working directory" },
   { command: "new", description: "Create a new session with an optional name" },
-  { command: "list", description: "List sessions in the current project" },
-  { command: "switch", description: "Switch to a session by its ID" },
+  { command: "list", description: "Show up to 10 recent sessions with switch buttons" },
   { command: "model", description: "Select model and reasoning effort for future tasks" },
   { command: "permissions", description: "Select the permission mode for future tasks" },
   { command: "cron", description: "List, create, enable, disable, or delete scheduled tasks" },
@@ -149,8 +148,10 @@ export function createTelegramConnection(
   bot.on("callback_query:data", async (ctx) => {
     const match = ctx.callbackQuery.data.match(/^i:([0-9a-f-]{36}):(a(\d+)|stop|q(\d+)_(\d+))$/);
     const selection = ctx.callbackQuery.data.match(/^([pm]):([0-9a-f-]{36}):(\d+)$/);
+    /** 会话按钮作为独立事件交给核心层校验和切换。 */
+    const session = ctx.callbackQuery.data.match(/^s:(\S+)$/u);
     let reply = "Button expired.";
-    if ((match?.[1] || selection?.[2]) && ctx.chat && ctx.callbackQuery.message) {
+    if ((match?.[1] || selection?.[2] || session?.[1]) && ctx.chat && ctx.callbackQuery.message) {
       reply =
         (await handleMessage({
           channel: {
@@ -160,29 +161,31 @@ export function createTelegramConnection(
             userId: String(ctx.from.id),
           },
           eventId: String(ctx.update.update_id),
-          content: selection?.[2]
-            ? {
-                type: selection[1] === "p" ? "permissions" : "model",
-                id: selection[2],
-                optionIndex: Number(selection[3]),
-                messageId: ctx.callbackQuery.message.message_id,
-              }
-            : {
-                type: "interaction",
-                id: match?.[1] ?? "",
-                action:
-                  match?.[3] !== undefined
-                    ? "approval"
+          content: session?.[1]
+            ? { type: "session", id: session[1] }
+            : selection?.[2]
+              ? {
+                  type: selection[1] === "p" ? "permissions" : "model",
+                  id: selection[2],
+                  optionIndex: Number(selection[3]),
+                  messageId: ctx.callbackQuery.message.message_id,
+                }
+              : {
+                  type: "interaction",
+                  id: match?.[1] ?? "",
+                  action:
+                    match?.[3] !== undefined
+                      ? "approval"
+                      : match?.[4] !== undefined
+                        ? "option"
+                        : "stop",
+                  messageId: ctx.callbackQuery.message.message_id,
+                  ...(match?.[3] !== undefined
+                    ? { optionIndex: Number(match[3]) }
                     : match?.[4] !== undefined
-                      ? "option"
-                      : "stop",
-                messageId: ctx.callbackQuery.message.message_id,
-                ...(match?.[3] !== undefined
-                  ? { optionIndex: Number(match[3]) }
-                  : match?.[4] !== undefined
-                    ? { questionIndex: Number(match[4]), optionIndex: Number(match[5]) }
-                    : {}),
-              },
+                      ? { questionIndex: Number(match[4]), optionIndex: Number(match[5]) }
+                      : {}),
+                },
         })) ?? "Received.";
     }
     /** 回调提示不占用入站循环，慢网络下 /status 和 /stop 仍能立即处理。 */
@@ -364,6 +367,14 @@ export function createTelegramConnection(
                           },
                         }
                       : { reply_markup: { inline_keyboard: [] } };
+                /** 列表分段时只在末段显示按钮，完整会话 ID 不受标题截断影响。 */
+                if (reply.promptEnd && reply.sessions?.length)
+                  markup.reply_markup.inline_keyboard = reply.sessions.map((session, index) => [
+                    {
+                      text: `${index + 1}. ${[...session.label].slice(0, 50).join("")}`,
+                      callback_data: `s:${session.id}`,
+                    },
+                  ]);
                 let messageId = reply.messageId;
                 if (messageId)
                   await bot.api.editMessageText(reply.chatId, messageId, reply.text, markup);
