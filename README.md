@@ -46,14 +46,6 @@ Help me understand this project. Explain its main modules and how to run it.
 
 Without `/cwd`, the working directory defaults to the directory where the service starts. Background services start in the current user's home directory. Changing directories starts a new conversation.
 
-### Send images and files
-
-Send a photo, screenshot, or document using Telegram's attachment menu. Add a caption such as "Fix the layout shown in this screenshot" or "Read this file and explain the error." You can also send an attachment first and follow up with text. Without a caption, Codex uses the conversation context and asks what to do if the task is unclear.
-
-JPEG, PNG, WebP, and GIF images are passed to Codex as visual input, including images uploaded as documents. Other files are downloaded and passed as local paths for Codex to read; support for particular document formats depends on the tools available on your server. Each attachment is limited to 20 MB, matching the [Telegram download limit](https://core.telegram.org/bots/api#getfile).
-
-Downloads do not block `/status` or `/stop`. Duplicate messages do not submit work twice. Downloads that have not been submitted to Codex can resume after a restart; inputs with unconfirmed submission results are not replayed. Attachments and captions sent during a task are added to that task.
-
 ## Telegram commands
 
 At startup, Tellrun registers an English command menu. Use the menu button beside the chat input or type `/` to select a command.
@@ -112,12 +104,6 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 | `~/.tellrun/tellrun.service` | Linux background service definition                                                                                       |
 | `~/.tellrun/tellrun.plist`   | macOS background service definition                                                                                       |
 | `~/.tellrun/tellrun.log`     | macOS service diagnostics; view with `tellrun logs`                                                                       |
-
-Codex uses the same operating system user's authentication and model configuration, and manages its own full conversation history. Tellrun does not maintain a project directory allowlist. Access depends on operating system permissions and the Codex sandbox; Tellrun defaults to workspace write access and approvals on request.
-
-Tellrun keeps only active tasks and each chat's latest result for `/last`. Confirmed update IDs and closed interactions are removed once they are no longer needed; pending replies remain until sent or permanently rejected. Task history stays with Codex; Tellrun logs only service startup, shutdown, and connection or storage diagnostics.
-
-Uploaded attachments remain available for later messages and are not deleted when a task finishes. Once a conversation no longer needs them, you can manually remove its attachment directories under `~/.tellrun/attachments/`; deleted files must be uploaded again if needed. Incomplete download files are removed after failure or cancellation.
 
 ### Configuration parameters
 
