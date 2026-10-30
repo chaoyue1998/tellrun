@@ -51,26 +51,30 @@ Without `/cwd`, the working directory defaults to the directory where the servic
 
 At startup, Tellrun registers an English command menu. Use the menu button beside the chat input or type `/` to select a command.
 
-| Command               | Purpose                                                                          |
-| --------------------- | -------------------------------------------------------------------------------- |
-| `/start`, `/help`     | Show usage instructions                                                          |
-| `/cwd`                | Show the current working directory                                               |
-| `/cwd /absolute/path` | Change the working directory and start a new conversation                        |
-| `/new [name]`         | Create and select a session, with an optional name                               |
-| `/list`               | List sessions in the current project and mark the current session                |
-| `/switch <id>`        | Switch to a session using its full ID from `/list`                               |
-| `/model`              | Show the current selection and choose model and reasoning effort                 |
-| `/permissions`        | Choose the permission mode for subsequent tasks                                  |
-| `/cron`               | List, create, delete, enable, or disable scheduled tasks                         |
+| Command               | Purpose                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `/start`, `/help`     | Show usage instructions                                                                      |
+| `/cwd`                | Show the current working directory                                                           |
+| `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
+| `/new [name]`         | Create and select a session, with an optional name                                           |
+| `/list`               | List sessions in the current project and mark the current session                            |
+| `/switch <id>`        | Switch to a session using its full ID from `/list`                                           |
+| `/model`              | Show the current selection and choose model and reasoning effort                             |
+| `/permissions`        | Choose the permission mode for subsequent tasks                                              |
+| `/cron`               | List, create, delete, enable, or disable scheduled tasks                                     |
 | `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
-| `/update`             | Ask Codex to upgrade Tellrun using the installation details                      |
-| `/last`               | Show the latest finished task's status and result                                |
-| `/stop`               | Request that the current task stop and pause new tasks                           |
-| `/resume`             | Accept new tasks again without rerunning an interrupted task                     |
+| `/update`             | Ask Codex to upgrade Tellrun using the installation details                                  |
+| `/last`               | Show the latest finished task's status and result                                            |
+| `/stop`               | Request that the current task stop and pause new tasks                                       |
+| `/resume`             | Accept new tasks again without rerunning an interrupted task                                 |
 
 Wait for the current task to finish before changing directories, creating a session, or switching sessions. `/list` remains available while a task runs. After `/stop`, check the final status, then send `/resume` followed by your next task.
 
+### Session management
+
 Sessions are stored by Codex. `/list` includes non-archived sessions from Tellrun and other Codex clients in the exact current directory, ordered by recent activity, excluding subagents. `/new` without a name uses `New session`; even an empty session is saved. Creating or switching sessions keeps the selected model and permissions. Wait for confirmation before sending a task; if creation cannot be confirmed, check `/list` before retrying.
+
+### Scheduled tasks
 
 For example, check the current project at 09:00 server time every weekday:
 
@@ -78,7 +82,7 @@ For example, check the current project at 09:00 server time every weekday:
 /cron add 0 9 * * 1-5 Check the project and report issues
 ```
 
-Manage schedules with `/cron del <id>`, `/cron enable <id>`, and `/cron disable <id>`. Each schedule saves the current directory, model, and permission selections and starts a fresh conversation for each run. Tellrun must be online; busy periods keep at most one pending run per schedule. `/stop` pauses triggers, and missed triggers during downtime are not replayed.
+Manage schedules with `/cron del <id>`, `/cron enable <id>`, and `/cron disable <id>`. 
 
 ## Terminal commands
 
@@ -110,14 +114,14 @@ Configuration and state live in `~/.tellrun/` and are preserved when upgrading t
 
 Run `tellrun setup` to create or update your configuration. Leave the Bot Token blank to keep the existing value.
 
-| Path                         | Contents                                                                                                                  |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                                                             |
+| Path                         | Contents                                                                                                                 |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                                                            |
 | `~/.tellrun/state.json`      | Conversation, active task, latest result, schedules and pending triggers, interactions, replies, and deduplication state |
-| `~/.tellrun/attachments/`   | Uploaded images and files, stored under unique IDs to prevent filename collisions |
-| `~/.tellrun/tellrun.service` | Linux background service definition                                                                                       |
-| `~/.tellrun/tellrun.plist`   | macOS background service definition                                                                                       |
-| `~/.tellrun/tellrun.log`     | macOS service diagnostics; view with `tellrun logs`                                                                       |
+| `~/.tellrun/attachments/`    | Uploaded images and files, stored under unique IDs to prevent filename collisions                                        |
+| `~/.tellrun/tellrun.service` | Linux background service definition                                                                                      |
+| `~/.tellrun/tellrun.plist`   | macOS background service definition                                                                                      |
+| `~/.tellrun/tellrun.log`     | macOS service diagnostics; view with `tellrun logs`                                                                      |
 
 ### Configuration parameters
 

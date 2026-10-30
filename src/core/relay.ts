@@ -51,21 +51,31 @@ export function createRelayService(options: {
       let controlQuery: (() => Promise<void>) | undefined;
       const reply = options.store.accept(message, (channel) => {
         const task = options.store.activeTask();
-        if (message.content.type === "permissions" || message.content.type === "model")
+        if (
+          message.content.type === "permissions" ||
+          message.content.type === "model"
+        )
           return options.store.chooseOption(channel.id, message.content);
         if (
           message.content.type === "interaction" ||
-          (message.content.type === "text" && message.content.replyToMessageId !== undefined)
+          (message.content.type === "text" &&
+            message.content.replyToMessageId !== undefined)
         ) {
-          const answer = options.store.answerInteraction(channel.id, message.content);
-          if (answer !== undefined || message.content.type === "interaction") return answer;
+          const answer = options.store.answerInteraction(
+            channel.id,
+            message.content,
+          );
+          if (answer !== undefined || message.content.type === "interaction")
+            return answer;
         }
         if (
           changingSession &&
           (message.content.type === "text" ||
             message.content.type === "attachments" ||
             (message.content.type === "command" &&
-              (["new", "switch", "list", "update"].includes(message.content.name) ||
+              (["new", "switch", "list", "update"].includes(
+                message.content.name,
+              ) ||
                 (message.content.name === "cwd" && message.content.args))))
         )
           return "Session change in progress. Wait for confirmation, then resend your message.";
@@ -73,15 +83,20 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — List sessions in the current project\n/switch <id> — Select a session by its full ID\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — List sessions in the current project\n/switch <id> — Select a session by its full ID\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.store.handleCron(channel.id, message.content.args);
             case "model":
-              if (message.content.args) return "Use /model to choose a model with the buttons.";
+              if (message.content.args)
+                return "Use /model to choose a model with the buttons.";
               options.store.openMenu(channel.id, "model");
               return;
             case "permissions":
-              options.store.openMenu(channel.id, "permissions", options.agent.permissionModes);
+              options.store.openMenu(
+                channel.id,
+                "permissions",
+                options.agent.permissionModes,
+              );
               return;
             case "status": {
               /** 查询期间保存请求时的选择，后续切换不会改写这次状态快照。 */
@@ -89,7 +104,10 @@ export function createRelayService(options: {
               controlQuery = async () => {
                 /** 未选择时读取有效配置；读取失败仅回退到明确保存的模型与档位。 */
                 const describe = async (
-                  selection: Pick<typeof snapshot, "cwd" | "model" | "reasoningEffort">,
+                  selection: Pick<
+                    typeof snapshot,
+                    "cwd" | "model" | "reasoningEffort"
+                  >,
                 ) => {
                   try {
                     return await options.agent.describeModel(
@@ -147,25 +165,32 @@ export function createRelayService(options: {
             }
             case "update":
               if (message.content.args) return "Use /update without arguments.";
-              if (task) return "Wait for the current task to finish, then send /update.";
+              if (task)
+                return "Wait for the current task to finish, then send /update.";
               if (channel.paused) return "Paused. Send /resume before /update.";
               /** 复用普通任务的快照、去重、审批和恢复流程，不向执行中的任务追加升级指令。 */
-              options.store.createTask(channel, options.updates.upgradePrompt());
+              options.store.createTask(
+                channel,
+                options.updates.upgradePrompt(),
+              );
               return `Tellrun update queued for ${options.agent.name}.`;
             case "cwd": {
               if (!message.content.args)
                 return `Directory: ${channel.cwd}\nUse /cwd /absolute/path to change directory and start a new session.`;
-              if (task) return "Wait for the task to finish, or use /stop first.";
+              if (task)
+                return "Wait for the task to finish, or use /stop first.";
               if (!isAbsolute(message.content.args))
                 return "Use an absolute path: /cwd /path/to/project.";
               let cwd: string;
               try {
                 cwd = realpathSync(message.content.args);
-                if (!statSync(cwd).isDirectory()) return "Path is not a directory.";
+                if (!statSync(cwd).isDirectory())
+                  return "Path is not a directory.";
               } catch {
                 return "Cannot access directory. Check the path and permissions.";
               }
-              if (cwd !== channel.cwd) options.store.setSession(channel.id, cwd, null);
+              if (cwd !== channel.cwd)
+                options.store.setSession(channel.id, cwd, null);
               return `Directory: ${cwd}\n${channel.paused ? "Paused. Send /resume to continue." : "Send a task to Codex."}`;
             }
             case "list": {
@@ -174,10 +199,16 @@ export function createRelayService(options: {
               controlQuery = async () => {
                 let sessions: AgentOption[];
                 try {
-                  sessions = await options.agent.listSessions(snapshot.cwd, modelLoading.signal);
+                  sessions = await options.agent.listSessions(
+                    snapshot.cwd,
+                    modelLoading.signal,
+                  );
                 } catch {
                   if (!stopping)
-                    options.store.reply(snapshot.id, "Cannot load sessions. Try /list again.");
+                    options.store.reply(
+                      snapshot.id,
+                      "Cannot load sessions. Try /list again.",
+                    );
                   return;
                 }
                 if (!stopping)
@@ -199,7 +230,8 @@ export function createRelayService(options: {
             }
             case "new":
             case "switch": {
-              if (task) return "Wait for the task to finish, or use /stop first.";
+              if (task)
+                return "Wait for the task to finish, or use /stop first.";
               const { name, args } = message.content;
               if (name === "switch" && (!args || /\s/u.test(args)))
                 return "Use /switch <full session ID>. Find the ID with /list.";
@@ -220,12 +252,17 @@ export function createRelayService(options: {
                             },
                             modelLoading.signal,
                           )
-                        : await options.agent.readSession(snapshot.cwd, args, modelLoading.signal);
+                        : await options.agent.readSession(
+                            snapshot.cwd,
+                            args,
+                            modelLoading.signal,
+                          );
                   } catch (error) {
                     if (!stopping)
                       options.store.reply(
                         snapshot.id,
-                        error instanceof Error && error.message.startsWith("Codex ")
+                        error instanceof Error &&
+                          error.message.startsWith("Codex ")
                           ? error.message
                           : "Cannot change sessions. Current session unchanged. Check /list before retrying.",
                       );
@@ -264,23 +301,36 @@ export function createRelayService(options: {
               return "Unknown command. See /help.";
           }
         }
-        if (message.content.type !== "text" && message.content.type !== "attachments")
+        if (
+          message.content.type !== "text" &&
+          message.content.type !== "attachments"
+        )
           return "Send text, a photo, or a file. See /help.";
-        if (channel.paused) return "Paused. Check /last, then /resume to send a new task.";
+        if (channel.paused)
+          return "Paused. Check /last, then /resume to send a new task.";
         const attachments =
-          message.content.type === "attachments" ? message.content.attachments : [];
+          message.content.type === "attachments"
+            ? message.content.attachments
+            : [];
         if (
           attachments.some(
-            (attachment) => attachment.size !== null && attachment.size > maxAttachmentBytes,
+            (attachment) =>
+              attachment.size !== null && attachment.size > maxAttachmentBytes,
           )
         )
           return "Attachment exceeds the 20 MB download limit. Send a smaller file.";
-        if (!message.content.text.trim() && !attachments.length) return "Send a task description.";
+        if (!message.content.text.trim() && !attachments.length)
+          return "Send a task description.";
         if (task) {
           if (task.channelId !== channel.id)
             return `Task #${task.id} is running in another chat. Message not sent.`;
-          if (task.status === "cancelling") return "Task stopping. Wait for its result.";
-          options.store.appendTaskInput(task.id, message.content.text, attachments);
+          if (task.status === "cancelling")
+            return "Task stopping. Wait for its result.";
+          options.store.appendTaskInput(
+            task.id,
+            message.content.text,
+            attachments,
+          );
           return;
         }
         options.store.createTask(channel, message.content.text, attachments);
@@ -289,17 +339,22 @@ export function createRelayService(options: {
       if (controlQuery) controlQueries.push(controlQuery);
       /** 只有选择和停止状态落盘后才影响运行时；回调答复不承担提交职责。 */
       if (
-        (message.content.type === "command" && message.content.name === "stop") ||
-        (message.content.type === "interaction" && message.content.action === "stop")
+        (message.content.type === "command" &&
+          message.content.name === "stop") ||
+        (message.content.type === "interaction" &&
+          message.content.action === "stop")
       ) {
         const active = options.store.activeTask();
-        if (!active || active.status === "cancelling") inputPreparation?.abort();
+        if (!active || active.status === "cancelling")
+          inputPreparation?.abort();
         if (active?.status === "cancelling") options.agent.stop();
       }
       return reply;
     },
     /** 模型、状态和会话请求不占用入站或任务循环，关停后丢弃迟到结果。 */
-    async loadModels(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+    async loadModels(
+      source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">,
+    ) {
       while (!stopping) {
         const query = controlQueries.shift();
         if (query) {
@@ -313,15 +368,21 @@ export function createRelayService(options: {
         }
         let models: AgentModel[] | undefined;
         try {
-          models = await options.agent.listModels(menu.cwd, modelLoading.signal);
+          models = await options.agent.listModels(
+            menu.cwd,
+            modelLoading.signal,
+          );
         } catch {
           /** 查询失败只提示重新打开菜单，不影响任务和已有选择。 */
         }
-        if (!stopping) options.store.fillModels(menu.channelId, menu.id, models);
+        if (!stopping)
+          options.store.fillModels(menu.channelId, menu.id, models);
       }
     },
     /** 调度独立于执行和菜单查询；启动先跳过离线时段，再按持久化时间触发。 */
-    async schedule(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+    async schedule(
+      source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">,
+    ) {
       if (stopping) return;
       options.store.recoverCrons(source);
       while (!stopping) {
@@ -330,7 +391,9 @@ export function createRelayService(options: {
       }
     },
     /** 领取任务后再次检查目录；运行结果与最终回复在同一个快照中保存。 */
-    async run(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+    async run(
+      source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">,
+    ) {
       while (!stopping) {
         const task = options.store.claimTask(source);
         if (!task) {
@@ -338,7 +401,10 @@ export function createRelayService(options: {
           continue;
         }
         try {
-          if (realpathSync(task.cwd) !== task.cwd || !statSync(task.cwd).isDirectory())
+          if (
+            realpathSync(task.cwd) !== task.cwd ||
+            !statSync(task.cwd).isDirectory()
+          )
             throw new Error("Directory changed.");
         } catch {
           options.store.finishTask(task.id, {
@@ -352,9 +418,16 @@ export function createRelayService(options: {
         let attachments: AgentAttachment[] = [];
         if (task.status === "preparing") {
           try {
-            attachments = await options.prepareAttachments(task.attachments, preparing.signal);
+            attachments = await options.prepareAttachments(
+              task.attachments,
+              preparing.signal,
+            );
             if (stopping) return;
-            if (preparing.signal.aborted || !options.store.markDispatching(task.id)) continue;
+            if (
+              preparing.signal.aborted ||
+              !options.store.markDispatching(task.id)
+            )
+              continue;
           } catch (error) {
             if (stopping) return;
             options.store.finishTask(task.id, {
@@ -385,11 +458,14 @@ export function createRelayService(options: {
             onSession: (id) => options.store.recordSession(task.id, id),
             onStarted: (runId) => {
               options.store.markRunning(task.id, runId);
-              if (options.store.activeTask()?.status === "cancelling") options.agent.stop();
+              if (options.store.activeTask()?.status === "cancelling")
+                options.agent.stop();
             },
             onText: (text) => options.store.setDraft(task.id, text),
-            onInteraction: (request) => options.store.addInteraction(task.id, request),
-            onInteractionClosed: (id, reason) => options.store.closeInteraction(id, reason),
+            onInteraction: (request) =>
+              options.store.addInteraction(task.id, request),
+            onInteractionClosed: (id, reason) =>
+              options.store.closeInteraction(id, reason),
           })
           .finally(() => {
             finished = true;
@@ -410,7 +486,8 @@ export function createRelayService(options: {
                 preparing.signal,
               );
               if (finished || stopping) return;
-              if (!options.store.markTaskInputSending(task.id, input.index)) continue;
+              if (!options.store.markTaskInputSending(task.id, input.index))
+                continue;
               await options.agent.steer(input.text, attachments);
             } catch (cause) {
               if (finished || stopping) return;
@@ -428,7 +505,10 @@ export function createRelayService(options: {
           while (!finished && !stopping) {
             const interaction = options.store.claimInteraction(task.id);
             if (interaction) {
-              const submitted = await options.agent.respond(interaction.id, interaction.answer);
+              const submitted = await options.agent.respond(
+                interaction.id,
+                interaction.answer,
+              );
               options.store.closeInteraction(
                 interaction.id,
                 submitted
