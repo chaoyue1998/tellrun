@@ -256,6 +256,13 @@ export function openStore(path = join(appDirectory, "state.json")) {
           return reply;
         });
       },
+      /** 独立只读查询完成后保存回复；写入失败交给工作循环触发关停。 */
+      reply(channelId: number, text: string) {
+        update(() => {
+          if (state.channels.some((channel) => channel.id === channelId))
+            enqueueReply(channelId, text);
+        });
+      },
       /** 成功拉取后才能回收已确认更新；空响应也说明服务端已无可重投记录。 */
       confirmUpdates(accountId: string, offset: number, empty: boolean) {
         const pending = state.inboundUpdates.filter((item) => {
@@ -508,6 +515,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
         )
           return "Request closed. Check /status.";
         if (content.type === "interaction" && content.action === "stop") {
+          /** 审批不再提供 Stop，旧审批按钮不能暂停聊天；提问仍可明确停止。 */
+          if (interaction.kind === "approval") return "Button expired. Use /stop to stop the task.";
           update(() => {
             const channel = state.channels.find((channel) => channel.id === channelId);
             if (channel) channel.paused = true;
@@ -518,14 +527,16 @@ export function openStore(path = join(appDirectory, "state.json")) {
         if (interaction.kind === "approval") {
           if (
             content.type !== "interaction" ||
-            (content.action !== "accept" && content.action !== "decline") ||
-            !interaction.choices.includes(content.action)
+            content.action !== "approval" ||
+            !Number.isInteger(content.optionIndex)
           )
             return "Use the approval buttons.";
+          const choice = interaction.choices[content.optionIndex ?? -1];
+          if (!choice) return "Invalid approval option.";
           update(() => {
             const current = state.interactions.find((item) => item.id === interaction.id);
             if (!current) return;
-            current.decision = content.action as "accept" | "decline";
+            current.decision = choice.id;
             current.status = "ready";
           });
           return "Saved. Submitting...";

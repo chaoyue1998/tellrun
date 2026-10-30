@@ -11,6 +11,22 @@ export const fileChangesSchema = z.array(
   }),
 );
 
+/** 只接受已知命令审批格式；规则内容必须来自当前请求，不能由按钮构造。 */
+const commandDecisionSchema = z.union([
+  z.enum(["accept", "acceptForSession", "decline", "cancel"]),
+  z.strictObject({
+    acceptWithExecpolicyAmendment: z.strictObject({
+      execpolicy_amendment: z.array(z.string()).min(1),
+    }),
+  }),
+]);
+
+/** 原生审批载荷只保留在当前 Codex 连接中；approved 用于提交前复核文件差异。 */
+export interface CodexApprovalResponse {
+  result: Record<string, unknown>;
+  approved: boolean;
+}
+
 /** 转换审批与提问请求；格式错误抛出异常，中断原因交给调用方应答并清理任务。 */
 export function parseCodexInteraction(
   method: string,
@@ -20,7 +36,7 @@ export function parseCodexInteraction(
 ):
   | {
       request: AgentInteraction;
-      permissions?: Record<string, unknown>;
+      approvals: Map<string, CodexApprovalResponse>;
       fileReview?: { itemId: string; changes: string };
     }
   | { error: string; unsupported?: true } {
@@ -30,11 +46,32 @@ export function parseCodexInteraction(
     text: "",
     expiresAt: Date.now() + 10 * 60_000,
     blocking: true,
-    choices: ["accept", "decline"],
+    choices: [],
     questions: [],
   };
-  let permissions: Record<string, unknown> | undefined;
+  const approvals = new Map<string, CodexApprovalResponse>();
   let fileReview: { itemId: string; changes: string } | undefined;
+  /** 展示选项与完整响应同步登记，核心层只传回选项标识。 */
+  function offer(id: string, label: string, result: Record<string, unknown>, approved: boolean) {
+    if (approvals.has(id)) return;
+    interaction.choices.push({ id, label });
+    approvals.set(id, { result, approved });
+  }
+  /** 原生取消直接回传 Codex，不转换为 Tellrun 的停止和暂停接收。 */
+  function offerDecision(decision: z.infer<typeof commandDecisionSchema>, index: number) {
+    if (typeof decision === "string") {
+      const labels = {
+        accept: "Allow once",
+        acceptForSession: "Allow for session",
+        decline: "Decline",
+        cancel: "Cancel",
+      };
+      offer(decision, labels[decision], { decision }, decision.startsWith("accept"));
+    } else {
+      interaction.text += `\nCommand rule ${index + 1}: ${JSON.stringify(decision.acceptWithExecpolicyAmendment.execpolicy_amendment)}`;
+      offer(`rule-${index}`, `Allow & remember rule ${index + 1}`, { decision }, true);
+    }
+  }
   if (method === "item/commandExecution/requestApproval") {
     const params = z
       .object({
@@ -46,14 +83,39 @@ export function parseCodexInteraction(
         networkApprovalContext: z.object({ host: z.string(), protocol: z.string() }).nullish(),
         additionalPermissions: z.unknown().optional(),
         availableDecisions: z.array(z.unknown()).nullish(),
+        proposedExecpolicyAmendment: z.array(z.string()).nullish(),
       })
       .parse(value);
     interaction.text = `${params.kind === "writeStdin" ? "Terminal input" : "Command"}\nDirectory: ${params.cwd ?? cwd}\n${params.command ?? "Command unavailable."}${params.reason ? `\nReason: ${params.reason}` : ""}${params.networkApprovalContext ? `\nNetwork: ${params.networkApprovalContext.protocol}://${params.networkApprovalContext.host}` : ""}${params.additionalPermissions ? `\nPermissions: ${JSON.stringify(params.additionalPermissions, null, 2)}` : ""}`;
-    interaction.choices = interaction.choices.filter(
-      (choice) =>
-        (params.availableDecisions == null || params.availableDecisions.includes(choice)) &&
-        (choice !== "accept" || !!params.command || !!params.networkApprovalContext),
-    );
+    /** 显式选项具有优先权；旧服务未返回列表时使用协议的基本决定与所提规则。 */
+    const decisions = params.availableDecisions ?? [
+      "accept",
+      "acceptForSession",
+      ...(params.proposedExecpolicyAmendment?.length
+        ? [
+            {
+              acceptWithExecpolicyAmendment: {
+                execpolicy_amendment: params.proposedExecpolicyAmendment,
+              },
+            },
+          ]
+        : []),
+      "decline",
+      "cancel",
+    ];
+    for (const [index, value] of decisions.entries()) {
+      const parsed = commandDecisionSchema.safeParse(value);
+      if (!parsed.success) continue;
+      const decision = parsed.data;
+      if (
+        decision !== "decline" &&
+        decision !== "cancel" &&
+        !params.command &&
+        !params.networkApprovalContext
+      )
+        continue;
+      offerDecision(decision, index);
+    }
   } else if (method === "item/fileChange/requestApproval") {
     const params = z
       .object({
@@ -65,8 +127,11 @@ export function parseCodexInteraction(
       .parse(value);
     const changes = fileChanges.get(params.itemId);
     if (changes?.length) fileReview = { itemId: params.itemId, changes: JSON.stringify(changes) };
-    interaction.text = `File changes\nDirectory: ${cwd}${params.reason ? `\nReason: ${params.reason}` : ""}${params.grantRoot ? `\nWrite access: ${params.grantRoot}` : ""}\n${changes?.length ? changes.map((change) => `${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}`).join("\n\n") : "Details unavailable. Decline or stop."}`;
-    if (!changes?.length) interaction.choices = ["decline"];
+    interaction.text = `File changes\nDirectory: ${cwd}${params.reason ? `\nReason: ${params.reason}` : ""}${params.grantRoot ? `\nWrite access: ${params.grantRoot}` : ""}\n${changes?.length ? changes.map((change) => `${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}`).join("\n\n") : "Details unavailable. Decline or cancel."}`;
+    for (const decision of ["accept", "acceptForSession", "decline", "cancel"] as const) {
+      if (!changes?.length && decision.startsWith("accept")) continue;
+      offerDecision(decision, interaction.choices.length);
+    }
   } else if (method === "item/permissions/requestApproval") {
     const params = z
       .object({
@@ -86,10 +151,13 @@ export function parseCodexInteraction(
         }),
       })
       .parse(value);
-    permissions = Object.fromEntries(
+    const permissions = Object.fromEntries(
       Object.entries(params.permissions).filter(([, value]) => value != null),
     );
-    interaction.text = `Permissions (this turn only)\nDirectory: ${params.cwd}${params.reason ? `\nReason: ${params.reason}` : ""}\n${JSON.stringify(permissions, null, 2)}`;
+    interaction.text = `Permissions\nDirectory: ${params.cwd}${params.reason ? `\nReason: ${params.reason}` : ""}\n${JSON.stringify(permissions, null, 2)}`;
+    offer("accept", "Allow this turn", { permissions, scope: "turn" }, true);
+    offer("acceptForSession", "Allow for session", { permissions, scope: "session" }, true);
+    offer("decline", "Decline", { permissions: {}, scope: "turn" }, false);
   } else if (method === "item/tool/requestUserInput") {
     const params = z
       .object({
@@ -137,9 +205,11 @@ export function parseCodexInteraction(
   }
   if (JSON.stringify(interaction).length > 64_000)
     return { error: "Request too large. Handle locally, then /resume." };
+  if (interaction.kind === "approval" && !interaction.choices.length)
+    return { error: "No supported approval options. Handle locally, then /resume." };
   return {
     request: interaction,
-    ...(permissions ? { permissions } : {}),
+    approvals,
     ...(fileReview ? { fileReview } : {}),
   };
 }

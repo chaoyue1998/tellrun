@@ -7,7 +7,11 @@ import { JSONRPCErrorException } from "json-rpc-2.0";
 import WebSocket from "ws";
 import { z } from "zod";
 import type { Agent, AgentInteraction, AgentModel, AgentResult } from "../core/types.js";
-import { fileChangesSchema, parseCodexInteraction } from "./codex-interaction.js";
+import {
+  type CodexApprovalResponse,
+  fileChangesSchema,
+  parseCodexInteraction,
+} from "./codex-interaction.js";
 import { type CodexMessage, createCodexRpc } from "./codex-rpc.js";
 
 /** 由 Codex 0.165.0 的 generate-ts 核对；只校验实际消费的协议字段。 */
@@ -119,63 +123,98 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     throw new Error("Codex daemon unavailable.");
   }
 
+  /** 模型菜单与状态共用只读连接；按需读取目录配置，不恢复会话或发起轮次。 */
+  async function readModelData(cwd: string, signal: AbortSignal, includeConfig = false) {
+    signal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
+    const rpc = createCodexRpc(await connectServer(cwd, signal));
+    /** 取消仅关闭目录查询，不能向正在运行的轮次发送中断。 */
+    const abort = () => rpc.close("Codex model query cancelled.");
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      signal.throwIfAborted();
+      await rpc.initialize();
+      const config = includeConfig
+        ? z
+            .object({
+              config: z.object({
+                model: z.string().min(1).nullish(),
+                model_reasoning_effort: z.string().min(1).nullish(),
+              }),
+            })
+            .parse(await rpc.request("config/read", { cwd, includeLayers: false })).config
+        : undefined;
+      const models: AgentModel[] = [];
+      let defaultModel: string | undefined;
+      let cursor: string | null = null;
+      do {
+        signal.throwIfAborted();
+        const page = z
+          .object({
+            data: z.array(
+              z.object({
+                model: z.string().min(1),
+                displayName: z.string(),
+                hidden: z.boolean(),
+                isDefault: z.boolean().optional(),
+                supportedReasoningEfforts: z.array(
+                  z.object({
+                    reasoningEffort: z.string().min(1),
+                    description: z.string(),
+                  }),
+                ),
+                defaultReasoningEffort: z.string().min(1),
+              }),
+            ),
+            nextCursor: z.string().nullable(),
+          })
+          .parse(
+            await rpc.request("model/list", { limit: 100, includeHidden: includeConfig, cursor }),
+          );
+        for (const model of page.data) {
+          if (model.isDefault) defaultModel = model.model;
+          if (
+            (includeConfig || !model.hidden) &&
+            !models.some((option) => option.id === model.model)
+          )
+            models.push({
+              id: model.model,
+              label: model.displayName || model.model,
+              reasoningEfforts: model.supportedReasoningEfforts.map((effort) => ({
+                id: effort.reasoningEffort,
+                label: effort.description,
+              })),
+              defaultReasoningEffort: model.defaultReasoningEffort,
+            });
+        }
+        cursor = page.nextCursor;
+      } while (cursor);
+      return { models, defaultModel, config };
+    } catch {
+      throw new Error("Codex model query failed. Check the local configuration and connection.");
+    } finally {
+      signal.removeEventListener("abort", abort);
+      rpc.close();
+    }
+  }
+
   return {
     name: "Codex",
     version: stdout.trim().replace(/^codex-cli /, ""),
     permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
-    /** 分页读取模型目录；不恢复会话、不发起轮次，也不影响任务连接。 */
     async listModels(cwd, signal) {
-      signal = AbortSignal.any([signal, AbortSignal.timeout(15_000)]);
-      const rpc = createCodexRpc(await connectServer(cwd, signal));
-      /** 取消仅关闭目录查询，不能向正在运行的轮次发送中断。 */
-      const abort = () => rpc.close("Codex model query cancelled.");
-      signal.addEventListener("abort", abort, { once: true });
-      try {
-        signal.throwIfAborted();
-        await rpc.initialize();
-        const models: AgentModel[] = [];
-        let cursor: string | null = null;
-        do {
-          signal.throwIfAborted();
-          const page = z
-            .object({
-              data: z.array(
-                z.object({
-                  model: z.string().min(1),
-                  displayName: z.string(),
-                  hidden: z.boolean(),
-                  supportedReasoningEfforts: z.array(
-                    z.object({
-                      reasoningEffort: z.string().min(1),
-                      description: z.string(),
-                    }),
-                  ),
-                  defaultReasoningEffort: z.string().min(1),
-                }),
-              ),
-              nextCursor: z.string().nullable(),
-            })
-            .parse(await rpc.request("model/list", { limit: 100, includeHidden: false, cursor }));
-          for (const model of page.data)
-            if (!model.hidden && !models.some((option) => option.id === model.model))
-              models.push({
-                id: model.model,
-                label: model.displayName || model.model,
-                reasoningEfforts: model.supportedReasoningEfforts.map((effort) => ({
-                  id: effort.reasoningEffort,
-                  label: effort.description,
-                })),
-                defaultReasoningEffort: model.defaultReasoningEffort,
-              });
-          cursor = page.nextCursor;
-        } while (cursor);
-        return models;
-      } catch {
-        throw new Error("Codex model query failed. Check the local configuration and connection.");
-      } finally {
-        signal.removeEventListener("abort", abort);
-        rpc.close();
-      }
+      return (await readModelData(cwd, signal)).models;
+    },
+    async describeModel(cwd, selection, signal) {
+      /** 已选模型可能已从菜单隐藏，状态仍需查询完整目录中的展示名称。 */
+      const { models, defaultModel, config } = await readModelData(cwd, signal, true);
+      const id = selection.model ?? config?.model ?? defaultModel;
+      const model = models.find((option) => option.id === id);
+      const reasoningEffort =
+        selection.reasoningEffort ??
+        config?.model_reasoning_effort ??
+        model?.defaultReasoningEffort;
+      if (!id || !reasoningEffort) throw new Error("Codex model settings unavailable.");
+      return { id, label: model?.label ?? id, reasoningEffort };
     },
     async run(input) {
       if (active) throw new Error("Codex is already running a task.");
@@ -209,7 +248,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           requestId: string | number;
           request: AgentInteraction;
           timer: ReturnType<typeof setTimeout>;
-          permissions?: Record<string, unknown>;
+          approvals: Map<string, CodexApprovalResponse>;
           fileReview?: { itemId: string; changes: string };
         }
       >();
@@ -222,6 +261,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       let runId: string | undefined;
       let dispatched = Boolean(input.runId);
       let settled = false;
+      /** 原生 Cancel 的已确认中断视为用户取消，不能误报异常并暂停聊天。 */
+      let cancelledByApproval = false;
       let stopTimer: ReturnType<typeof setTimeout> | undefined;
 
       /** 只接受第一个终态，避免退出事件覆盖已经确认的执行结果。 */
@@ -458,7 +499,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                     ? "completed"
                     : event.turn.status === "failed"
                       ? "failed"
-                      : controller.signal.aborted
+                      : controller.signal.aborted || cancelledByApproval
                         ? "cancelled"
                         : "interrupted",
                 text:
@@ -507,11 +548,12 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           interaction.request.expiresAt <= Date.now()
         )
           return false;
+        const approval =
+          "decision" in answer ? interaction.approvals.get(answer.decision) : undefined;
         if (interaction.request.kind === "approval") {
-          if (!("decision" in answer) || !interaction.request.choices.includes(answer.decision))
-            return false;
+          if (!("decision" in answer) || !approval) return false;
           if (
-            answer.decision === "accept" &&
+            approval.approved &&
             interaction.fileReview &&
             JSON.stringify(fileChanges.get(interaction.fileReview.itemId)) !==
               interaction.fileReview.changes
@@ -536,17 +578,10 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         /** 在写入前移除映射，失败也不重发批准；任务终态负责说明不确定结果。 */
         interactions.delete(id);
         clearTimeout(interaction.timer);
+        if (approval?.result.decision === "cancel") cancelledByApproval = true;
         rpc.write({
           id: interaction.requestId,
-          result: interaction.permissions
-            ? {
-                permissions:
-                  "decision" in answer && answer.decision === "accept"
-                    ? interaction.permissions
-                    : {},
-                scope: "turn",
-              }
-            : answer,
+          result: approval ? approval.result : answer,
         });
         return !settled;
       };

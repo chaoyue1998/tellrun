@@ -13,7 +13,7 @@ const id = z.number().int().positive();
 /** 重试次数和时间均为非负整数。 */
 const nonnegativeInteger = z.number().int().nonnegative();
 
-/** 权限、模型和推理档位共用展示选项。 */
+/** 审批、权限、模型和推理档位共用展示选项。 */
 const optionSchema = z.strictObject({ id: z.string().min(1), label: z.string() });
 
 /** 菜单共用有效期和消息清理记录，模型菜单扩展第二步所需的信息。 */
@@ -133,7 +133,16 @@ export const stateSchema = z
           text: z.string(),
           expiresAt: nonnegativeInteger,
           blocking: z.boolean(),
-          choices: z.array(z.enum(["accept", "decline"])),
+          /** 兼容旧审批快照；恢复流程仍会作废旧按钮，不重放批准。 */
+          choices: z.array(
+            z.union([
+              optionSchema,
+              z.enum(["accept", "decline"]).transform((id) => ({
+                id,
+                label: id === "accept" ? "Allow once" : "Decline",
+              })),
+            ]),
+          ),
           questions: z.array(
             z.strictObject({
               id: z.string(),
@@ -144,7 +153,7 @@ export const stateSchema = z
               answer: z.string().nullable(),
             }),
           ),
-          decision: z.enum(["accept", "decline"]).nullable(),
+          decision: z.string().min(1).nullable(),
           status: z.enum(["pending", "ready", "sending", "closed"]),
           resolution: z.string().nullable(),
           messages: z.array(

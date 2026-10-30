@@ -9,6 +9,8 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
   let stopping = false;
   /** 菜单查询独立于任务，关停时取消查询并等待退出后再关闭存储。 */
   const modelLoading = new AbortController();
+  /** 状态的模型查询复用独立工作循环，不阻塞入站审批和停止指令。 */
+  const statusQueries: (() => Promise<void>)[] = [];
   /** 状态查询与历史结果共用面向用户的状态名称。 */
   const statuses = {
     queued: "Queued",
@@ -26,6 +28,7 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
     /** 返回前保存消息和必要回复；重复事件直接忽略，不重新执行控制或任务。 */
     async handleMessage(message: IncomingMessage) {
       if (stopping) throw new Error("Service stopping. Message not accepted.");
+      let statusQuery: (() => Promise<void>) | undefined;
       const reply = options.store.accept(message, (channel) => {
         /** 未指定目录时沿用服务启动目录，并随消息一同保存，后续可用 /cwd 切换。 */
         if (!channel.cwd) options.store.setSession(channel.id, realpathSync(process.cwd()));
@@ -51,9 +54,58 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
             case "permissions":
               options.store.openMenu(channel.id, "permissions", options.agent.permissionModes);
               return;
-            case "status":
-              /** 模型展示当前选择，与任务快照不同时分别显示；空值沿用 Agent 默认配置。 */
-              return `Service: connected\n${options.agent.name}: ${options.agent.version}\nDirectory: ${channel.cwd}\nModel: ${channel.model ?? "Default"}${task && task.model !== channel.model ? `\nTask model: ${task.model ?? "Default"}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === channel.permissionMode)?.label ?? channel.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== channel.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}`;
+            case "status": {
+              /** 查询期间保存请求时的选择，后续切换不会改写这次状态快照。 */
+              const snapshot = structuredClone(channel);
+              statusQuery = async () => {
+                /** 未选择时读取有效配置；读取失败仅回退到明确保存的模型与档位。 */
+                const describe = async (
+                  selection: Pick<typeof snapshot, "cwd" | "model" | "reasoningEffort">,
+                ) => {
+                  try {
+                    return await options.agent.describeModel(
+                      selection.cwd ?? process.cwd(),
+                      selection,
+                      modelLoading.signal,
+                    );
+                  } catch {
+                    return selection.model && selection.reasoningEffort
+                      ? {
+                          id: selection.model,
+                          label: selection.model,
+                          reasoningEffort: selection.reasoningEffort,
+                        }
+                      : undefined;
+                  }
+                };
+                const taskDiffers =
+                  task &&
+                  (task.model !== snapshot.model ||
+                    task.reasoningEffort !== snapshot.reasoningEffort ||
+                    task.cwd !== snapshot.cwd);
+                const [model, taskModel] = await Promise.all([
+                  describe(snapshot),
+                  taskDiffers ? describe(task) : undefined,
+                ]);
+                if (stopping) return;
+                /** 同一模型的不同推理档位也需要区分当前选择与执行中的任务。 */
+                const showTaskModel =
+                  taskDiffers &&
+                  (!model ||
+                    !taskModel ||
+                    model.id !== taskModel.id ||
+                    model.reasoningEffort !== taskModel.reasoningEffort);
+                const formatModel = (value: typeof model) =>
+                  value
+                    ? `${value.label} · ${value.reasoningEffort}`
+                    : "Unavailable (check /model)";
+                options.store.reply(
+                  snapshot.id,
+                  `Service: connected\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}`,
+                );
+              };
+              return;
+            }
             case "cwd": {
               if (!message.content.args)
                 return `Directory: ${channel.cwd}\nUse /cwd /absolute/path to change directory and start a new session.`;
@@ -106,6 +158,8 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
         }
         options.store.createTask(channel, message.content.text);
       });
+      /** 只有入站去重记录保存成功后才查询；重复的 /status 不会重复入队。 */
+      if (statusQuery) statusQueries.push(statusQuery);
       /** 只有选择和停止状态落盘后才影响运行时；回调答复不承担提交职责。 */
       if (
         ((message.content.type === "command" && message.content.name === "stop") ||
@@ -118,6 +172,11 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
     /** 慢模型列表请求不占用入站或任务循环；迟到结果由菜单 ID 校验丢弃。 */
     async loadModels(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       while (!stopping) {
+        const query = statusQueries.shift();
+        if (query) {
+          await query();
+          continue;
+        }
         const menu = options.store.pendingModels(source);
         if (!menu) {
           await setTimeout(100);

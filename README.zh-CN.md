@@ -64,7 +64,9 @@ tellrun setup
 
 切换目录或新建会话前，需要等待当前任务结束。使用 `/stop` 后，先检查最终状态，再发送 `/resume` 和新的任务内容。
 
-`/status` 的 `Model` 显示当前选择的模型，未选择时显示 `Default`，表示沿用 Codex 配置。执行中的任务使用不同模型时，额外显示 `Task model`。
+`/status` 的 `Model` 按模型名称与推理档位显示，例如 `GPT-6-Sol · xhigh`。未手动选择时读取当前目录的 Codex 配置；执行中的任务使用不同模型或推理档位时，额外显示 `Task model`。无法读取且没有完整选择记录时显示 `Unavailable (check /model)`。
+
+审批按钮按 Codex 请求提供本次允许、会话内允许、记住命令规则、拒绝或取消；记住规则前会展示具体命令前缀。权限请求可选择本轮或整个会话。审批卡片不提供 Stop，Cancel 直接交给 Codex 处理，不暂停聊天；需要停止任务并暂停接收时使用 `/stop`。
 
 `/permissions` 提供与 Codex CLI 0.165.0 对应的四种模式：Ask for approval（默认，额外权限由你审批）、Approve for me（由 Codex 自动审查）、Full Access（不使用 Codex 沙箱和执行审批）、Read Only（只读，修改或联网时请求审批）。Full Access 仍受系统用户权限约束。
 

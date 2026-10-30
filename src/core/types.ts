@@ -17,7 +17,7 @@ export interface IncomingMessage {
     | {
         type: "interaction";
         id: string;
-        action: "accept" | "decline" | "stop" | "option";
+        action: "approval" | "stop" | "option";
         messageId: number;
         questionIndex?: number;
         optionIndex?: number;
@@ -38,7 +38,8 @@ export interface AgentInteraction {
   text: string;
   expiresAt: number;
   blocking: boolean;
-  choices: ("accept" | "decline")[];
+  /** 审批选项由 Agent 提供；索引只在当前交互内有效。 */
+  choices: AgentOption[];
   questions: {
     id: string;
     header: string;
@@ -50,7 +51,7 @@ export interface AgentInteraction {
 
 /** 审批决定与按问题 ID 收集的答案分别映射到运行时协议。 */
 export type InteractionAnswer =
-  | { decision: "accept" | "decline" }
+  | { decision: string }
   | { answers: Record<string, { answers: string[] }> };
 
 /** 模型与权限菜单共用选项；核心层与 IM 只处理标识和展示信息。 */
@@ -65,6 +66,12 @@ export interface AgentModel extends AgentOption {
   defaultReasoningEffort: string;
 }
 
+/** 空值表示沿用 Agent 配置；解析后返回实际模型名称和推理强度。 */
+export interface AgentModelSelection {
+  model: string | null;
+  reasoningEffort: string | null;
+}
+
 /** Agent 适配层暴露任务、会话与菜单选项，不向核心层泄露 RPC 类型。 */
 export interface Agent {
   name: string;
@@ -73,6 +80,12 @@ export interface Agent {
   permissionModes: readonly AgentOption[];
   /** 只读取可选模型，不创建会话；独立连接避免影响正在执行的任务。 */
   listModels(cwd: string, signal: AbortSignal): Promise<AgentModel[]>;
+  /** 只读查询目录下的有效选择，不创建会话或提交任务。 */
+  describeModel(
+    cwd: string,
+    selection: AgentModelSelection,
+    signal: AbortSignal,
+  ): Promise<AgentOption & { reasoningEffort: string }>;
   run(input: {
     cwd: string;
     prompt: string;
