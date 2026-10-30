@@ -3,6 +3,7 @@ import { z } from "zod";
 /** 存储操作与状态校验共用的未结束任务状态。 */
 export const activeTaskStatuses = new Set<string>([
   "queued",
+  "preparing",
   "dispatching",
   "running",
   "cancelling",
@@ -12,6 +13,19 @@ export const activeTaskStatuses = new Set<string>([
 const id = z.number().int().positive();
 /** 重试次数和时间均为非负整数。 */
 const nonnegativeInteger = z.number().int().nonnegative();
+
+/** 附件引用不含凭据；旧任务没有附件时按空数组读取。 */
+const attachmentsSchema = z
+  .array(
+    z.strictObject({
+      id: z.uuid(),
+      fileId: z.string().min(1),
+      name: z.string(),
+      kind: z.enum(["image", "file"]),
+      size: nonnegativeInteger.nullable(),
+    }),
+  )
+  .default([]);
 
 /** 审批、权限、模型和推理档位共用展示选项。 */
 const optionSchema = z.strictObject({ id: z.string().min(1), label: z.string() });
@@ -98,6 +112,7 @@ export const stateSchema = z
         /** 旧任务没有轮次 ID，仍按结果不确定处理，不能猜测或重跑。 */
         runId: z.string().min(1).nullable().default(null),
         prompt: z.string(),
+        attachments: attachmentsSchema,
         permissionMode: z.string().min(1).nullable().default(null),
         model: z.string().min(1).nullable().default(null),
         reasoningEffort: z.string().min(1).nullable().default(null),
@@ -106,12 +121,14 @@ export const stateSchema = z
           .array(
             z.strictObject({
               text: z.string(),
-              status: z.enum(["pending", "sending", "accepted", "failed"]),
+              attachments: attachmentsSchema,
+              status: z.enum(["pending", "preparing", "sending", "accepted", "failed"]),
             }),
           )
           .default([]),
         status: z.enum([
           "queued",
+          "preparing",
           "dispatching",
           "running",
           "cancelling",

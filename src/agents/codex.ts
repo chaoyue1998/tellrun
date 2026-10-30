@@ -7,6 +7,7 @@ import { JSONRPCErrorException } from "json-rpc-2.0";
 import WebSocket from "ws";
 import { z } from "zod";
 import type { Agent, AgentInteraction, AgentModel, AgentResult } from "../core/types.js";
+import { createCodexInput } from "./codex-input.js";
 import {
   type CodexApprovalResponse,
   fileChangesSchema,
@@ -548,14 +549,14 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
       const rpc = createCodexRpc(socket, { onMessage, onFailure: fail, onClose });
 
-      steer = async (prompt) => {
+      steer = async (prompt, attachments) => {
         if (!sessionId || !runId || settled || controller.signal.aborted)
           throw new Error("Codex turn is not running. Input not sent; try again later.");
         const response = z.object({ turnId: z.string() }).parse(
           await request("turn/steer", {
             threadId: sessionId,
             expectedTurnId: runId,
-            input: [{ type: "text", text: prompt, text_elements: [] }],
+            input: createCodexInput(prompt, attachments),
           }),
         );
         if (response.turnId !== runId) {
@@ -733,7 +734,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         const started = await Promise.race([
           request("turn/start", {
             threadId: sessionId,
-            input: [{ type: "text", text: input.prompt, text_elements: [] }],
+            input: createCodexInput(input.prompt, input.attachments),
             ...(input.model ? { model: input.model } : {}),
             ...(input.reasoningEffort ? { effort: input.reasoningEffort } : {}),
           }),
@@ -771,12 +772,12 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       return respond?.(id, answer) ?? false;
     },
     /** 复用当前连接提交补充消息，由 expectedTurnId 防止误入其他轮次。 */
-    steer(prompt) {
+    steer(prompt, attachments) {
       if (!steer)
         return Promise.reject(
           new Error("Codex has no active turn. Input not sent; resend to continue."),
         );
-      return steer(prompt);
+      return steer(prompt, attachments);
     },
     /** 服务退出只断开客户端，保留 Codex daemon 和当前任务。 */
     disconnect() {

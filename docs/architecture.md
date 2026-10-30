@@ -147,9 +147,9 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 3. 状态文件保存后结束入站处理，把耗时执行交给 Worker；不能在 Bot handler 中等待整个 Codex turn。
 
-4. Worker 先将 queued 任务保存为 dispatching，读取该任务在接收时已经固定的会话和工作目录快照。
+4. Worker 读取任务在接收时固定的会话与工作目录快照；带附件的任务先保存为 preparing，下载完成后再保存为 dispatching。纯文本任务直接从 queued 进入 dispatching。
 
-5. 创建或恢复 Codex thread，保存 threadId 后发送 turn/start；turnId 仅保留在当前进程内，用于事件关联和中断。
+5. 创建或恢复 Codex thread，保存 threadId 后发送 turn/start；取得 turnId 后持久化保存，用于事件关联、中断和重启恢复。
 
 6. item/agentMessage/delta 按 itemId 累积回复文本，只消费当前 threadId 和 turnId；item/completed 的完整文本覆盖累积内容。过程说明、最终回复和文件变更按首次出现顺序汇总，文件差异采用最新事件内容并展示操作状态。通过 onText 将完整预览放入内存，不等待 Telegram API。结束后保存全文并分段发送；异常结束也保留已收到的输出和终止原因。
 
@@ -166,6 +166,10 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 未指定目录的会话默认使用 Tellrun 服务启动目录，规范化真实路径后随消息一起保存，用户可直接发送任务；systemd 和 launchd 服务的启动目录均为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录或 `/new`，目录变化会开始新会话。后续多会话模型再引入独立 conversation_id，不增加目录白名单。
 
 当前全局最多一个未结束任务，由单实例写入与状态校验约束。同一聊天的新文本直接补充到当前任务：queued 时合并首条输入；dispatching 时持久化保存；running 时通过独立输入循环调用 turn/steer，每 50 毫秒检查一次。补充输入按接收顺序提交，只等待各条 RPC 确认，不等待当前任务结束，也不阻塞入站控制命令。不同聊天和正在停止的任务不能追加输入。独立任务队列留到后续；未来开启并行时，必须增加按可写工作区的互斥。
+
+图片和文件使用同一输入流程。Telegram 连接器只提取最大尺寸照片或 document 的文件 ID、原始名称、声明大小和随机附件 ID，与 caption 一起持久化；不在入站处理中下载。附件说明不作为审批或结构化问题的答案。queued 阶段合并附件与文字，preparing 或 dispatching 阶段的新消息保存到 inputs，running 阶段按接收顺序准备并提交补充输入。
+
+附件准备复用 Telegram 连接的代理，通过 getFile 获取临时下载路径；链接和 Token 不进入任务状态、Agent 输入或日志。下载总时限为 60 秒，声明大小、响应长度和实际流量均受 20 MB 上限约束。文件名移除路径与控制字符，每个附件写入独立目录下的文件；完整下载刷盘后才公开路径，失败或取消时删除未完成文件。常见图片按文件头识别，通过 localImage 传入 turn/start 或 turn/steer；其他文件以本地路径连同说明提供给 Codex。任务结束会取消尚未完成的补充附件准备，避免迟到下载提交到下一任务。[Codex 图片输入](https://learn.chatgpt.com/docs/app-server#turns)、[Telegram 文件下载](https://core.telegram.org/bots/api#getfile)
 
 ## 会话与数据模型
 
@@ -186,6 +190,8 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 启动时校验 JSON 结构、标识唯一性、关联关系与活动任务数量；无效文件直接报错，不覆盖为空状态。每次业务写入时回收多余终态任务和无关联的关闭交互。`/last` 优先展示最近已结束任务，即使下一任务仍在运行；没有结果时展示当前任务。空闲查询不写文件，每次变更保存整份状态。未完成的发送及其关联仍需保留，持续网络故障期间 outbox 可以增长。
 
 任务历史和完整 Agent 上下文继续由 Codex 管理。Tellrun 不另存任务或审批日志，也不重复保存思考过程、流式文本、工具原始输出或 RPC 等待状态；交互详情仅在处理和消息清理期间保留。旧状态文件缺少 interactions 时按空数组读取；多会话模型留到对应功能接入时增加。
+
+任务及 inputs 增加 attachments 引用，旧状态缺少该字段时默认空数组。附件正文存放于 `~/.tellrun/attachments/<附件 ID>/`，状态只保存下载引用；成功文件可在重启后复用，也供后续对话读取。历史任务回收不删除用户上传的文件，附件由用户按需清理。
 
 ## Codex 协议与生命周期
 
@@ -256,6 +262,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 | 状态        | 含义及允许的后续动作                                         |
 | ----------- | ------------------------------------------------------------ |
 | queued      | 已持久化，尚未向 Codex 派发；可取消或等待领取                |
+| preparing   | 正在下载附件，尚未向 Codex 派发；可取消或在重启后重新准备 |
 | dispatching | 即将或已经发送启动请求，执行结果仍可能不确定                 |
 | running     | 已确认执行中                                                 |
 | cancelling  | 已发起停止，尚未确认终止                                     |
@@ -264,7 +271,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 | cancelled   | 排队任务被取消，或用户停止后收到确定的中断终态               |
 | interrupted | 连接或进程故障导致执行状态无法确认                           |
 
-普通路径为 queued → dispatching → running → completed / failed。等待交互时任务仍保存为 running，由关联交互的 kind、blocking 和状态推导等待语义，/status 展示待审批或待回答。存在阻塞交互时暂停输入提示和草稿；非阻塞问题不影响执行。终态记录不可被迟到事件覆盖。
+普通路径为 queued → dispatching → running → completed / failed，带附件时在 queued 与 dispatching 之间增加 preparing。/status 在 preparing 阶段显示正在下载附件；/stop 可直接取消尚未派发的任务。等待交互时任务仍保存为 running，由关联交互的 kind、blocking 和状态推导等待语义，/status 展示待审批或待回答。存在阻塞交互时暂停输入提示和草稿；非阻塞问题不影响执行。终态记录不可被迟到事件覆盖。
 
 停止操作把当前聊天的 paused 设为 true，先保存停止状态并作废其待处理按钮，再请求中断活动 turn。收到实际终态后再更新界面。无法确认退出时，清理本连接或受管理进程组并记录 interrupted；检查项目与本机进程后由用户恢复接收。
 
@@ -276,7 +283,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 尤其在“Codex 已收到 turn/start，但 Tellrun 尚未收到响应”这一窗口崩溃时，必须保留不确定状态，不能因为没拿到响应就自动重发。持久化的 dispatching 状态与空 runId 用于识别这种情况；只有已保存的轮次 ID 才能自动恢复跟踪。
 
-补充输入保存在任务的 inputs 中，旧状态文件缺少该字段时默认为空数组。与入站事件一起保存 pending，发送前先保存 sending，收到接收确认后保存 accepted，失败保存 failed 并提示。重启或任务结束时，对仍为 pending 或 sending 的输入分别提示尚未提交或结果待确认，不自动重放；成功补充不生成固定回执。补充请求被拒绝不改变原任务结果，通信故障仍按连接中断处理。
+补充输入保存在任务的 inputs 中，旧状态文件缺少该字段时默认为空数组。与入站事件一起保存 pending，领取后保存 preparing 并准备附件，再核实任务仍在 running，保存 sending 后才提交；收到接收确认后保存 accepted，失败保存 failed 并提示。重启时，主任务的 preparing 恢复为 queued，补充输入的 preparing 恢复为 pending；sending 仍标记结果不确定并拒绝重放。任务结束时，pending 和 preparing 提示尚未提交，sending 提示结果待确认；成功补充不生成固定回执。补充请求被拒绝不改变原任务结果，通信故障仍按连接中断处理。
 
 ## Telegram 输出与故障恢复
 

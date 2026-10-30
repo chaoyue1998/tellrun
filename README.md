@@ -13,6 +13,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 ## Features
 
 - **Remote coding**: send tasks in a private Telegram chat and let Codex execute them on your server.
+- **Images and files**: send screenshots, photos, or files with task instructions, including while a task is running.
 - **Continuous conversations**: keep the current conversation context, select a project with `/cwd`, and start fresh with `/new`.
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
@@ -44,6 +45,14 @@ Help me understand this project. Explain its main modules and how to run it.
 ```
 
 Without `/cwd`, the working directory defaults to the directory where the service starts. Background services start in the current user's home directory. Changing directories starts a new conversation.
+
+### Send images and files
+
+Send a photo, screenshot, or document using Telegram's attachment menu. Add a caption such as "Fix the layout shown in this screenshot" or "Read this file and explain the error." You can also send an attachment first and follow up with text. Without a caption, Codex uses the conversation context and asks what to do if the task is unclear.
+
+JPEG, PNG, WebP, and GIF images are passed to Codex as visual input, including images uploaded as documents. Other files are downloaded and passed as local paths for Codex to read; support for particular document formats depends on the tools available on your server. Each attachment is limited to 20 MB, matching the [Telegram download limit](https://core.telegram.org/bots/api#getfile).
+
+Downloads do not block `/status` or `/stop`. Duplicate messages do not submit work twice. Downloads that have not been submitted to Codex can resume after a restart; inputs with unconfirmed submission results are not replayed. Attachments and captions sent during a task are added to that task.
 
 ## Telegram commands
 
@@ -99,6 +108,7 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                                                             |
 | `~/.tellrun/state.json`      | Current conversation, directory, active task, latest result, pending interactions and replies, and unconfirmed update IDs |
+| `~/.tellrun/attachments/`   | Uploaded images and files, stored under unique IDs to prevent filename collisions |
 | `~/.tellrun/tellrun.service` | Linux background service definition                                                                                       |
 | `~/.tellrun/tellrun.plist`   | macOS background service definition                                                                                       |
 | `~/.tellrun/tellrun.log`     | macOS service diagnostics; view with `tellrun logs`                                                                       |
@@ -106,6 +116,8 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 Codex uses the same operating system user's authentication and model configuration, and manages its own full conversation history. Tellrun does not maintain a project directory allowlist. Access depends on operating system permissions and the Codex sandbox; Tellrun defaults to workspace write access and approvals on request.
 
 Tellrun keeps only active tasks and each chat's latest result for `/last`. Confirmed update IDs and closed interactions are removed once they are no longer needed; pending replies remain until sent or permanently rejected. Task history stays with Codex; Tellrun logs only service startup, shutdown, and connection or storage diagnostics.
+
+Uploaded attachments remain available for later messages and are not deleted when a task finishes. Once a conversation no longer needs them, you can manually remove its attachment directories under `~/.tellrun/attachments/`; deleted files must be uploaded again if needed. Incomplete download files are removed after failure or cancellation.
 
 ### Configuration parameters
 

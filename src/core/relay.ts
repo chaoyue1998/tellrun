@@ -1,17 +1,28 @@
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout } from "node:timers/promises";
+import { AttachmentError, maxAttachmentBytes } from "../storage/attachments.js";
 import type { Store } from "../storage/store.js";
 import type { UpdateChecker } from "../updates.js";
-import type { Agent, AgentModel, ChannelIdentity, IncomingMessage } from "./types.js";
+import type {
+  Agent,
+  AgentAttachment,
+  AgentModel,
+  AttachmentLoader,
+  ChannelIdentity,
+  IncomingMessage,
+} from "./types.js";
 
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
 export function createRelayService(options: {
   store: Store;
   agent: Agent;
   updates: UpdateChecker;
+  prepareAttachments: AttachmentLoader;
 }) {
   let stopping = false;
+  /** 当前任务的附件准备可独立取消，不能阻塞停止指令或拖住服务退出。 */
+  let inputPreparation: AbortController | undefined;
   /** 菜单查询独立于任务，关停时取消查询并等待退出后再关闭存储。 */
   const modelLoading = new AbortController();
   /** 状态的模型与版本查询复用独立工作循环，不阻塞入站审批和停止指令。 */
@@ -19,6 +30,7 @@ export function createRelayService(options: {
   /** 状态查询与历史结果共用面向用户的状态名称。 */
   const statuses = {
     queued: "Queued",
+    preparing: "Downloading attachments",
     dispatching: "Connecting",
     running: "Running",
     cancelling: "Stopping",
@@ -51,7 +63,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
             case "model":
               if (message.content.args) return "Use /model to choose a model with the buttons.";
               options.store.openMenu(channel.id, "model");
@@ -168,27 +180,38 @@ export function createRelayService(options: {
               return "Unknown command. See /help.";
           }
         }
-        if (message.content.type !== "text") return "Text messages only. See /help.";
+        if (message.content.type !== "text" && message.content.type !== "attachments")
+          return "Send text, a photo, or a file. See /help.";
         if (channel.paused) return "Paused. Check /last, then /resume to send a new task.";
-        if (!message.content.text.trim()) return "Send a task description.";
+        const attachments =
+          message.content.type === "attachments" ? message.content.attachments : [];
+        if (
+          attachments.some(
+            (attachment) => attachment.size !== null && attachment.size > maxAttachmentBytes,
+          )
+        )
+          return "Attachment exceeds the 20 MB download limit. Send a smaller file.";
+        if (!message.content.text.trim() && !attachments.length) return "Send a task description.";
         if (task) {
           if (task.channelId !== channel.id)
             return `Task #${task.id} is running in another chat. Message not sent.`;
           if (task.status === "cancelling") return "Task stopping. Wait for its result.";
-          options.store.appendTaskInput(task.id, message.content.text);
+          options.store.appendTaskInput(task.id, message.content.text, attachments);
           return;
         }
-        options.store.createTask(channel, message.content.text);
+        options.store.createTask(channel, message.content.text, attachments);
       });
       /** 只有入站去重记录保存成功后才查询；重复的 /status 不会重复入队。 */
       if (statusQuery) statusQueries.push(statusQuery);
       /** 只有选择和停止状态落盘后才影响运行时；回调答复不承担提交职责。 */
       if (
-        ((message.content.type === "command" && message.content.name === "stop") ||
-          (message.content.type === "interaction" && message.content.action === "stop")) &&
-        options.store.activeTask()?.status === "cancelling"
-      )
-        options.agent.stop();
+        (message.content.type === "command" && message.content.name === "stop") ||
+        (message.content.type === "interaction" && message.content.action === "stop")
+      ) {
+        const active = options.store.activeTask();
+        if (!active || active.status === "cancelling") inputPreparation?.abort();
+        if (active?.status === "cancelling") options.agent.stop();
+      }
       return reply;
     },
     /** 慢模型列表请求不占用入站或任务循环；迟到结果由菜单 ID 校验丢弃。 */
@@ -231,11 +254,36 @@ export function createRelayService(options: {
           });
           continue;
         }
+        const preparing = new AbortController();
+        inputPreparation = preparing;
+        let attachments: AgentAttachment[] = [];
+        if (task.status === "preparing") {
+          try {
+            attachments = await options.prepareAttachments(task.attachments, preparing.signal);
+            if (stopping) return;
+            if (preparing.signal.aborted || !options.store.markDispatching(task.id)) continue;
+          } catch (error) {
+            if (stopping) return;
+            options.store.finishTask(task.id, {
+              status: preparing.signal.aborted ? "cancelled" : "failed",
+              text: preparing.signal.aborted
+                ? "Stopped before starting."
+                : error instanceof AttachmentError
+                  ? error.message
+                  : "Cannot prepare attachments. Resend them to try again.",
+            });
+            continue;
+          } finally {
+            if (inputPreparation === preparing) inputPreparation = undefined;
+          }
+        }
+        inputPreparation = preparing;
         let finished = false;
         const running = options.agent
           .run({
             cwd: task.cwd,
             prompt: task.prompt,
+            attachments,
             sessionId: task.sessionId,
             runId: task.runId,
             permissionMode: task.permissionMode,
@@ -252,6 +300,7 @@ export function createRelayService(options: {
           })
           .finally(() => {
             finished = true;
+            preparing.abort();
           });
         /** 补充输入独立于入站处理和任务完成等待，慢 RPC 不阻塞 /status 与 /stop。 */
         const steering = (async () => {
@@ -263,10 +312,18 @@ export function createRelayService(options: {
             }
             let error: string | undefined;
             try {
-              await options.agent.steer(input.text);
+              const attachments = await options.prepareAttachments(
+                input.attachments,
+                preparing.signal,
+              );
+              if (finished || stopping) return;
+              if (!options.store.markTaskInputSending(task.id, input.index)) continue;
+              await options.agent.steer(input.text, attachments);
             } catch (cause) {
+              if (finished || stopping) return;
               error =
-                cause instanceof Error && cause.message.startsWith("Codex ")
+                cause instanceof AttachmentError ||
+                (cause instanceof Error && cause.message.startsWith("Codex "))
                   ? cause.message
                   : "Submission unconfirmed. Not retried; check the session before resending.";
             }
@@ -300,6 +357,9 @@ export function createRelayService(options: {
             text: "Service error; shutting down. Check the directory and local processes before /resume.",
           });
           throw error;
+        } finally {
+          preparing.abort();
+          if (inputPreparation === preparing) inputPreparation = undefined;
         }
       }
     },
@@ -307,6 +367,7 @@ export function createRelayService(options: {
     stop() {
       stopping = true;
       modelLoading.abort();
+      inputPreparation?.abort();
       options.agent.disconnect();
     },
   };

@@ -6,6 +6,7 @@ import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import type { MessageHandler } from "../core/types.js";
 import type { Store } from "../storage/store.js";
+import { createTelegramAttachmentLoader, telegramAttachments } from "./telegram-files.js";
 
 /** 默认菜单和控制命令识别共用定义，菜单说明统一使用英文。 */
 const commands = [
@@ -112,6 +113,7 @@ export function createTelegramConnection(
     if (command && target !== undefined && target.toLowerCase() !== ctx.me.username?.toLowerCase())
       return;
 
+    const attachments = telegramAttachments(ctx.message);
     await handleMessage({
       channel: {
         platform: "telegram",
@@ -134,7 +136,9 @@ export function createTelegramConnection(
                 ? { replyToMessageId: ctx.message.reply_to_message.message_id }
                 : {}),
             }
-          : { type: "unsupported" },
+          : attachments.length
+            ? { type: "attachments", text: ctx.message.caption ?? "", attachments }
+            : { type: "unsupported" },
     });
   });
 
@@ -214,6 +218,7 @@ export function createTelegramConnection(
   }
 
   return {
+    prepareAttachments: createTelegramAttachmentLoader(bot.api, config.token, agent),
     /** 核实机器人身份后才启动任务，初始化不消费 Telegram 消息。 */
     async initialize() {
       try {

@@ -58,12 +58,21 @@ try {
   logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
 
   if (!stopping) {
+    im = createTelegramConnection(
+      config.telegram,
+      (message) => {
+        if (!relay) throw new Error("Relay not initialized.");
+        return relay.handleMessage(message);
+      },
+      store,
+      logger,
+    );
     relay = createRelayService({
       store,
       agent,
       updates: createUpdateChecker(config.telegram.proxyUrl),
+      prepareAttachments: im.prepareAttachments,
     });
-    im = createTelegramConnection(config.telegram, relay.handleMessage, store, logger);
     phase = "Connecting Telegram";
     const source = await im.initialize();
     if (source && !stopping) {

@@ -6,6 +6,28 @@ export interface ChannelIdentity {
   userId: string;
 }
 
+/** 入站附件只保存下载所需的引用；随机标识隔离同名文件和重复上传。 */
+export interface Attachment {
+  id: string;
+  fileId: string;
+  name: string;
+  kind: "image" | "file";
+  size: number | null;
+}
+
+/** 下载完成后交给 Agent 的本地附件，不包含 Telegram 凭据或下载链接。 */
+export interface AgentAttachment {
+  name: string;
+  path: string;
+  kind: "image" | "file";
+}
+
+/** 附件准备独立于入站处理；停止任务或服务时可以中止下载。 */
+export type AttachmentLoader = (
+  attachments: Attachment[],
+  signal: AbortSignal,
+) => Promise<AgentAttachment[]>;
+
 /** IM 连接层完成身份校验后传入核心层的消息。 */
 export interface IncomingMessage {
   channel: ChannelIdentity;
@@ -13,6 +35,7 @@ export interface IncomingMessage {
   content:
     | { type: "command"; name: string; args: string }
     | { type: "text"; text: string; replyToMessageId?: number }
+    | { type: "attachments"; text: string; attachments: Attachment[] }
     | { type: "permissions" | "model"; id: string; optionIndex: number; messageId: number }
     | {
         type: "interaction";
@@ -90,6 +113,7 @@ export interface Agent {
   run(input: {
     cwd: string;
     prompt: string;
+    attachments?: AgentAttachment[];
     sessionId: string | null;
     /** 已派发的轮次只恢复跟踪，不能再次提交原始输入。 */
     runId?: string | null;
@@ -109,7 +133,7 @@ export interface Agent {
   /** 只提交当前连接仍有效的交互；返回值表示已写入连接，不代表操作已经执行。 */
   respond(id: string, answer: InteractionAnswer): boolean;
   /** 向当前轮次补充输入，只等待接收确认，不等待任务结束。 */
-  steer(prompt: string): Promise<void>;
+  steer(prompt: string, attachments?: AgentAttachment[]): Promise<void>;
   /** 只断开客户端；run 返回 undefined，后台任务及持久状态继续保留。 */
   disconnect(): void;
   /** 用户明确停止时才请求取消当前轮次。 */

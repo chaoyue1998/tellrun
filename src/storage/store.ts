@@ -5,6 +5,7 @@ import { createMenus } from "../core/menus.js";
 import type {
   AgentInteraction,
   AgentResult,
+  Attachment,
   ChannelIdentity,
   IncomingMessage,
   InteractionAnswer,
@@ -181,10 +182,10 @@ export function openStore(path = join(appDirectory, "state.json")) {
               }\n${result.text}`,
         );
         for (const [index, input] of task.inputs.entries()) {
-          if (input.status !== "pending" && input.status !== "sending") continue;
+          if (!["pending", "preparing", "sending"].includes(input.status)) continue;
           enqueueReply(
             task.channelId,
-            `Task #${id}, message ${index + 1}: ${input.status === "pending" ? "not sent" : "delivery unconfirmed"}. Task ended; not retried. Check the session before resending.`,
+            `Task #${id}, message ${index + 1}: ${input.status === "sending" ? "delivery unconfirmed" : "not sent"}. Task ended; not retried. Check the session before resending.`,
           );
           input.status = "failed";
         }
@@ -194,7 +195,9 @@ export function openStore(path = join(appDirectory, "state.json")) {
 
     /** 命令与交互按钮共用停止逻辑；先使交互失效，再由核心层请求中断。 */
     function cancelTask(id: number) {
-      if (state.tasks.find((task) => task.id === id)?.status === "queued") {
+      if (
+        ["queued", "preparing"].includes(state.tasks.find((task) => task.id === id)?.status ?? "")
+      ) {
         finishTask(id, { status: "cancelled", text: "Cancelled before starting." });
       } else
         update(() => {
@@ -348,7 +351,11 @@ export function openStore(path = join(appDirectory, "state.json")) {
         );
       },
       /** 接收时固定目录、会话与输入，限制全局只有一个未结束任务。 */
-      createTask(channel: State["channels"][number], prompt: string) {
+      createTask(
+        channel: State["channels"][number],
+        prompt: string,
+        attachments: Attachment[] = [],
+      ) {
         return update(() => {
           if (!channel.cwd) throw new Error("Set a working directory first.");
           if (state.tasks.some((task) => activeTaskStatuses.has(task.status)))
@@ -360,6 +367,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
             sessionId: channel.sessionId,
             runId: null,
             prompt,
+            attachments,
             permissionMode: channel.permissionMode,
             model: channel.model,
             reasoningEffort: channel.reasoningEffort,
@@ -372,16 +380,18 @@ export function openStore(path = join(appDirectory, "state.json")) {
         });
       },
       /** 尚未派发时合并首条输入；执行中的补充输入与入站去重标识一起保存。 */
-      appendTaskInput(id: number, text: string) {
+      appendTaskInput(id: number, text: string, attachments: Attachment[] = []) {
         update(() => {
           const task = state.tasks.find((task) => task.id === id);
-          if (!task || !["queued", "dispatching", "running"].includes(task.status))
+          if (!task || !["queued", "preparing", "dispatching", "running"].includes(task.status))
             throw new Error("Task cannot accept more input.");
-          if (task.status === "queued") task.prompt += `\n\n${text}`;
-          else task.inputs.push({ text, status: "pending" });
+          if (task.status === "queued") {
+            task.prompt += `\n\n${text}`;
+            task.attachments.push(...attachments);
+          } else task.inputs.push({ text, attachments, status: "pending" });
         });
       },
-      /** 取得当前轮次后按接收顺序派发，先落盘 sending，不能自动重试不确定输入。 */
+      /** 按接收顺序准备附件；下载阶段尚未提交给 Agent，可以在重启后继续。 */
       claimTaskInput(id: number) {
         const task = state.tasks.find((task) => task.id === id && task.status === "running");
         const index = task?.inputs.findIndex((input) => input.status === "pending") ?? -1;
@@ -389,8 +399,19 @@ export function openStore(path = join(appDirectory, "state.json")) {
         return update(() => {
           const input = state.tasks.find((task) => task.id === id)?.inputs[index];
           if (!input) throw new Error("Input not found.");
+          input.status = "preparing";
+          return { index, text: input.text, attachments: input.attachments };
+        });
+      },
+      /** 附件准备完成后再次核实任务仍在执行，先保存 sending 再提交，避免误入其他轮次。 */
+      markTaskInputSending(id: number, index: number) {
+        const task = state.tasks.find((task) => task.id === id && task.status === "running");
+        if (task?.inputs[index]?.status !== "preparing") return false;
+        return update(() => {
+          const input = state.tasks.find((task) => task.id === id)?.inputs[index];
+          if (!input) return false;
           input.status = "sending";
-          return { index, text: input.text };
+          return true;
         });
       },
       /** 成功补充不产生固定回执，失败提示和输入状态原子保存。 */
@@ -398,7 +419,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         update(() => {
           const task = state.tasks.find((task) => task.id === id);
           const input = task?.inputs[index];
-          if (!task || input?.status !== "sending") return;
+          if (!task || !input || !["preparing", "sending"].includes(input.status)) return;
           input.status = error === undefined ? "accepted" : "failed";
           if (error !== undefined)
             enqueueReply(task.channelId, `Task #${id}, message ${index + 1}: ${error}`);
@@ -422,10 +443,25 @@ export function openStore(path = join(appDirectory, "state.json")) {
           const claimed = {
             ...task,
             status:
-              task.status === "cancelling" ? ("cancelling" as const) : ("dispatching" as const),
+              task.status === "cancelling"
+                ? ("cancelling" as const)
+                : !task.runId && task.attachments.length
+                  ? ("preparing" as const)
+                  : ("dispatching" as const),
           };
           state.tasks[index] = claimed;
           return claimed;
+        });
+      },
+      /** 下载完成后才进入可能派发的阶段；已停止的任务不能因下载迟到而启动。 */
+      markDispatching(id: number) {
+        if (!state.tasks.some((task) => task.id === id && task.status === "preparing"))
+          return false;
+        return update(() => {
+          const task = state.tasks.find((task) => task.id === id);
+          if (!task) return false;
+          task.status = "dispatching";
+          return true;
         });
       },
       /** 新建会话后立即保存关联，后续消息与重启均可续聊。 */
@@ -618,6 +654,19 @@ export function openStore(path = join(appDirectory, "state.json")) {
         for (const task of state.tasks.filter(
           (task) => activeTaskStatuses.has(task.status) && task.status !== "queued",
         )) {
+          /** 下载阶段从未提交给 Codex；主输入和补充输入都可以安全重新准备。 */
+          if (
+            task.status === "preparing" ||
+            task.inputs.some((input) => input.status === "preparing")
+          )
+            update(() => {
+              const current = state.tasks.find((item) => item.id === task.id);
+              if (!current) return;
+              if (current.status === "preparing") current.status = "queued";
+              for (const input of current.inputs)
+                if (input.status === "preparing") input.status = "pending";
+            });
+          if (task.status === "preparing") continue;
           if (task.sessionId && task.runId) {
             for (const [index, input] of task.inputs.entries()) {
               if (input.status !== "sending") continue;
