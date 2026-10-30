@@ -2,14 +2,19 @@ import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import type { Store } from "../storage/store.js";
+import type { UpdateChecker } from "../updates.js";
 import type { Agent, AgentModel, ChannelIdentity, IncomingMessage } from "./types.js";
 
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
-export function createRelayService(options: { store: Store; agent: Agent }) {
+export function createRelayService(options: {
+  store: Store;
+  agent: Agent;
+  updates: UpdateChecker;
+}) {
   let stopping = false;
   /** 菜单查询独立于任务，关停时取消查询并等待退出后再关闭存储。 */
   const modelLoading = new AbortController();
-  /** 状态的模型查询复用独立工作循环，不阻塞入站审批和停止指令。 */
+  /** 状态的模型与版本查询复用独立工作循环，不阻塞入站审批和停止指令。 */
   const statusQueries: (() => Promise<void>)[] = [];
   /** 状态查询与历史结果共用面向用户的状态名称。 */
   const statuses = {
@@ -46,7 +51,7 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Task status\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
+              return "Tellrun ready.\nSend text to chat with Codex. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new — New session, same directory\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nUse buttons for approvals. Approvals wait for your response. Answer questions with buttons or replies. Questions expire within 10 minutes.";
             case "model":
               if (message.content.args) return "Use /model to choose a model with the buttons.";
               options.store.openMenu(channel.id, "model");
@@ -83,9 +88,10 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
                   (task.model !== snapshot.model ||
                     task.reasoningEffort !== snapshot.reasoningEffort ||
                     task.cwd !== snapshot.cwd);
-                const [model, taskModel] = await Promise.all([
+                const [model, taskModel, update] = await Promise.all([
                   describe(snapshot),
                   taskDiffers ? describe(task) : undefined,
+                  options.updates.check(modelLoading.signal),
                 ]);
                 if (stopping) return;
                 /** 同一模型的不同推理档位也需要区分当前选择与执行中的任务。 */
@@ -99,13 +105,29 @@ export function createRelayService(options: { store: Store; agent: Agent }) {
                   value
                     ? `${value.label} · ${value.reasoningEffort}`
                     : "Unavailable (check /model)";
+                /** 检查失败单独提示；有新版本时引导用户提交升级任务。 */
+                const versionStatus = !update
+                  ? "update check unavailable; check network or proxy"
+                  : update.available
+                    ? `update available: ${update.latest}`
+                    : "up to date";
+                const upgradeHint = update?.available
+                  ? `\n\nSend /update to ask ${options.agent.name} to upgrade Tellrun.`
+                  : "";
                 options.store.reply(
                   snapshot.id,
-                  `Service: connected\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}`,
+                  `Service: connected\nTellrun: ${options.updates.version} (${versionStatus})\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
                 );
               };
               return;
             }
+            case "update":
+              if (message.content.args) return "Use /update without arguments.";
+              if (task) return "Wait for the current task to finish, then send /update.";
+              if (channel.paused) return "Paused. Send /resume before /update.";
+              /** 复用普通任务的快照、去重、审批和恢复流程，不向执行中的任务追加升级指令。 */
+              options.store.createTask(channel, options.updates.upgradePrompt());
+              return `Tellrun update queued for ${options.agent.name}.`;
             case "cwd": {
               if (!message.content.args)
                 return `Directory: ${channel.cwd}\nUse /cwd /absolute/path to change directory and start a new session.`;

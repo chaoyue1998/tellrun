@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import * as p from "@clack/prompts";
 import { Command, CommanderError } from "commander";
@@ -9,16 +9,13 @@ import { createCodexAgent } from "./agents/codex.js";
 import { appDirectory, type Config, configSchema, loadConfig } from "./config.js";
 import { manageService } from "./service.js";
 import { writeJson } from "./storage/json.js";
+import { tellrunVersion } from "./updates.js";
 
 /** 全局入口只注册命令；业务入口仅在 run 时动态加载。 */
 const program = new Command()
   .name("tellrun")
   .description("Chat with Codex via Telegram")
-  .version(
-    JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version,
-    "-V, --version",
-    "Show version",
-  )
+  .version(tellrunVersion, "-V, --version", "Show version")
   .helpOption("-h, --help", "Show help")
   .addHelpCommand("help [command]", "Show command help")
   .showHelpAfterError()

@@ -57,12 +57,17 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/new`                | Start a new conversation while keeping the working directory     |
 | `/model`              | Show the current selection and choose model and reasoning effort |
 | `/permissions`        | Choose the permission mode for subsequent tasks                  |
-| `/status`             | Show connection, directory, model, permissions, and task status  |
+| `/status`             | Show version updates, connection, directory, model, permissions, and task status |
+| `/update`             | Ask Codex to upgrade Tellrun using the installation details      |
 | `/last`               | Show the latest finished task's status and result                |
 | `/stop`               | Request that the current task stop and pause new tasks           |
 | `/resume`             | Accept new tasks again without rerunning an interrupted task     |
 
 Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
+
+`/status` also shows the running Tellrun version and checks npm for the latest stable release. When an update is available, it suggests sending `/update` to ask Codex to perform the upgrade. Successful checks are cached for one hour; failed checks can be retried after one minute. Network checks take at most three seconds and use the Telegram proxy settings. A failed check is reported without affecting tasks.
+
+`/update` sends the current version, installation location, any fresh cached release version, and upgrade instructions to Codex as a regular task. Codex rechecks the version, performs the upgrade, restarts the service, and verifies it. The task uses the current conversation, directory, model, and permissions, with any approvals handled in Telegram. The command takes no arguments. Wait for an active task to finish; if paused, send `/resume` first. You can use `/update` without running `/status` first, including after a failed version check.
 
 ## Terminal commands
 

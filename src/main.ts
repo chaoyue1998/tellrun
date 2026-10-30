@@ -8,6 +8,7 @@ import { createRelayService } from "./core/relay.js";
 import { createTelegramConnection } from "./im/telegram.js";
 import { createLogger } from "./logger.js";
 import { openStore, type Store } from "./storage/store.js";
+import { createUpdateChecker } from "./updates.js";
 
 /** 启动日志在配置校验前可用，避免将无效配置直接输出。 */
 const logger = createLogger();
@@ -57,7 +58,11 @@ try {
   logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
 
   if (!stopping) {
-    relay = createRelayService({ store, agent });
+    relay = createRelayService({
+      store,
+      agent,
+      updates: createUpdateChecker(config.telegram.proxyUrl),
+    });
     im = createTelegramConnection(config.telegram, relay.handleMessage, store, logger);
     phase = "Connecting Telegram";
     const source = await im.initialize();
