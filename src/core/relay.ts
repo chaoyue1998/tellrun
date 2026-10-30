@@ -26,8 +26,8 @@ export function createRelayService(options: {
   let inputPreparation: AbortController | undefined;
   /** 菜单查询独立于任务，关停时取消查询并等待退出后再关闭存储。 */
   const modelLoading = new AbortController();
-  /** 状态与会话命令复用独立工作循环，不阻塞入站审批和停止指令。 */
-  const controlQueries: (() => Promise<void>)[] = [];
+  /** 状态与会话请求立即执行；工作循环统一接收结果并等待退出。 */
+  const controlQueries: Promise<void>[] = [];
   /** 会话变更确认前暂缓新任务，避免接口等待期间把消息发往旧会话。 */
   let changingSession = false;
   /** 状态查询与历史结果共用面向用户的状态名称。 */
@@ -204,43 +204,42 @@ export function createRelayService(options: {
               if (name === "switch" && (!args || /\s/u.test(args)))
                 return "Use /switch <full session ID>. Find the ID with /list.";
               const snapshot = structuredClone(channel);
-              changingSession = true;
               controlQuery = async () => {
+                changingSession = true;
+                let session: AgentOption;
                 try {
-                  let session: AgentOption;
-                  try {
-                    session =
-                      name === "new"
-                        ? await options.agent.createSession(
-                            {
-                              cwd: snapshot.cwd,
-                              name: args,
-                              model: snapshot.model,
-                              permissionMode: snapshot.permissionMode,
-                            },
-                            modelLoading.signal,
-                          )
-                        : await options.agent.readSession(snapshot.cwd, args, modelLoading.signal);
-                  } catch (error) {
-                    if (!stopping)
-                      options.store.reply(
-                        snapshot.id,
-                        error instanceof Error && error.message.startsWith("Codex ")
-                          ? error.message
-                          : "Cannot change sessions. Current session unchanged. Check /list before retrying.",
-                      );
-                    return;
-                  }
+                  session =
+                    name === "new"
+                      ? await options.agent.createSession(
+                          {
+                            cwd: snapshot.cwd,
+                            name: args,
+                            model: snapshot.model,
+                            permissionMode: snapshot.permissionMode,
+                          },
+                          modelLoading.signal,
+                        )
+                      : await options.agent.readSession(snapshot.cwd, args, modelLoading.signal);
+                } catch (error) {
                   if (!stopping)
-                    options.store.setSession(
+                    options.store.reply(
                       snapshot.id,
-                      snapshot.cwd,
-                      session.id,
-                      `${name === "new" ? "New session" : "Switched session"}: ${session.label}\nID: ${session.id}\nDirectory: ${snapshot.cwd}`,
+                      error instanceof Error && error.message.startsWith("Codex ")
+                        ? error.message
+                        : "Cannot change sessions. Current session unchanged. Check /list before retrying.",
                     );
+                  return;
                 } finally {
                   changingSession = false;
                 }
+                /** 接口成功后才更新绑定；存储错误交给工作循环处理。 */
+                if (!stopping)
+                  options.store.setSession(
+                    snapshot.id,
+                    snapshot.cwd,
+                    session.id,
+                    `${name === "new" ? "New session" : "Switched session"}: ${session.label}\nID: ${session.id}\nDirectory: ${snapshot.cwd}`,
+                  );
               };
               return;
             }
@@ -286,7 +285,12 @@ export function createRelayService(options: {
         options.store.createTask(channel, message.content.text, attachments);
       });
       /** 只有入站去重记录保存成功后才执行；重复事件不会重复创建或切换会话。 */
-      if (controlQuery) controlQueries.push(controlQuery);
+      if (controlQuery) {
+        const query = controlQuery();
+        controlQueries.push(query);
+        /** 错误由工作循环等待原 Promise 时传播，提前标记避免未处理拒绝。 */
+        void query.catch(() => {});
+      }
       /** 只有选择和停止状态落盘后才影响运行时；回调答复不承担提交职责。 */
       if (
         (message.content.type === "command" && message.content.name === "stop") ||
@@ -300,24 +304,29 @@ export function createRelayService(options: {
     },
     /** 模型、状态和会话请求不占用入站或任务循环，关停后丢弃迟到结果。 */
     async loadModels(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-      while (!stopping) {
-        const query = controlQueries.shift();
-        if (query) {
-          await query();
-          continue;
+      try {
+        while (!stopping) {
+          const query = controlQueries.shift();
+          if (query) {
+            await query;
+            continue;
+          }
+          const menu = options.store.pendingModels(source);
+          if (!menu) {
+            await setTimeout(100);
+            continue;
+          }
+          let models: AgentModel[] | undefined;
+          try {
+            models = await options.agent.listModels(menu.cwd, modelLoading.signal);
+          } catch {
+            /** 查询失败只提示重新打开菜单，不影响任务和已有选择。 */
+          }
+          if (!stopping) options.store.fillModels(menu.channelId, menu.id, models);
         }
-        const menu = options.store.pendingModels(source);
-        if (!menu) {
-          await setTimeout(100);
-          continue;
-        }
-        let models: AgentModel[] | undefined;
-        try {
-          models = await options.agent.listModels(menu.cwd, modelLoading.signal);
-        } catch {
-          /** 查询失败只提示重新打开菜单，不影响任务和已有选择。 */
-        }
-        if (!stopping) options.store.fillModels(menu.channelId, menu.id, models);
+      } finally {
+        modelLoading.abort();
+        await Promise.allSettled(controlQueries);
       }
     },
     /** 调度独立于执行和菜单查询；启动先跳过离线时段，再按持久化时间触发。 */
