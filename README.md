@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/tellrun-icon.png" alt="Tellrun icon" width="128" height="128" />
+</p>
+
 # Tellrun — Telegram Bot for OpenAI Codex
 
 **Tellrun is a self-hosted Telegram bot for remote AI coding with OpenAI Codex CLI, persistent sessions, and streaming replies.**

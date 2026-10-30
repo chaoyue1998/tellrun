@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/tellrun-icon.png" alt="Tellrun 图标" width="128" height="128" />
+</p>
+
 # Tellrun — 通过 Telegram 远程使用 OpenAI Codex
 
 **Tellrun 是可自行部署的 Telegram 机器人，基于 OpenAI Codex CLI 提供远程 AI 编程、持久化会话和流式回复。**
