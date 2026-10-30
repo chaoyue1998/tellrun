@@ -101,7 +101,7 @@ Run these commands in the terminal on the computer or server running Tellrun.
 | `tellrun logs -f`           | Follow logs                                                             |
 | `tellrun restart`           | Restart with the current configuration or installed version             |
 | `tellrun stop`              | Stop the background service                                             |
-| `tellrun service uninstall` | Stop and remove the service, keeping configuration and state            |
+| `tellrun uninstall`         | Stop and remove the service and global npm package, keeping user data   |
 | `tellrun --help`            | Show command help                                                       |
 
 ### Upgrade
@@ -113,6 +113,16 @@ tellrun restart
 ```
 
 Configuration and state live in `~/.tellrun/` and are preserved when upgrading the global package. After upgrading Node.js or Tellrun, `restart` updates the Node and CLI paths used by the service.
+
+### Uninstall
+
+```sh
+tellrun uninstall
+```
+
+Stops and removes the current user's background service, then uninstalls the global npm package from its installation prefix. Configuration, state, attachments, and application logs remain in `~/.tellrun/`; the command reminds you to delete that directory yourself if no longer needed. Linux user linger settings stay unchanged.
+
+This command supports global npm installations on Linux and macOS.
 
 ## Configuration and data
 

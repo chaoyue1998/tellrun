@@ -102,9 +102,11 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 | tellrun status            | 查询服务管理器状态并展示配置、数据目录；不启动第二个业务进程                                                        |
 | tellrun logs              | 展示最近 100 条后台日志；-f 持续跟随，凭据不进入命令行参数                                                          |
 | tellrun run               | 前台运行服务，供 systemd、launchd 和本地诊断使用；不进行交互配置                                                    |
-| tellrun service uninstall | 停用并移除本应用的用户服务，保留配置和状态文件；之后可通过 npm 卸载程序包                                           |
+| tellrun uninstall         | 校验当前 npm 全局安装位置，停用并移除用户服务后卸载当前前缀内的 npm 包；保留数据并提示用户自行删除                 |
 
 `setup` 由用户显式执行，npm 安装脚本仅承担包安装所需工作。交互取消时保留原配置，Token 使用明文输入，已有配置时留空保留原值；校验成功后再原子写入配置。CLI 的帮助、版本和状态命令不加载会加载运行状态或启动轮询的业务入口。
+
+`uninstall` 仅处理 Linux、macOS 的 npm 全局安装，使用当前 Node.js 对应的 npm 优先查找路径，显式指定安装前缀并核对真实包路径。源码或本地安装、npm 检查失败时不移除服务；服务移除失败时不卸载包。成功后提示用户自行删除 `~/.tellrun/`，命令不删除配置、状态、附件或应用日志，也不修改 Linux 用户 linger 设置。
 
 包已移除 `private: true`，通过 `bin` 暴露带 Node shebang 的 CLI；`files` 白名单包含编译产物和文档，`prepack` 在打包前完成构建。安装用户不需要源码仓库、TypeScript 或 tsx。用户配置与数据统一定位到当前用户的 `~/.tellrun/`，任何命令均可从任意目录执行。[npm 包字段](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/)
 
@@ -116,6 +118,7 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 | ------------------------------------------- | ------------------------------------------------------------ |
 | src/cli.ts                                  | CLI 命令解析与配置向导；只在 run 时动态加载后台业务入口      |
 | src/service.ts                              | 共用后台命令接口，按操作系统选择服务管理器                   |
+| src/uninstall.ts                            | 核对 npm 全局安装位置，串行移除服务和包，提示手动清理数据   |
 | src/systemd.ts                              | systemd 用户服务、linger、启停、状态与日志                   |
 | src/launchd.ts                              | macOS 用户服务、登录自启、就绪确认、启停与日志               |
 | src/main.ts                                 | 组装组件、状态加载、启动和退出；只在这里选择具体 IM 与 Agent |

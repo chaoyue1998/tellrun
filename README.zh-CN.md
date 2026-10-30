@@ -101,7 +101,7 @@ tellrun setup
 | `tellrun logs -f`           | 持续跟随日志                                     |
 | `tellrun restart`           | 重启服务，加载新配置或新版本                     |
 | `tellrun stop`              | 停止后台服务                                     |
-| `tellrun service uninstall` | 停止并移除服务，保留配置和状态                   |
+| `tellrun uninstall`         | 停止并移除服务，卸载 npm 全局包，保留用户数据     |
 | `tellrun --help`            | 查看命令帮助                                     |
 
 ### 升级
@@ -113,6 +113,16 @@ tellrun restart
 ```
 
 配置与状态保存在 `~/.tellrun/`，全局包升级会保留这些数据。升级 Node.js 或 Tellrun 后，`restart` 会更新服务使用的 Node 和 CLI 入口路径。
+
+### 卸载
+
+```sh
+tellrun uninstall
+```
+
+停止并移除当前用户的后台服务，再从当前安装前缀卸载 Tellrun 的 npm 全局包。配置、状态、附件及应用日志保留在 `~/.tellrun/`，卸载完成后会提示自行删除。Linux 用户 linger 设置保持不变。
+
+此命令适用于 Linux 和 macOS 的 npm 全局安装。
 
 ## 配置与数据
 

@@ -9,6 +9,7 @@ import { createCodexAgent } from "./agents/codex.js";
 import { appDirectory, type Config, configSchema, loadConfig } from "./config.js";
 import { manageService } from "./service.js";
 import { writeJson } from "./storage/json.js";
+import { uninstall } from "./uninstall.js";
 import { tellrunVersion } from "./updates.js";
 
 /** 全局入口只注册命令；业务入口仅在 run 时动态加载。 */
@@ -162,12 +163,10 @@ program
     await manageService("logs", options);
   });
 program
-  .command("service")
-  .description("Manage the background service")
   .command("uninstall")
-  .description("Remove service; keep config and state")
+  .description("Remove the service and npm package; keep user data")
   .action(async () => {
-    await manageService("uninstall");
+    await uninstall();
   });
 
 try {
