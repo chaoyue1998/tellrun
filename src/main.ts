@@ -23,6 +23,8 @@ let relay: ReturnType<typeof createRelayService> | undefined;
 let running: Promise<void>[] = [];
 let phase = "Loading config";
 let stopping = false;
+/** 重启请求只标记意图，等待连接和状态锁清理完成后替换进程。 */
+let restarting = false;
 
 /** 只清理本进程写入的就绪标记；清理失败不阻止任务和连接关停。 */
 function clearReady() {
@@ -36,7 +38,9 @@ function clearReady() {
 }
 
 /** 退出信号只关闭消息与 Agent 连接；后台任务继续，连接清理后释放状态锁。 */
-function stop() {
+function stop(signal?: NodeJS.Signals) {
+  /** 外部停止信号优先，避免等待关停期间收到 SIGTERM 后仍自行重启。 */
+  if (signal) restarting = false;
   if (stopping) return;
   stopping = true;
   clearReady();
@@ -72,6 +76,12 @@ try {
       agent,
       updates: createUpdateChecker(config.telegram.proxyUrl),
       prepareAttachments: im.prepareAttachments,
+      restart: process.execve
+        ? () => {
+            restarting = true;
+            stop();
+          }
+        : undefined,
     });
     phase = "Connecting Telegram";
     const source = await im.initialize();
@@ -116,3 +126,11 @@ try {
   process.removeListener("SIGTERM", stop);
   logger.info("Tellrun stopped");
 }
+
+/** 复用原 Node、入口参数和环境；保留 PID，使前台与系统服务使用同一重启流程。 */
+if (restarting && !process.exitCode)
+  process.execve?.(process.execPath, [
+    process.execPath,
+    ...process.execArgv,
+    ...process.argv.slice(1),
+  ]);

@@ -63,6 +63,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/cron`               | List, create, delete, enable, or disable scheduled tasks                                     |
 | `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
 | `/update`             | Ask Codex to upgrade Tellrun using the installation details                                  |
+| `/restart`            | Restart Tellrun and reload configuration while preserving session and task state             |
 | `/last`               | Show the latest finished task's status and result                                            |
 | `/stop`               | Request that the current task stop and pause new tasks                                       |
 | `/resume`             | Accept new tasks again without rerunning an interrupted task                                 |

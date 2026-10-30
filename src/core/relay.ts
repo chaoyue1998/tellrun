@@ -20,6 +20,8 @@ export function createRelayService(options: {
   agent: Agent;
   updates: UpdateChecker;
   prepareAttachments: AttachmentLoader;
+  /** 请求落盘后同步关闭连接；不支持进程替换的平台不提供重启入口。 */
+  restart: (() => void) | undefined;
 }) {
   let stopping = false;
   /** 当前任务的附件准备可独立取消，不能阻塞停止指令或拖住服务退出。 */
@@ -121,7 +123,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/restart — Restart Tellrun and reload configuration\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.store.handleCron(channel.id, message.content.args);
             case "model":
@@ -200,6 +202,13 @@ export function createRelayService(options: {
               /** 复用普通任务的快照、去重、审批和恢复流程，不向执行中的任务追加升级指令。 */
               options.store.createTask(channel, options.updates.upgradePrompt());
               return `Tellrun update queued for ${options.agent.name}.`;
+            case "restart":
+              if (message.content.args) return "Use /restart without arguments.";
+              if (!options.restart)
+                return "Restart is unavailable on this platform. Restart Tellrun from the terminal.";
+              /** 事务完成后同步停止发送；这条回复由重启并连接成功后的发送循环投递。 */
+              controlQuery = async () => options.restart?.();
+              return "Tellrun restarted. Configuration reloaded; session and task state preserved.";
             case "cwd": {
               if (!message.content.args)
                 return `Directory: ${channel.cwd}\nUse /cwd /absolute/path to change directory and start a new session.`;
@@ -290,7 +299,7 @@ export function createRelayService(options: {
         }
         options.store.createTask(channel, message.content.text, attachments);
       });
-      /** 只有入站去重记录保存成功后才执行；重复事件不会重复创建或切换会话。 */
+      /** 只有入站去重记录保存成功后才执行；重复事件不会重复切换会话或重启。 */
       if (controlQuery) {
         const query = controlQuery();
         controlQueries.push(query);

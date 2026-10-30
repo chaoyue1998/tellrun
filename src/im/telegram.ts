@@ -20,6 +20,7 @@ const commands = [
   { command: "cron", description: "List, create, enable, disable, or delete scheduled tasks" },
   { command: "status", description: "Show status and check for updates" },
   { command: "update", description: "Ask Codex to upgrade Tellrun" },
+  { command: "restart", description: "Restart Tellrun and reload configuration" },
   { command: "last", description: "Show the latest task result" },
   { command: "stop", description: "Stop the current task and pause" },
   { command: "resume", description: "Accept new tasks" },
