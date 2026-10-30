@@ -282,7 +282,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
           });
       },
       /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
-      setSession(channelId: number, cwd: string | null) {
+      setSession(
+        channelId: number,
+        cwd: string | null,
+        sessionId: string | null = null,
+        reply?: string,
+      ) {
         update(() => {
           const channel = state.channels.find((channel) => channel.id === channelId);
           if (channel) {
@@ -293,7 +298,13 @@ export function openStore(path = join(appDirectory, "state.json")) {
               channel.model = null;
               channel.reasoningEffort = null;
             }
-            Object.assign(channel, { cwd, sessionId: null });
+            Object.assign(channel, { cwd, sessionId });
+            /** 会话选择与成功回复一同落盘；暂停状态以接口返回时的值为准。 */
+            if (reply)
+              enqueueReply(
+                channelId,
+                `${reply}${channel.paused ? "\nPaused. Send /resume to continue." : ""}`,
+              );
           }
         });
       },

@@ -102,6 +102,20 @@ export interface Agent {
   version: string;
   /** 第一项为默认模式；模式 ID 由各 Agent 自行解释。 */
   permissionModes: readonly AgentOption[];
+  /** 列出当前目录的会话；名称和历史由 Agent 保存。 */
+  listSessions(cwd: string, signal: AbortSignal): Promise<AgentOption[]>;
+  /** 创建并保存空会话，不启动任务；未指定名称时使用默认名称。 */
+  createSession(
+    input: {
+      cwd: string;
+      name: string;
+      model: string | null;
+      permissionMode: string | null;
+    },
+    signal: AbortSignal,
+  ): Promise<AgentOption>;
+  /** 校验会话属于当前目录且可续聊，不恢复会话或修改配置。 */
+  readSession(cwd: string, sessionId: string, signal: AbortSignal): Promise<AgentOption>;
   /** 只读取可选模型，不创建会话；独立连接避免影响正在执行的任务。 */
   listModels(cwd: string, signal: AbortSignal): Promise<AgentModel[]>;
   /** 只读查询目录下的有效选择，不创建会话或提交任务。 */

@@ -7,7 +7,13 @@ import { promisify } from "node:util";
 import { JSONRPCErrorException } from "json-rpc-2.0";
 import WebSocket from "ws";
 import { z } from "zod";
-import type { Agent, AgentInteraction, AgentModel, AgentResult } from "../core/types.js";
+import type {
+  Agent,
+  AgentInteraction,
+  AgentModel,
+  AgentOption,
+  AgentResult,
+} from "../core/types.js";
 import { createCodexInput } from "./codex-input.js";
 import {
   type CodexApprovalResponse,
@@ -21,6 +27,24 @@ const turnSchema = z.object({
   id: z.string().min(1),
   status: z.enum(["inProgress", "completed", "failed", "interrupted"]),
 });
+
+/** 创建、列表和读取会话共用元数据校验；空标题回退到首条消息摘要。 */
+const sessionSchema = z
+  .object({
+    id: z.string().min(1),
+    cwd: z.string(),
+    name: z.string().nullable(),
+    preview: z.string(),
+    status: z.object({ type: z.string() }),
+  })
+  .transform((thread) => ({
+    id: thread.id,
+    cwd: thread.cwd,
+    label: (thread.name?.trim() || thread.preview.trim() || "Untitled session")
+      .replace(/\s+/gu, " ")
+      .slice(0, 120),
+    status: thread.status.type,
+  }));
 
 /** Codex CLI 的四种预设；协议参数只在适配层使用，菜单与执行共用此定义。 */
 const permissionModes = [
@@ -73,7 +97,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
   let steer: Agent["steer"] | undefined;
   let respond: Agent["respond"] | undefined;
 
-  /** 任务与只读查询共用连接流程；各自使用独立 socket，不争用会话。 */
+  /** 任务、会话管理与只读查询共用连接流程，各自使用独立 socket。 */
   async function connectServer(cwd: string, signal: AbortSignal): Promise<WebSocket> {
     for (let attempt = 0; attempt < 2; attempt++) {
       signal.throwIfAborted();
@@ -123,6 +147,26 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       }
     }
     throw new Error("Codex daemon unavailable.");
+  }
+
+  /** 会话管理共用短连接；超时或关停只断开查询，不中断后台任务。 */
+  async function withSessionConnection<T>(
+    cwd: string,
+    signal: AbortSignal,
+    action: (rpc: ReturnType<typeof createCodexRpc>) => Promise<T>,
+  ): Promise<T> {
+    signal = AbortSignal.any([signal, AbortSignal.timeout(45_000)]);
+    const rpc = createCodexRpc(await connectServer(cwd, signal));
+    const abort = () => rpc.close("Codex session request cancelled.");
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      signal.throwIfAborted();
+      await rpc.initialize();
+      return await action(rpc);
+    } finally {
+      signal.removeEventListener("abort", abort);
+      rpc.close();
+    }
   }
 
   /** 模型菜单与状态共用只读连接；按需读取目录配置，不恢复会话或发起轮次。 */
@@ -203,6 +247,77 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     name: "Codex",
     version: stdout.trim().replace(/^codex-cli /, ""),
     permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
+    async listSessions(cwd, signal) {
+      return withSessionConnection(cwd, signal, async (rpc) => {
+        const sessions: AgentOption[] = [];
+        let cursor: string | null = null;
+        do {
+          const page = z
+            .object({ data: z.array(sessionSchema), nextCursor: z.string().nullable() })
+            .parse(
+              await rpc.request("thread/list", {
+                cwd,
+                cursor,
+                limit: 100,
+                sortKey: "updated_at",
+                modelProviders: [],
+                /** 默认来源会漏掉 app-server 会话；排除自动生成的子 Agent 会话。 */
+                sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
+                archived: false,
+              }),
+            );
+          for (const session of page.data)
+            if (session.cwd === cwd && !sessions.some((item) => item.id === session.id))
+              sessions.push({ id: session.id, label: session.label });
+          cursor = page.nextCursor;
+        } while (cursor);
+        return sessions;
+      }).catch(() => {
+        throw new Error("Codex session list unavailable. Try /list again.");
+      });
+    },
+    async createSession(input, signal) {
+      return withSessionConnection(input.cwd, signal, async (rpc) => {
+        const permissionMode = permissionModes.find(
+          (mode) => mode.id === (input.permissionMode ?? "default"),
+        );
+        if (!permissionMode) throw new Error("Unknown permission mode.");
+        const { thread } = z.object({ thread: sessionSchema }).parse(
+          await rpc.request("thread/start", {
+            cwd: input.cwd,
+            ...permissionMode.config,
+            ...(input.model ? { model: input.model } : {}),
+            ephemeral: false,
+          }),
+        );
+        if (thread.cwd !== input.cwd || thread.status !== "idle")
+          throw new Error("Unexpected new session.");
+        /** 显式命名会物化空会话，保证首次发言前也能列出并在重启后恢复。 */
+        await rpc.request("thread/name/set", {
+          threadId: thread.id,
+          name: input.name.trim() || "New session",
+        });
+        return { id: thread.id, label: input.name.trim() || "New session" };
+      }).catch(() => {
+        throw new Error(
+          "Codex session creation unconfirmed. Current session unchanged. Check /list before retrying /new.",
+        );
+      });
+    },
+    async readSession(cwd, sessionId, signal) {
+      const { thread } = await withSessionConnection(cwd, signal, async (rpc) =>
+        z
+          .object({ thread: sessionSchema })
+          .parse(await rpc.request("thread/read", { threadId: sessionId })),
+      ).catch(() => {
+        throw new Error("Codex session unavailable. Use a full session ID from /list.");
+      });
+      if (thread.id !== sessionId || thread.cwd !== cwd)
+        throw new Error("Codex session is not in the current directory. Choose one from /list.");
+      if (!["idle", "notLoaded"].includes(thread.status))
+        throw new Error("Codex session busy or unavailable. Wait until it is idle.");
+      return { id: thread.id, label: thread.label };
+    },
     async listModels(cwd, signal) {
       return (await readModelData(cwd, signal)).models;
     },

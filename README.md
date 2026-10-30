@@ -14,7 +14,7 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 
 - **Remote coding**: send tasks in a private Telegram chat and let Codex execute them on your server.
 - **Images and files**: send screenshots, photos, or files with task instructions, including while a task is running.
-- **Continuous conversations**: keep the current conversation context, select a project with `/cwd`, and start fresh with `/new`.
+- **Session management**: select a project with `/cwd`, create named sessions with `/new`, and find or resume conversations with `/list` and `/switch`.
 - **Live feedback**: see typing indicators and streaming replies, and send additional instructions while a task is running.
 - **Task control**: check status and the latest result, stop a task and pause new work, and retain the current conversation and task state across restarts.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
@@ -55,16 +55,20 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/start`, `/help`     | Show usage instructions                                                          |
 | `/cwd`                | Show the current working directory                                               |
 | `/cwd /absolute/path` | Change the working directory and start a new conversation                        |
-| `/new`                | Start a new conversation while keeping the working directory                     |
+| `/new [name]`         | Create and select a session, with an optional name                               |
+| `/list`               | List sessions in the current project and mark the current session                |
+| `/switch <id>`        | Switch to a session using its full ID from `/list`                               |
 | `/model`              | Show the current selection and choose model and reasoning effort                 |
 | `/permissions`        | Choose the permission mode for subsequent tasks                                  |
-| `/status`             | Show version updates, connection, directory, model, permissions, and task status |
+| `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
 | `/update`             | Ask Codex to upgrade Tellrun using the installation details                      |
 | `/last`               | Show the latest finished task's status and result                                |
 | `/stop`               | Request that the current task stop and pause new tasks                           |
 | `/resume`             | Accept new tasks again without rerunning an interrupted task                     |
 
-Wait for the current task to finish before changing directories or starting a new conversation. After `/stop`, check the final status, then send `/resume` followed by your next task.
+Wait for the current task to finish before changing directories, creating a session, or switching sessions. `/list` remains available while a task runs. After `/stop`, check the final status, then send `/resume` followed by your next task.
+
+Sessions are stored by Codex. `/list` includes non-archived sessions from Tellrun and other Codex clients in the exact current directory, ordered by recent activity, excluding subagents. `/new` without a name uses `New session`; even an empty session is saved. Creating or switching sessions keeps the selected model and permissions. Wait for confirmation before sending a task; if creation cannot be confirmed, check `/list` before retrying.
 
 ## Terminal commands
 
