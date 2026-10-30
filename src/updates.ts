@@ -15,8 +15,6 @@ const releaseVersion = z
   .string()
   .max(128)
   .regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/);
-/** 成功缓存一小时，失败一分钟后允许重试，均只保存在内存中。 */
-const cacheDurationMs = { success: 60 * 60_000, failure: 60_000 };
 /** 总时限包含 DNS、连接与响应体读取，避免慢网络拖住状态查询。 */
 const requestTimeoutMs = 3_000;
 /** 标签响应很小，限制响应体大小，避免异常服务返回无限内容。 */
@@ -74,24 +72,17 @@ async function readLatestRelease(proxyUrl: string | undefined, signal: AbortSign
   }
 }
 
-/** 状态查询共享缓存与在途请求；使用服务退出信号取消网络检查，不阻止正常使用。 */
+/** 每次状态查询直接检查 npm，使用服务退出信号取消网络请求。 */
 export function createUpdateChecker(proxyUrl?: string) {
-  let cached: { latest: string; available: boolean } | undefined;
-  let nextCheckAt = 0;
-  let pending: Promise<typeof cached> | undefined;
-
   return {
     version: tellrunVersion,
-    /** 把当前实例和有效缓存交给 Agent 核对；只生成任务说明，不在消息服务中执行升级。 */
+    /** 把当前实例信息交给 Agent 核对；只生成任务说明，不在消息服务中执行升级。 */
     upgradePrompt() {
       return [
         "请检查并升级当前运行的 Tellrun，目标是 npm latest 指向的最新正式版本。",
         `当前运行版本：${tellrunVersion}`,
         `Tellrun 安装目录：${JSON.stringify(fileURLToPath(new URL("../", import.meta.url)))}`,
         `运行 Tellrun 的 Node.js：${JSON.stringify(process.execPath)}`,
-        ...(cached && Date.now() < nextCheckAt
-          ? [`最近检查到的 npm latest 版本：${cached.latest}；执行前重新核对。`]
-          : []),
         "先确认实际安装位置、服务启动方式、最新正式版本及 Node.js 兼容性；没有更新的正式版时只报告检查结果，不降级。",
         "npm 全局安装的升级流程是 tellrun stop、npm install -g tellrun@<核对后的版本>、tellrun restart；使用当前实例对应的 Node.js/npm 和安装前缀。其他安装方式按实际部署处理，保留未提交改动。",
         "请实际完成升级，沿用当前权限与审批流程。仅升级 Tellrun，保留用户配置、会话和任务状态，不改动无关项目或升级 Codex、Node.js。",
@@ -101,31 +92,18 @@ export function createUpdateChecker(proxyUrl?: string) {
       ].join("\n");
     },
     /** 成功返回版本信息；失败或取消返回空值，不能把检查失败显示为已是最新版。 */
-    check(signal: AbortSignal): Promise<typeof cached> {
-      if (signal.aborted) return Promise.resolve(undefined);
-      if (pending) return pending;
-      if (Date.now() < nextCheckAt) return Promise.resolve(cached);
-      pending = (async () => {
-        try {
-          const latest = await readLatestRelease(
-            proxyUrl,
-            AbortSignal.any([signal, AbortSignal.timeout(requestTimeoutMs)]),
-          );
-          if (signal.aborted) return undefined;
-          cached = { latest, available: isNewerRelease(latest) };
-          nextCheckAt = Date.now() + cacheDurationMs.success;
-          return cached;
-        } catch {
-          if (!signal.aborted) {
-            cached = undefined;
-            nextCheckAt = Date.now() + cacheDurationMs.failure;
-          }
-          return undefined;
-        } finally {
-          pending = undefined;
-        }
-      })();
-      return pending;
+    async check(signal: AbortSignal) {
+      if (signal.aborted) return undefined;
+      try {
+        const latest = await readLatestRelease(
+          proxyUrl,
+          AbortSignal.any([signal, AbortSignal.timeout(requestTimeoutMs)]),
+        );
+        if (signal.aborted) return undefined;
+        return { latest, available: isNewerRelease(latest) };
+      } catch {
+        return undefined;
+      }
     },
   };
 }
