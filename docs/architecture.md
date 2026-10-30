@@ -169,6 +169,8 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 入站持久化失败时停止拉取新批次并退出恢复。当前连接器使用 `getUpdates` 和 `handleUpdate` 显式维护 offset，只有处理成功才推进；不使用会自动删除 Webhook 的 `bot.start` 或会确认最后一次尝试消息的 `bot.stop`。收到关停信号后取消读取，等待当前处理结束，不额外确认更新。失败消息和未处理批次保留重投机会，成功但尚未确认的消息也可能重投，因此不能替代 已保存的事件标识去重。[Telegram 更新接收规则](https://core.telegram.org/bots/api#getupdates)、[grammY 生命周期](https://grammy.dev/ref/core/bot)
 
+初始化与 `getUpdates` 的网络错误、429 和 5xx 在连接循环内重试，普通退避从 1 秒倍增至最多 30 秒，并遵守更长的 `retry_after`。这些请求不叠加 auto-retry；每次调用仍有独立超时，关停可取消请求与退避。重试期间不推进 offset、不确认消息、不重新处理已接收的批次，也不重启任务循环；恢复后继续收发。401、409、其他永久拒绝、已有 Webhook、消息处理和状态写入错误仍上抛退出。日志只记录错误类别、错误码与等待时间。
+
 当前按聊天来源与事件 ID 去重，重复事件不会重新创建任务或回复。`getUpdates` 成功返回后，先回收当前机器人中事件 ID 小于本次 offset 的去重标识，再处理新批次；请求失败或关停不回收。成功空响应时清理该机器人剩余的旧标识，避免服务端已过期的消息持续占用状态；其他机器人记录不受影响。发送成功但响应丢失时，outbox 重试可能产生重复通知。Telegram 不提供无限期保留更新的保证，长期离线后的恢复不能只依赖服务端消息队列。[Telegram 更新确认规则](https://core.telegram.org/bots/api#getupdates)
 
 控制路径包括 /status、/stop、审批回调、明确回复补充问题。它们不进入编码任务队列。等待审批占用当前编码任务槽，但不会占用 Node.js 事件循环。入站处理只保存必要状态并派发控制指令，不等待 Codex 完成或普通 Telegram 消息发送，避免慢请求把后续停止指令堵在同一批次中。
@@ -361,6 +363,8 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 `~/.tellrun/` 按当前运行用户的主目录解析为绝对路径；CLI 与后台服务使用同一用户和同一目录，不受执行命令时的 cwd 影响。状态、锁和配置不得写到全局 npm 包目录，避免升级覆盖、权限问题和从不同 cwd 启动产生多份数据。
 
 Linux 后台使用 systemd 用户服务，CLI 生成服务定义，通过 `systemctl --user` 管理，日志交给 journal。ExecStart 使用解析后的 Node 和 CLI 绝对路径执行 `tellrun run`；后台任务的 cwd 由会话单独指定。Type=notify 在 Telegram 初始化成功后通过 systemd-notify 报告就绪；Restart=on-failure、5 秒重启间隔与启动频率限制负责故障重启，KillMode=control-group 和 45 秒停止期限约束残留子进程。[systemd 服务](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)
+
+初始化持续断网时进程保持退避，现有 60 秒启动超时仍由 systemd 执行，超时后按故障策略重新启动；不会因连接快速失败而耗尽 60 秒内 5 次的启动限额。启动命令可能报告尚未就绪，网络恢复后服务仍会继续尝试启动。已就绪服务的长轮询断网直接在原进程内恢复。
 
 Linux 退出 SSH 后继续运行或开机自启需要检查用户 linger 状态。向导说明设置并在系统权限允许时完成；权限不足时给出所需命令，不能报告后台持久运行已配置成功。[loginctl linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)
 

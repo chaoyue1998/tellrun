@@ -27,6 +27,17 @@ const commands = [
   { command: "resume", description: "Accept new tasks" },
 ];
 
+/** 初始化操作可安全重复；与长轮询一起由连接循环负责退避重试。 */
+const connectionMethods = new Set([
+  "getMe",
+  "getWebhookInfo",
+  "setMyCommands",
+  "setChatMenuButton",
+  "getUpdates",
+]);
+/** 普通连接故障最多退避 30 秒；Telegram 的 retry_after 可以要求等待更久。 */
+const maxConnectionRetryDelayMs = 30_000;
+
 /** Telegram 连接器负责鉴权、消息转换与发送，业务逻辑交给统一处理入口。 */
 export function createTelegramConnection(
   config: Config["telegram"],
@@ -50,8 +61,9 @@ export function createTelegramConnection(
   /** 中断初始化、拉取和输入提示；正在处理的消息由 start 等待完成。 */
   const polling = new AbortController();
   let started = false;
-  /** 输入提示与流式草稿只发送最新状态，避免自动重发已过期的内容。 */
+  /** 连接请求自行重试；输入提示、草稿和回调答复不自动重发过期内容。 */
   bot.api.config.use((prev, method, payload, signal) =>
+    connectionMethods.has(method) ||
     ["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"].includes(method)
       ? prev(method, payload, signal)
       : autoRetry({ maxRetryAttempts: 2, maxDelaySeconds: 5, rethrowHttpErrors: true })(
@@ -96,16 +108,8 @@ export function createTelegramConnection(
                 ? 4_000
                 : 15_000,
           ),
-          ...([
-            "getMe",
-            "getWebhookInfo",
-            "setMyCommands",
-            "setChatMenuButton",
-            "getUpdates",
-            "sendChatAction",
-            "sendRichMessageDraft",
-            "answerCallbackQuery",
-          ].includes(method)
+          ...(connectionMethods.has(method) ||
+          ["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"].includes(method)
             ? [polling.signal]
             : []),
         ]) as Parameters<typeof prev>[2]),
@@ -220,6 +224,49 @@ export function createTelegramConnection(
     });
   });
 
+  /** 只重试连接请求；消息处理和存储错误由调用方上抛，关停同时取消请求与退避。 */
+  async function retryConnection<T>(request: () => Promise<T>) {
+    let delay = 1_000;
+    let retrying = false;
+    while (!polling.signal.aborted) {
+      try {
+        const result = await request();
+        if (polling.signal.aborted) return;
+        if (retrying) logger.info("Telegram connection restored");
+        return result;
+      } catch (error) {
+        if (polling.signal.aborted) return;
+        if (
+          !(
+            error instanceof HttpError ||
+            (error instanceof GrammyError &&
+              (error.error_code === 429 || (error.error_code >= 500 && error.error_code < 600)))
+          )
+        )
+          throw error;
+        const retryAfterMs = Math.max(
+          delay,
+          error instanceof GrammyError ? (error.parameters.retry_after ?? 0) * 1_000 : 0,
+        );
+        logger.warn(
+          {
+            errorType: error.name,
+            errorCode: error instanceof GrammyError ? error.error_code : undefined,
+            retryAfterSeconds: retryAfterMs / 1_000,
+          },
+          "Telegram connection failed; retrying",
+        );
+        retrying = true;
+        try {
+          await setTimeout(retryAfterMs, undefined, { signal: polling.signal });
+        } catch (error) {
+          if (!polling.signal.aborted) throw error;
+        }
+        delay = Math.min(delay * 2, maxConnectionRetryDelayMs);
+      }
+    }
+  }
+
   /** 原始网络错误可能带 Token，只记录类别和错误码。 */
   function logFailure(error: unknown) {
     let cause = error instanceof BotError ? error.error : error;
@@ -251,22 +298,24 @@ export function createTelegramConnection(
     /** 核实机器人身份后才启动任务，初始化不消费 Telegram 消息。 */
     async initialize() {
       try {
-        bot.botInfo = await bot.api.getMe();
-        if (polling.signal.aborted) return;
-        if ((await bot.api.getWebhookInfo()).url) {
-          logger.error("Webhook configured. Remove it before starting long polling.");
-          throw new Error("Bot has an active webhook.");
-        }
-        /** 同步默认与私聊命令，覆盖旧机器人优先级更高的私聊菜单。 */
-        await bot.api.setMyCommands(commands);
-        await bot.api.setMyCommands(commands, { scope: { type: "all_private_chats" } });
-        await bot.api.setChatMenuButton({ menu_button: { type: "commands" } });
-        if (polling.signal.aborted) return;
-        return {
-          platform: "telegram",
-          accountId: String(bot.botInfo.id),
-          userId: String(config.ownerId),
-        };
+        return await retryConnection(async () => {
+          bot.botInfo = await bot.api.getMe();
+          if (polling.signal.aborted) return;
+          if ((await bot.api.getWebhookInfo()).url) {
+            logger.error("Webhook configured. Remove it before starting long polling.");
+            throw new Error("Bot has an active webhook.");
+          }
+          /** 同步默认与私聊命令，覆盖旧机器人优先级更高的私聊菜单。 */
+          await bot.api.setMyCommands(commands);
+          await bot.api.setMyCommands(commands, { scope: { type: "all_private_chats" } });
+          await bot.api.setChatMenuButton({ menu_button: { type: "commands" } });
+          if (polling.signal.aborted) return;
+          return {
+            platform: "telegram",
+            accountId: String(bot.botInfo.id),
+            userId: String(config.ownerId),
+          };
+        });
       } catch (error) {
         if (polling.signal.aborted && error instanceof HttpError) return;
         logFailure(error);
@@ -285,12 +334,14 @@ export function createTelegramConnection(
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
             let offset = 0;
             while (!polling.signal.aborted) {
-              const updates = await bot.api.getUpdates({
-                offset,
-                timeout: 30,
-                allowed_updates: ["message", "callback_query"],
-              });
-              if (polling.signal.aborted) return;
+              const updates = await retryConnection(() =>
+                bot.api.getUpdates({
+                  offset,
+                  timeout: 30,
+                  allowed_updates: ["message", "callback_query"],
+                }),
+              );
+              if (!updates || polling.signal.aborted) return;
               store.confirmUpdates(String(bot.botInfo.id), offset, updates.length === 0);
               for (const update of updates) {
                 if (polling.signal.aborted) return;
