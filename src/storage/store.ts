@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { appDirectory } from "../config.js";
 import { createCrons } from "../core/cron.js";
@@ -139,7 +139,6 @@ export function openStore(path = join(appDirectory, "state.json")) {
       cron: State["tasks"][number]["cron"] = null,
     ) {
       return update(() => {
-        if (!channel.cwd) throw new Error("Set a working directory first.");
         if (state.tasks.some((task) => activeTaskStatuses.has(task.status)))
           throw new Error("A task is already running.");
         const task: State["tasks"][number] = {
@@ -304,7 +303,8 @@ export function openStore(path = join(appDirectory, "state.json")) {
             channel = {
               ...message.channel,
               id: state.channels.reduce((max, item) => Math.max(max, item.id), 0) + 1,
-              cwd: null,
+              /** 创建聊天时固定服务启动目录，后续命令直接使用已保存的路径。 */
+              cwd: realpathSync(process.cwd()),
               sessionId: null,
               paused: false,
               permissionMode: null,
@@ -349,12 +349,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
           });
       },
       /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
-      setSession(
-        channelId: number,
-        cwd: string | null,
-        sessionId: string | null = null,
-        reply?: string,
-      ) {
+      setSession(channelId: number, cwd: string, sessionId: string | null, reply?: string) {
         update(() => {
           const channel = state.channels.find((channel) => channel.id === channelId);
           if (channel) {
@@ -605,9 +600,12 @@ export function openStore(path = join(appDirectory, "state.json")) {
           (interaction.expiresAt !== null && interaction.expiresAt <= Date.now())
         )
           return "Request closed. Check /status.";
-        if (content.type === "interaction" && content.action === "stop") {
-          /** 审批不再提供 Stop，旧审批按钮不能暂停聊天；提问仍可明确停止。 */
-          if (interaction.kind === "approval") return "Button expired. Use /stop to stop the task.";
+        /** 只有问题卡片提供停止操作，审批卡片仅接受审批选项。 */
+        if (
+          interaction.kind === "question" &&
+          content.type === "interaction" &&
+          content.action === "stop"
+        ) {
           update(() => {
             const channel = state.channels.find((channel) => channel.id === channelId);
             if (channel) {

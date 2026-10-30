@@ -14,18 +14,16 @@ const id = z.number().int().positive();
 /** 重试次数和时间均为非负整数。 */
 const nonnegativeInteger = z.number().int().nonnegative();
 
-/** 附件引用不含凭据；旧任务没有附件时按空数组读取。 */
-const attachmentsSchema = z
-  .array(
-    z.strictObject({
-      id: z.uuid(),
-      fileId: z.string().min(1),
-      name: z.string(),
-      kind: z.enum(["image", "file"]),
-      size: nonnegativeInteger.nullable(),
-    }),
-  )
-  .default([]);
+/** 附件引用不含凭据；没有附件时显式保存空数组。 */
+const attachmentsSchema = z.array(
+  z.strictObject({
+    id: z.uuid(),
+    fileId: z.string().min(1),
+    name: z.string(),
+    kind: z.enum(["image", "file"]),
+    size: nonnegativeInteger.nullable(),
+  }),
+);
 
 /** 审批、权限、模型和推理档位共用展示选项。 */
 const optionSchema = z.strictObject({ id: z.string().min(1), label: z.string() });
@@ -38,7 +36,7 @@ const menuSchema = z.strictObject({
   messages: z.array(z.strictObject({ messageId: id, text: z.string() })),
 });
 
-/** 只保存重启所需的业务状态；文件损坏时拒绝启动，不重置为空状态。 */
+/** 仅接受当前状态结构；字段缺失或格式无效时拒绝启动，不迁移或清空文件。 */
 export const stateSchema = z
   .strictObject({
     channels: z.array(
@@ -48,53 +46,37 @@ export const stateSchema = z
         accountId: z.string(),
         chatId: z.string(),
         userId: z.string(),
-        cwd: z.string().nullable(),
+        cwd: z.string().min(1),
         sessionId: z.string().nullable(),
         paused: z.boolean(),
-        /** 模式标识属于 Agent；空值沿用默认模式，兼容旧状态文件。 */
-        permissionMode: z.string().min(1).nullable().default(null),
-        permissionMenu: menuSchema.nullable().default(null),
-        /** 旧状态没有模型选择时沿用 Codex 配置。 */
-        model: z.string().min(1).nullable().default(null),
-        reasoningEffort: z.string().min(1).nullable().default(null),
-        modelMenu: z.preprocess(
-          /** 旧菜单没有阶段标记；读取时补齐，原选择与消息清理记录保持不变。 */
-          (menu) =>
-            menu && typeof menu === "object" && !("stage" in menu)
-              ? {
-                  ...menu,
-                  stage:
-                    "model" in menu
-                      ? "reasoning"
-                      : "options" in menu && Array.isArray(menu.options) && menu.options.length
-                        ? "model"
-                        : "loading",
-                }
-              : menu,
-          z
-            .discriminatedUnion("stage", [
-              menuSchema.extend({ stage: z.literal("loading"), options: z.tuple([]) }),
-              menuSchema.extend({
-                stage: z.literal("model"),
-                options: z
-                  .array(
-                    optionSchema.extend({
-                      reasoningEfforts: z.array(optionSchema).default([]),
-                      defaultReasoningEffort: z.string().default(""),
-                    }),
-                  )
-                  .min(1),
-              }),
-              menuSchema.extend({
-                stage: z.literal("reasoning"),
-                /** 第二步只暂存模型，选定推理强度后再一起应用。 */
-                model: optionSchema,
-                options: z.array(optionSchema).min(1),
-              }),
-            ])
-            .nullable()
-            .default(null),
-        ),
+        /** 模式标识属于 Agent；空值沿用默认模式。 */
+        permissionMode: z.string().min(1).nullable(),
+        permissionMenu: menuSchema.nullable(),
+        /** 显式空值表示沿用 Codex 的模型配置。 */
+        model: z.string().min(1).nullable(),
+        reasoningEffort: z.string().min(1).nullable(),
+        modelMenu: z
+          .discriminatedUnion("stage", [
+            menuSchema.extend({ stage: z.literal("loading"), options: z.tuple([]) }),
+            menuSchema.extend({
+              stage: z.literal("model"),
+              options: z
+                .array(
+                  optionSchema.extend({
+                    reasoningEfforts: z.array(optionSchema),
+                    defaultReasoningEffort: z.string(),
+                  }),
+                )
+                .min(1),
+            }),
+            menuSchema.extend({
+              stage: z.literal("reasoning"),
+              /** 第二步只暂存模型，选定推理强度后再一起应用。 */
+              model: optionSchema,
+              options: z.array(optionSchema).min(1),
+            }),
+          ])
+          .nullable(),
       }),
     ),
     inboundUpdates: z.array(
@@ -132,23 +114,21 @@ export const stateSchema = z
         cron: z.strictObject({ id, scheduledAt: nonnegativeInteger }).nullable().default(null),
         cwd: z.string(),
         sessionId: z.string().nullable(),
-        /** 旧任务没有轮次 ID，仍按结果不确定处理，不能猜测或重跑。 */
-        runId: z.string().min(1).nullable().default(null),
+        /** 派发前显式保存空值，取得轮次 ID 后用于重启恢复。 */
+        runId: z.string().min(1).nullable(),
         prompt: z.string(),
         attachments: attachmentsSchema,
-        permissionMode: z.string().min(1).nullable().default(null),
-        model: z.string().min(1).nullable().default(null),
-        reasoningEffort: z.string().min(1).nullable().default(null),
-        /** 旧状态文件没有补充输入；发送中记录用于重启后避免不确定重放。 */
-        inputs: z
-          .array(
-            z.strictObject({
-              text: z.string(),
-              attachments: attachmentsSchema,
-              status: z.enum(["pending", "preparing", "sending", "accepted", "failed"]),
-            }),
-          )
-          .default([]),
+        permissionMode: z.string().min(1).nullable(),
+        model: z.string().min(1).nullable(),
+        reasoningEffort: z.string().min(1).nullable(),
+        /** 发送中记录用于重启后避免不确定重放；没有补充输入时保存空数组。 */
+        inputs: z.array(
+          z.strictObject({
+            text: z.string(),
+            attachments: attachmentsSchema,
+            status: z.enum(["pending", "preparing", "sending", "accepted", "failed"]),
+          }),
+        ),
         status: z.enum([
           "queued",
           "preparing",
@@ -163,50 +143,39 @@ export const stateSchema = z
         result: z.string().nullable(),
       }),
     ),
-    /** 旧文件自动补空数组；请求编号和等待对象只保存在 Agent 内存中。 */
-    interactions: z
-      .array(
-        z.strictObject({
-          id: z.uuid(),
-          taskId: id,
-          kind: z.enum(["approval", "question"]),
-          text: z.string(),
-          /** 审批没有本地期限；旧快照中的时间戳仍可读取。 */
-          expiresAt: nonnegativeInteger.nullable(),
-          blocking: z.boolean(),
-          /** 兼容旧审批快照；恢复流程仍会作废旧按钮，不重放批准。 */
-          choices: z.array(
-            z.union([
-              optionSchema,
-              z.enum(["accept", "decline"]).transform((id) => ({
-                id,
-                label: id === "accept" ? "Allow once" : "Decline",
-              })),
-            ]),
-          ),
-          questions: z.array(
-            z.strictObject({
-              id: z.string(),
-              header: z.string(),
-              question: z.string(),
-              options: z.array(z.strictObject({ label: z.string(), description: z.string() })),
-              allowText: z.boolean(),
-              answer: z.string().nullable(),
-            }),
-          ),
-          decision: z.string().min(1).nullable(),
-          status: z.enum(["pending", "ready", "sending", "closed"]),
-          resolution: z.string().nullable(),
-          messages: z.array(
-            z.strictObject({
-              messageId: id,
-              questionIndex: nonnegativeInteger.optional(),
-              text: z.string(),
-            }),
-          ),
-        }),
-      )
-      .default([]),
+    /** 请求编号和等待对象只保存在 Agent 内存中。 */
+    interactions: z.array(
+      z.strictObject({
+        id: z.uuid(),
+        taskId: id,
+        kind: z.enum(["approval", "question"]),
+        text: z.string(),
+        /** 审批没有本地期限，问题保存到期时间。 */
+        expiresAt: nonnegativeInteger.nullable(),
+        blocking: z.boolean(),
+        choices: z.array(optionSchema),
+        questions: z.array(
+          z.strictObject({
+            id: z.string(),
+            header: z.string(),
+            question: z.string(),
+            options: z.array(z.strictObject({ label: z.string(), description: z.string() })),
+            allowText: z.boolean(),
+            answer: z.string().nullable(),
+          }),
+        ),
+        decision: z.string().min(1).nullable(),
+        status: z.enum(["pending", "ready", "sending", "closed"]),
+        resolution: z.string().nullable(),
+        messages: z.array(
+          z.strictObject({
+            messageId: id,
+            questionIndex: nonnegativeInteger.optional(),
+            text: z.string(),
+          }),
+        ),
+      }),
+    ),
     outbox: z.array(
       z.strictObject({
         id,

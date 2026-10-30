@@ -76,34 +76,18 @@ export function parseCodexInteraction(
     const params = z
       .object({
         turnId: z.string(),
-        kind: z.enum(["command", "writeStdin"]).default("command"),
+        kind: z.enum(["command", "writeStdin"]),
         command: z.string().nullish(),
         cwd: z.string().nullish(),
         reason: z.string().nullish(),
         networkApprovalContext: z.object({ host: z.string(), protocol: z.string() }).nullish(),
         additionalPermissions: z.unknown().optional(),
-        availableDecisions: z.array(z.unknown()).nullish(),
-        proposedExecpolicyAmendment: z.array(z.string()).nullish(),
+        availableDecisions: z.array(z.unknown()),
       })
       .parse(value);
     interaction.text = `${params.kind === "writeStdin" ? "Terminal input" : "Command"}\nDirectory: ${params.cwd ?? cwd}\n${params.command ?? "Command unavailable."}${params.reason ? `\nReason: ${params.reason}` : ""}${params.networkApprovalContext ? `\nNetwork: ${params.networkApprovalContext.protocol}://${params.networkApprovalContext.host}` : ""}${params.additionalPermissions ? `\nPermissions: ${JSON.stringify(params.additionalPermissions, null, 2)}` : ""}`;
-    /** 显式选项具有优先权；旧服务未返回列表时使用协议的基本决定与所提规则。 */
-    const decisions = params.availableDecisions ?? [
-      "accept",
-      "acceptForSession",
-      ...(params.proposedExecpolicyAmendment?.length
-        ? [
-            {
-              acceptWithExecpolicyAmendment: {
-                execpolicy_amendment: params.proposedExecpolicyAmendment,
-              },
-            },
-          ]
-        : []),
-      "decline",
-      "cancel",
-    ];
-    for (const [index, value] of decisions.entries()) {
+    /** 只展示当前服务明确提供且客户端支持的决定。 */
+    for (const [index, value] of params.availableDecisions.entries()) {
       const parsed = commandDecisionSchema.safeParse(value);
       if (!parsed.success) continue;
       const decision = parsed.data;
@@ -181,6 +165,7 @@ export function parseCodexInteraction(
             header: "",
             question: question.title,
             isOther: true,
+            isSecret: false,
             options: question.options?.map((label) => ({ label, description: "" })) ?? null,
           })),
         }))
@@ -188,16 +173,15 @@ export function parseCodexInteraction(
     const params = z
       .object({
         turnId: z.string(),
-        isBlocking: z.boolean().default(true),
-        autoResolutionMs: z.number().int().nonnegative().nullish(),
+        isBlocking: z.boolean(),
         questions: z
           .array(
             z.object({
               id: z.string().min(1),
               header: z.string(),
               question: z.string(),
-              isOther: z.boolean().default(false),
-              isSecret: z.boolean().default(false),
+              isOther: z.boolean(),
+              isSecret: z.boolean(),
               options: z
                 .array(z.object({ label: z.string().min(1), description: z.string() }))
                 .max(20)
@@ -216,8 +200,7 @@ export function parseCodexInteraction(
     interaction.blocking = params.isBlocking;
     interaction.choices = [];
     /** 只有提问设置本地期限；审批持续等待用户决定。 */
-    interaction.expiresAt =
-      Date.now() + Math.min(10 * 60_000, params.autoResolutionMs ?? 10 * 60_000);
+    interaction.expiresAt = Date.now() + 10 * 60_000;
     interaction.questions = params.questions.map((question) => ({
       id: question.id,
       header: question.header,

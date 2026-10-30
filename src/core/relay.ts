@@ -50,8 +50,6 @@ export function createRelayService(options: {
       if (stopping) throw new Error("Service stopping. Message not accepted.");
       let controlQuery: (() => Promise<void>) | undefined;
       const reply = options.store.accept(message, (channel) => {
-        /** 未指定目录时沿用服务启动目录，并随消息一同保存，后续可用 /cwd 切换。 */
-        if (!channel.cwd) options.store.setSession(channel.id, realpathSync(process.cwd()));
         const task = options.store.activeTask();
         if (message.content.type === "permissions" || message.content.type === "model")
           return options.store.chooseOption(channel.id, message.content);
@@ -95,7 +93,7 @@ export function createRelayService(options: {
                 ) => {
                   try {
                     return await options.agent.describeModel(
-                      selection.cwd ?? process.cwd(),
+                      selection.cwd,
                       selection,
                       modelLoading.signal,
                     );
@@ -167,7 +165,7 @@ export function createRelayService(options: {
               } catch {
                 return "Cannot access directory. Check the path and permissions.";
               }
-              if (cwd !== channel.cwd) options.store.setSession(channel.id, cwd);
+              if (cwd !== channel.cwd) options.store.setSession(channel.id, cwd, null);
               return `Directory: ${cwd}\n${channel.paused ? "Paused. Send /resume to continue." : "Send a task to Codex."}`;
             }
             case "list": {
@@ -176,10 +174,7 @@ export function createRelayService(options: {
               controlQuery = async () => {
                 let sessions: AgentOption[];
                 try {
-                  sessions = await options.agent.listSessions(
-                    snapshot.cwd ?? process.cwd(),
-                    modelLoading.signal,
-                  );
+                  sessions = await options.agent.listSessions(snapshot.cwd, modelLoading.signal);
                 } catch {
                   if (!stopping)
                     options.store.reply(snapshot.id, "Cannot load sessions. Try /list again.");
@@ -218,18 +213,14 @@ export function createRelayService(options: {
                       name === "new"
                         ? await options.agent.createSession(
                             {
-                              cwd: snapshot.cwd ?? process.cwd(),
+                              cwd: snapshot.cwd,
                               name: args,
                               model: snapshot.model,
                               permissionMode: snapshot.permissionMode,
                             },
                             modelLoading.signal,
                           )
-                        : await options.agent.readSession(
-                            snapshot.cwd ?? process.cwd(),
-                            args,
-                            modelLoading.signal,
-                          );
+                        : await options.agent.readSession(snapshot.cwd, args, modelLoading.signal);
                   } catch (error) {
                     if (!stopping)
                       options.store.reply(

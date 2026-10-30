@@ -60,7 +60,7 @@ export function createTelegramConnection(
           signal,
         ),
   );
-  /** 超时覆盖整次调用及重试；grammY 的旧 signal 类型与 Node 原生接口兼容。 */
+  /** 超时覆盖整次调用及重试；signal 使用当前 grammY 请求接口的类型。 */
   bot.api.config.use((prev, method, payload, signal) =>
     prev(
       method,

@@ -201,7 +201,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 model: z.string().min(1),
                 displayName: z.string(),
                 hidden: z.boolean(),
-                isDefault: z.boolean().optional(),
+                isDefault: z.boolean(),
                 supportedReasoningEfforts: z.array(
                   z.object({
                     reasoningEffort: z.string().min(1),
@@ -523,13 +523,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             }))
           : [parsed.request]) {
           if (message.id === undefined) {
-            if (
-              interaction.questions.some(
-                (question) =>
-                  seenQuestions.has(question.id) || seenQuestions.has(JSON.parse(question.id)[1]),
-              )
-            )
-              continue;
+            if (interaction.questions.some((question) => seenQuestions.has(question.id))) continue;
             for (const question of interaction.questions) seenQuestions.add(question.id);
           }
           interactions.set(interaction.id, {
@@ -674,7 +668,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             if (event.item.type === "userMessage") {
               for (const content of z
                 .array(z.object({ type: z.string(), text: z.string().optional() }))
-                .parse(event.item.content ?? [])) {
+                .parse(event.item.content)) {
                 if (content.type !== "text") continue;
                 const reply = content.text
                   ?.trim()
@@ -685,10 +679,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 let answers: { questionItemId: string }[];
                 try {
                   answers = z
-                    .preprocess(
-                      (value) => (Array.isArray(value) ? value : [value]),
-                      z.array(z.object({ questionItemId: z.string(), answer: z.string().min(1) })),
-                    )
+                    .array(z.object({ questionItemId: z.string(), answer: z.string().min(1) }))
                     .parse(JSON.parse(reply[1]));
                 } catch {
                   /** 普通用户文字也可能包含该标记；无效封套不影响任务。 */
@@ -700,9 +691,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                     if (
                       interaction.requestId !== null ||
                       !interaction.request.questions.some(
-                        (question) =>
-                          question.id === answer.questionItemId ||
-                          JSON.parse(question.id)[1] === answer.questionItemId,
+                        (question) => question.id === answer.questionItemId,
                       )
                     )
                       continue;
@@ -909,12 +898,14 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           .object({
             thread: z.object({
               id: z.string().min(1),
-              status: z.object({ type: z.string() }).optional(),
+              status: z.object({ type: z.string() }),
             }),
             approvalPolicy: z.unknown(),
             approvalsReviewer: z.string(),
-            sandbox: z.object({ type: z.string() }),
-            model: z.string().optional(),
+            sandbox: z.object({
+              type: z.enum(["dangerFullAccess", "readOnly", "externalSandbox", "workspaceWrite"]),
+            }),
+            model: z.string(),
           })
           .parse(
             await request(input.sessionId ? "thread/resume" : "thread/start", {
@@ -924,7 +915,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               ...(input.model ? { model: input.model } : {}),
             }),
           );
-        if (response.thread.status?.type !== "idle")
+        if (response.thread.status.type !== "idle")
           throw new Error("Codex session busy. Message not sent; wait until it is idle.");
         /** 模型被服务端替换时停止派发，避免悄悄使用其他模型。 */
         if (input.model && response.model !== input.model)

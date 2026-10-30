@@ -68,11 +68,10 @@ export function createMenus(storage: {
             channel.platform === source.platform &&
             channel.accountId === source.accountId &&
             channel.userId === source.userId &&
-            channel.cwd &&
             channel.modelMenu?.stage === "loading" &&
             channel.modelMenu.expiresAt > Date.now(),
         );
-      if (channel?.modelMenu && channel.cwd)
+      if (channel?.modelMenu)
         return { channelId: channel.id, cwd: channel.cwd, id: channel.modelMenu.id };
     },
     /** 新菜单、换目录和过期后丢弃旧查询；失败时保留原模型选择。 */
