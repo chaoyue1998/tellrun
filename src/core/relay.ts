@@ -105,18 +105,18 @@ export function createRelayService(options: {
                   value
                     ? `${value.label} · ${value.reasoningEffort}`
                     : "Unavailable (check /model)";
-                /** 检查失败单独提示；有新版本时引导用户提交升级任务。 */
-                const versionStatus = !update
-                  ? "update check unavailable; check network or proxy"
+                /** 仅在检查失败或发现更新时附加提示，最新版只显示版本号。 */
+                const versionSuffix = !update
+                  ? " (update check unavailable; check network or proxy)"
                   : update.available
-                    ? `update available: ${update.latest}`
-                    : "up to date";
+                    ? ` (update available: ${update.latest})`
+                    : "";
                 const upgradeHint = update?.available
                   ? `\n\nSend /update to ask ${options.agent.name} to upgrade Tellrun.`
                   : "";
                 options.store.reply(
                   snapshot.id,
-                  `Service: connected\nTellrun: ${options.updates.version} (${versionStatus})\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
+                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
                 );
               };
               return;
