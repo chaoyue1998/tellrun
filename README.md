@@ -80,29 +80,39 @@ Sessions are stored by Codex. `/list` shows up to 10 non-archived sessions from 
 
 ### Scheduled tasks
 
+| Command | Purpose |
+| --- | --- |
+| `/cron` | List this chat's schedule IDs, enabled status, expressions, timezones, directories, task descriptions, and next run times |
+| `/cron add <minute> <hour> <day> <month> <weekday> <task>` | Create and enable a five-field cron schedule; the task description can contain spaces |
+| `/cron del <id>` | Delete a schedule and its pending trigger |
+| `/cron enable <id>` | Enable a schedule, starting at the next matching time |
+| `/cron disable <id>` | Disable a schedule and clear its pending trigger |
+
 For example, check the current project at 09:00 server time every weekday:
 
 ```text
 /cron add 0 9 * * 1-5 Check the project and report issues
 ```
 
-Manage schedules with `/cron del <id>`, `/cron enable <id>`, and `/cron disable <id>`. 
-
 ## Terminal commands
 
-Run these commands in the terminal on the computer or server running Tellrun.
+Run these commands on the computer or server running Tellrun, as the same operating system user that configured it. Background services use systemd on Linux or launchd on macOS; use `tellrun run` for foreground operation.
 
-| Command                     | Purpose                                                                 |
-| --------------------------- | ----------------------------------------------------------------------- |
-| `tellrun start`             | Start the background service                                            |
-| `tellrun start --enable`    | Start and enable automatic startup: at boot on Linux, at login on macOS |
-| `tellrun status`            | Show service status and data paths                                      |
-| `tellrun logs`              | Show the latest 100 log entries                                         |
-| `tellrun logs -f`           | Follow logs                                                             |
-| `tellrun restart`           | Restart with the current configuration or installed version             |
-| `tellrun stop`              | Stop the background service                                             |
-| `tellrun uninstall`         | Stop and remove the service and global npm package, keeping user data   |
-| `tellrun --help`            | Show command help                                                       |
+| Command | Purpose |
+| --- | --- |
+| `tellrun setup` | Configure interactively, then choose to start the service, enable automatic startup, or save only; requires an interactive terminal |
+| `tellrun run` | Run in the foreground for diagnostics or an external process manager; stop with `Ctrl+C` |
+| `tellrun start [--enable]` | Create or update the current user's service definition and start it; add `--enable` for automatic startup at boot on Linux or at login on macOS |
+| `tellrun stop` | Stop the background service, keeping its definition and automatic startup settings |
+| `tellrun restart` | Restart with the current configuration or installed version and update the service's Node.js and CLI paths |
+| `tellrun status` | Show service status, automatic startup status, and configuration and data paths |
+| `tellrun logs [-f]` | Show the latest 100 background log entries; add `-f` or `--follow` to follow new entries, and exit the viewer with `Ctrl+C` |
+| `tellrun uninstall` | Remove the service and, for a global installation, the current npm package; keep user data |
+| `tellrun -h`, `tellrun --help` | Show general help |
+| `tellrun help [command]` | Show general or subcommand help; also accepts `tellrun <command> -h` or `tellrun <command> --help`, for example `tellrun logs --help` |
+| `tellrun -V`, `tellrun --version` | Show the current CLI version; the short option is uppercase `-V` |
+
+Telegram's `/stop` controls the coding task; terminal command `tellrun stop` controls the background service. `/restart` keeps the current Node.js and entry-point paths. Use `tellrun restart` to update those paths after an upgrade.
 
 ### Upgrade
 

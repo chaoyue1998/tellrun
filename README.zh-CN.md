@@ -80,29 +80,39 @@ tellrun setup
 
 ### 定时任务
 
+| 命令 | 作用 |
+| --- | --- |
+| `/cron` | 列出当前聊天的计划 ID、启用状态、表达式、时区、目录、任务描述和下次执行时间 |
+| `/cron add <分> <时> <日> <月> <周> <任务描述>` | 创建并启用五段 Cron 计划，任务描述可以包含空格 |
+| `/cron del <id>` | 删除计划及其待执行触发 |
+| `/cron enable <id>` | 启用计划，从下一个匹配时间开始执行 |
+| `/cron disable <id>` | 禁用计划并清空待执行触发 |
+
 例如，每个工作日的服务器时间 09:00 检查当前项目：
 
 ```text
 /cron add 0 9 * * 1-5 检查项目并汇报问题
 ```
 
-使用 `/cron del <id>`、`/cron enable <id>` 和 `/cron disable <id>` 管理计划。
-
 ## 终端命令
 
-在运行 Tellrun 的电脑或服务器上执行以下命令。
+在运行 Tellrun 的电脑或服务器上，以配置 Tellrun 的同一系统用户执行。后台服务使用 Linux systemd 或 macOS launchd；前台运行使用 `tellrun run`。
 
-| 命令                        | 作用                                             |
-| --------------------------- | ------------------------------------------------ |
-| `tellrun start`             | 启动后台服务                                     |
-| `tellrun start --enable`    | 启动服务并启用自动启动：Linux 开机、macOS 登录时 |
-| `tellrun status`            | 查看服务状态与数据路径                           |
-| `tellrun logs`              | 查看最近 100 条日志                              |
-| `tellrun logs -f`           | 持续跟随日志                                     |
-| `tellrun restart`           | 重启服务，加载新配置或新版本                     |
-| `tellrun stop`              | 停止后台服务                                     |
-| `tellrun uninstall`         | 停止并移除服务，卸载 npm 全局包，保留用户数据     |
-| `tellrun --help`            | 查看命令帮助                                     |
+| 命令 | 作用 |
+| --- | --- |
+| `tellrun setup` | 交互配置，并选择启动服务、启用自启或仅保存配置；需要交互式终端 |
+| `tellrun run` | 前台运行，适合终端诊断或外部进程管理器托管；使用 `Ctrl+C` 停止 |
+| `tellrun start [--enable]` | 创建或更新当前用户的服务定义，并启动后台服务；加 `--enable` 启用自动启动（Linux 开机、macOS 登录时） |
+| `tellrun stop` | 停止后台服务，保留服务定义与自启设置 |
+| `tellrun restart` | 重启后台服务，加载新配置或新版本，并更新 Node.js 和 CLI 入口路径 |
+| `tellrun status` | 查看服务状态、自启状态、配置与数据路径 |
+| `tellrun logs [-f]` | 查看最近 100 条后台日志；加 `-f` 或 `--follow` 持续跟随，使用 `Ctrl+C` 退出查看 |
+| `tellrun uninstall` | 统一移除服务；全局安装同时卸载当前 npm 包，保留用户数据 |
+| `tellrun -h`、`tellrun --help` | 显示总帮助 |
+| `tellrun help [命令]` | 显示总帮助或子命令帮助；也可使用 `tellrun <命令> -h` 或 `tellrun <命令> --help`，例如 `tellrun logs --help` |
+| `tellrun -V`、`tellrun --version` | 显示当前 CLI 版本；短参数为大写 `-V` |
+
+Telegram 的 `/stop` 控制编码任务，终端的 `tellrun stop` 控制后台服务。`/restart` 沿用当前 Node.js 和入口路径；升级后需要更新后台服务路径时，使用 `tellrun restart`。
 
 ### 升级
 
