@@ -25,6 +25,13 @@ const attachmentsSchema = z.array(
   }),
 );
 
+/** 出站附件引用 Agent 已保存的产物，不复制图片正文或保存下载凭据。 */
+const resultAttachmentSchema = z.strictObject({
+  name: z.string().min(1),
+  path: z.string().min(1),
+  kind: z.enum(["image", "file"]),
+});
+
 /** 审批、权限、模型和推理档位共用展示选项。 */
 const optionSchema = z.strictObject({ id: z.string().min(1), label: z.string() });
 
@@ -183,6 +190,8 @@ export const stateSchema = z
         text: z.string(),
         /** 仅任务输出使用 Markdown；旧队列和控制消息默认保留原文。 */
         markdown: z.boolean().optional(),
+        /** 每张图片独立排队，失败重试不重发已成功的文字或其他图片。 */
+        attachment: resultAttachmentSchema.optional(),
         attempts: nonnegativeInteger,
         retryAt: nonnegativeInteger,
         interactionId: z.uuid().optional(),

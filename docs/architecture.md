@@ -189,6 +189,8 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 
 附件准备复用 Telegram 连接的代理，通过 getFile 获取临时下载路径；链接和 Token 不进入任务状态、Agent 输入或日志。下载总时限为 60 秒，声明大小、响应长度和实际流量均受 20 MB 上限约束。文件名移除路径与控制字符，每个附件写入独立目录下的文件；完整下载刷盘后才公开路径，失败或取消时删除未完成文件。常见图片按文件头识别，通过 localImage 传入 turn/start 或 turn/steer；其他文件以本地路径连同说明提供给 Codex。任务结束会取消尚未完成的补充附件准备，避免迟到下载提交到下一任务。[Codex 图片输入](https://learn.chatgpt.com/docs/app-server#turns)、[Telegram 文件下载](https://core.telegram.org/bots/api#getfile)
 
+出站图片使用 Codex 0.165.0 的 `imageGeneration` 条目：仅在 `item/completed` 且 `status` 为 `completed` 时读取绝对路径 `savedPath`，并按路径去重；`imageView`、输入图片和失败生成不会自动回传。图片已生成却没有本地路径时明确提示；不从普通文本或工具日志中猜测附件路径。[官方图片条目定义](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/app-server-protocol/schema/typescript/ImageGenerationItem.ts)
+
 ## 会话与数据模型
 
 当前不实现项目列表或项目选择，也不要求 `projects.json`。Tellrun 不设置项目目录白名单；任务执行使用用户指定并由当前会话沿用的工作目录。
@@ -211,6 +213,8 @@ Telegram SDK 类型仅在 IM 连接模块使用，Codex RPC 类型仅在 Agent �
 任务历史、会话名称和完整 Agent 上下文继续由 Codex 管理。Tellrun 只保存每个聊天当前选中的原生 sessionId，不另建会话索引。Tellrun 不另存任务或审批日志，也不重复保存思考过程、流式文本、工具原始输出或 RPC 等待状态；交互详情仅在处理和消息清理期间保留，没有交互时显式保存空数组。
 
 任务及 inputs 保存 attachments 引用，没有附件时显式保存空数组。附件正文存放于 `~/.tellrun/attachments/<附件 ID>/`，状态只保存下载引用；成功文件可在重启后复用，也供后续对话读取。历史任务回收不删除用户上传的文件，附件由用户按需清理。
+
+新结果的任务终态、文字回复与逐图 outbox 记录在同一事务中保存；每张图片单独确认发送，重试或重启不会重新发送已经出队的文字及其他图片。图片引用只保留到发送出队，不额外归档或补发历史图片。图片保留在 Codex 的原生成位置，不另存副本或将 Base64 写入状态，原文件必须保持可读。
 
 ## 定时计划与调度
 
@@ -328,6 +332,8 @@ delivery 通过 claimReply 从 outbox 领取已持久化的回复，内存中保
 Markdown 回复优先在换行处分段，每段正文控制在 30000 的字符串长度内，为顺序编号和代码围栏留出空间；超长单行按 Unicode 字符拆分，跨段代码块自动关闭并重新打开围栏，保留语言标记。服务端以 400 拒绝 Markdown 时，同一次调用改用富消息的纯文本段落重试一次，保留原文；网络错误和 429 不触发格式降级。命令帮助、菜单和审批提示仍使用纯文本与 InlineKeyboard，避免路径、命令参数和差异被误解析；旧 outbox 无 Markdown 标记时继续按纯文本发送。状态信息只包含用户有用的会话、工作目录、进度与操作，不展示 RPC ID 等内部实现标识。
 
 Telegram 429 按 retry_after 等待；其他可恢复的网络错误使用有限次数退避重试。超过当前尝试上限后保留 outbox，稍后恢复发送。对“已经发送但响应丢失”的场景，Telegram 侧可能出现重复通知，应用不能据此重跑编码任务。
+
+出站图片通过 `InputFile` 上传本地文件：不超过 10 MB 时优先 `sendPhoto`，照片被 Telegram 以 400 拒绝时尝试 `sendDocument`；超过 10 MB 的图片直接按文件发送，上传上限为 50 MB。附件调用最多 60 秒，服务关停可中止并保留待发送记录。文件缺失、无效、超限或被永久拒绝时，通过文字通知发送失败，避免静默丢图；网络和限流错误继续使用 outbox 退避。
 
 auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询为 40 秒；单次调用中 429、5xx 最多重试两次，长等待或网络错误交给外层处理。发送失败由 outbox 持久化退避时间，429 遵守 retry_after；永久拒绝记录诊断日志并移出队列，`/last` 仅保留每个聊天的最近结果。401、轮询或存储故障退出服务。接收与发送循环独立，等待发送不会阻塞控制消息。Codex turn/start 不自动重试。
 

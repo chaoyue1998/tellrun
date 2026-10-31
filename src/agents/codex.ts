@@ -2,13 +2,14 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { JSONRPCErrorException } from "json-rpc-2.0";
 import WebSocket from "ws";
 import { z } from "zod";
 import type {
   Agent,
+  AgentAttachment,
   AgentInteraction,
   AgentModel,
   AgentOption,
@@ -362,6 +363,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       const completed = Promise.withResolvers<AgentResult | undefined>();
       /** 按首次出现顺序保存全部回复与文件变更标题，完整事件覆盖同一条增量。 */
       const messages = new Map<string, string>();
+      /** 仅收集当前轮次已生成的图片，按路径去重以避免重复发送同一产物。 */
+      const generatedImages = new Map<string, AgentAttachment>();
       /** 应用随机 ID 隔离每次连接；已见 RPC 编号保留到任务结束，重复请求不生成新按钮。 */
       const interactions = new Map<
         string,
@@ -403,6 +406,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           result
             ? {
                 ...result,
+                ...(generatedImages.size ? { attachments: [...generatedImages.values()] } : {}),
                 text:
                   /** 异常和恢复建议放在已有输出之前，避免长回复淹没通知。 */
                   [
@@ -413,7 +417,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                     formatOutput(),
                   ]
                     .filter(Boolean)
-                    .join("\n\n") || "Codex finished with no text output.",
+                    .join("\n\n") ||
+                  (generatedImages.size ? "图片已生成。" : "Codex finished with no text output."),
               }
             : undefined,
         );
@@ -685,10 +690,26 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   delivery: z.string().nullish(),
                   questions: z.array(z.unknown()).nullish(),
                   content: z.unknown().optional(),
+                  savedPath: z.string().nullish(),
                 }),
               })
               .parse(message.params);
             if (event.threadId !== sessionId || !recordRun(event.turnId)) return;
+            /** 官方 imageGeneration 的 savedPath 指向产物；imageView 和输入图片不回传。 */
+            if (
+              message.method === "item/completed" &&
+              event.item.type === "imageGeneration" &&
+              event.item.status === "completed"
+            ) {
+              const path = event.item.savedPath;
+              if (path && isAbsolute(path) && !path.includes("\0")) {
+                generatedImages.set(path, { path, name: basename(path), kind: "image" });
+                messages.delete(event.item.id);
+              } else {
+                messages.set(event.item.id, "图片已生成，但 Codex 未提供可发送的本地文件路径。");
+                input.onText(formatOutput());
+              }
+            }
             if (event.item.type === "fileChange") {
               if (event.item.changes) fileChanges.set(event.item.id, event.item.changes);
               messages.set(

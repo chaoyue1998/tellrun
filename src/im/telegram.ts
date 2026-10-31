@@ -6,8 +6,13 @@ import { Bot, BotError, GrammyError, HttpError } from "grammy";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import type { MessageHandler } from "../core/types.js";
+import { AttachmentError } from "../storage/attachments.js";
 import type { Store } from "../storage/store.js";
-import { createTelegramAttachmentLoader, telegramAttachments } from "./telegram-files.js";
+import {
+  createTelegramAttachmentLoader,
+  sendTelegramAttachment,
+  telegramAttachments,
+} from "./telegram-files.js";
 
 /** 默认菜单和控制命令识别共用定义，菜单说明统一使用英文。 */
 const commands = [
@@ -35,6 +40,10 @@ const connectionMethods = new Set([
   "setChatMenuButton",
   "getUpdates",
 ]);
+/** 即时提示不重试过期内容，统一使用短超时并随连接关停。 */
+const transientMethods = new Set(["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"]);
+/** 文件上传需要更长时限，关停时保留队列供下次发送。 */
+const uploadMethods = new Set(["sendPhoto", "sendDocument"]);
 /** 普通连接故障最多退避 30 秒；Telegram 的 retry_after 可以要求等待更久。 */
 const maxConnectionRetryDelayMs = 30_000;
 
@@ -55,16 +64,16 @@ export function createTelegramConnection(
           ? { ...process.env, https_proxy: config.proxyUrl }
           : {},
   });
+  /** 底层时限覆盖最长的附件上传，具体请求仍受下方分类超时限制。 */
   const bot = new Bot(config.token, {
-    client: { timeoutSeconds: 35, baseFetchConfig: { agent } },
+    client: { timeoutSeconds: 65, baseFetchConfig: { agent } },
   });
   /** 中断初始化、拉取和输入提示；正在处理的消息由 start 等待完成。 */
   const polling = new AbortController();
   let started = false;
   /** 连接请求自行重试；输入提示、草稿和回调答复不自动重发过期内容。 */
   bot.api.config.use((prev, method, payload, signal) =>
-    connectionMethods.has(method) ||
-    ["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"].includes(method)
+    connectionMethods.has(method) || transientMethods.has(method)
       ? prev(method, payload, signal)
       : autoRetry({ maxRetryAttempts: 2, maxDelaySeconds: 5, rethrowHttpErrors: true })(
           prev,
@@ -104,12 +113,15 @@ export function createTelegramConnection(
           AbortSignal.timeout(
             method === "getUpdates"
               ? 40_000
-              : ["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"].includes(method)
-                ? 4_000
-                : 15_000,
+              : uploadMethods.has(method)
+                ? 60_000
+                : transientMethods.has(method)
+                  ? 4_000
+                  : 15_000,
           ),
           ...(connectionMethods.has(method) ||
-          ["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"].includes(method)
+          transientMethods.has(method) ||
+          uploadMethods.has(method)
             ? [polling.signal]
             : []),
         ]) as Parameters<typeof prev>[2]),
@@ -459,7 +471,11 @@ export function createTelegramConnection(
                     },
                   ]);
                 let messageId = reply.messageId;
-                if (messageId)
+                if (reply.attachment)
+                  messageId = (
+                    await sendTelegramAttachment(bot.api, reply.chatId, reply.attachment)
+                  ).message_id;
+                else if (messageId)
                   await bot.api.editMessageText(
                     reply.chatId,
                     messageId,
@@ -498,15 +514,33 @@ export function createTelegramConnection(
                 /** 新消息清除草稿，编辑消息不会；保留有效正文并让下一次恢复换用新 ID。 */
                 if (!reply.messageId && sentDraft) sentDraft.at = 0;
               } catch (error) {
-                if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
+                if (
+                  !(
+                    error instanceof HttpError ||
+                    error instanceof GrammyError ||
+                    error instanceof AttachmentError
+                  )
+                )
+                  throw error;
                 if (error instanceof GrammyError && error.error_code === 401) throw error;
                 const permanent =
-                  error instanceof GrammyError &&
-                  error.error_code >= 400 &&
-                  error.error_code < 500 &&
-                  error.error_code !== 429;
-                if (permanent) store.removeReply(reply.id);
-                else
+                  error instanceof AttachmentError ||
+                  (error instanceof GrammyError &&
+                    error.error_code >= 400 &&
+                    error.error_code < 500 &&
+                    error.error_code !== 429);
+                if (permanent) {
+                  if (reply.attachment)
+                    store.reply(
+                      reply.channelId,
+                      `附件发送失败：${reply.attachment.name}\n${
+                        error instanceof AttachmentError
+                          ? error.message
+                          : "Telegram 拒绝接收附件，原文件仍保留在生成位置。"
+                      }`,
+                    );
+                  store.removeReply(reply.id);
+                } else
                   store.retryReply(
                     reply.id,
                     error instanceof GrammyError && error.parameters.retry_after !== undefined

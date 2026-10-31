@@ -15,7 +15,7 @@ export interface Attachment {
   size: number | null;
 }
 
-/** 下载完成后交给 Agent 的本地附件，不包含 Telegram 凭据或下载链接。 */
+/** Agent 与 IM 之间传递的本地附件，不包含 Telegram 凭据或下载链接。 */
 export interface AgentAttachment {
   name: string;
   path: string;
@@ -54,6 +54,8 @@ export interface IncomingMessage {
 export interface AgentResult {
   status: "completed" | "failed" | "cancelled" | "interrupted";
   text: string;
+  /** 运行时明确返回的产物路径，与文字结果一起持久化并发送。 */
+  attachments?: AgentAttachment[];
 }
 
 /** 面向用户的交互快照；随机 ID 只在当前任务连接内有效，不暴露 RPC 请求编号。 */

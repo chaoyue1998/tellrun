@@ -4,6 +4,7 @@ import { appDirectory } from "../config.js";
 import { createCrons } from "../core/cron.js";
 import { createMenus } from "../core/menus.js";
 import type {
+  AgentAttachment,
   AgentInteraction,
   AgentResult,
   Attachment,
@@ -105,7 +106,10 @@ export function openStore(path = join(appDirectory, "state.json")) {
     function enqueueReply(
       channelId: number,
       text: string | undefined,
-      delivery: Pick<
+      {
+        attachments = [],
+        ...delivery
+      }: Pick<
         State["outbox"][number],
         | "interactionId"
         | "questionIndex"
@@ -114,7 +118,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
         | "modelMenuId"
         | "sessions"
         | "markdown"
-      > = {},
+      > & { attachments?: AgentAttachment[] } = {},
     ) {
       if (text === undefined) return;
       const parts = delivery.messageId
@@ -172,6 +176,16 @@ export function openStore(path = join(appDirectory, "state.json")) {
             : {}),
         });
       }
+      /** 附件与正文在同一状态事务中落盘，每个附件拥有独立发送回执。 */
+      for (const attachment of attachments)
+        state.outbox.push({
+          id: ++replyId,
+          channelId,
+          text: "",
+          attachment,
+          attempts: 0,
+          retryAt: Date.now(),
+        });
     }
 
     /** 手动和定时输入共用任务快照，始终只允许一个未结束的编码任务。 */
@@ -289,7 +303,7 @@ export function openStore(path = join(appDirectory, "state.json")) {
                   }[result.status]
                 }\n${result.text}`
           }`,
-          { markdown: true },
+          { markdown: true, attachments: result.attachments ?? [] },
         );
         for (const [index, input] of task.inputs.entries()) {
           if (!["pending", "preparing", "sending"].includes(input.status)) continue;
