@@ -205,7 +205,7 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 未指定目录的会话默认使用 Tellrun 服务启动目录，新建聊天时规范化并保存真实路径，所有命令直接使用已保存的路径；systemd 和 launchd 服务的启动目录均为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录、新建或切换会话，目录变化会开始新会话。
 
-`/new [名称]` 通过 `thread/start` 创建非临时会话，再调用 `thread/name/set` 保存名称；省略名称时使用 `New session`。显式命名使空会话落盘，首次发言前即可列出和恢复。`/list` 按精确 cwd 查询 `thread/list`，按 updated_at 降序读取最多 10 个会话，过滤或去重后不足时继续分页，包含各模型提供方及 CLI、VSCode、exec、app-server、unknown 来源，排除归档和子 Agent 会话；仅显示会话按钮和点击切换提示，当前会话在按钮上以 ✓ 标记。按钮随回复入队，回调使用完整会话 ID 并转换为独立的会话选择事件。核心层检查当前任务与会话变更状态，再通过 `thread/read` 校验完整 ID、目录以及 idle 或 notLoaded 状态，仅更新当前选择，下一条任务才恢复会话。列表与切换不调用 turn/start 或 turn/interrupt。[Codex 会话接口](https://learn.chatgpt.com/docs/app-server)
+`/new [名称]` 通过 `thread/start` 创建非临时会话，再调用 `thread/name/set` 保存名称；省略名称时使用 `New session`。显式命名使空会话落盘，首次发言前即可列出和恢复。会话展示优先使用非空且不为 `New session` 的 `name`，否则使用 Codex 返回的 `preview`；预览为空时保留占位名称，两者都为空时显示 `Untitled session`。此规则同时用于列表和切换确认，兼容已有占位名称，无需修改历史数据。`/list` 按精确 cwd 查询 `thread/list`，按 updated_at 降序读取最多 10 个会话，过滤或去重后不足时继续分页，包含各模型提供方及 CLI、VSCode、exec、app-server、unknown 来源，排除归档和子 Agent 会话；仅显示会话按钮和点击切换提示，当前会话在按钮上以 ✓ 标记。按钮随回复入队，回调使用完整会话 ID 并转换为独立的会话选择事件。核心层检查当前任务与会话变更状态，再通过 `thread/read` 校验完整 ID、目录以及 idle 或 notLoaded 状态，仅更新当前选择，下一条任务才恢复会话。列表与切换不调用 turn/start 或 turn/interrupt。[Codex 会话接口](https://learn.chatgpt.com/docs/app-server)
 
 会话与状态查询在入站去重落盘后立即使用独立连接执行，不相互排队；现有模型查询循环统一接收结果、传播异常并等待退出。新建或切换等待期间暂缓普通任务、目录变更和其他会话命令，避免消息进入旧会话；状态、暂停和恢复控制仍可处理。成功后会话 ID 与回复原子保存，保留当前模型、权限和暂停状态；失败保留旧会话。单次会话操作总时限为 45 秒，不自动重试；关停时断开连接并丢弃迟到结果，所有查询结束后才关闭存储，不中断 Codex 任务。创建结果不确定时提示先检查 `/list`。
 

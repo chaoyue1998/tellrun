@@ -29,7 +29,10 @@ const turnSchema = z.object({
   status: z.enum(["inProgress", "completed", "failed", "interrupted"]),
 });
 
-/** 创建、列表和读取会话共用元数据校验；空标题回退到首条消息摘要。 */
+/** 空会话通过占位名称落盘；展示时不能遮住 Codex 原生的消息预览。 */
+const defaultSessionName = "New session";
+
+/** 创建、列表和读取会话共用元数据校验；空名称或占位名称回退到原生预览。 */
 const sessionSchema = z
   .object({
     id: z.string().min(1),
@@ -38,14 +41,19 @@ const sessionSchema = z
     preview: z.string(),
     status: z.object({ type: z.string() }),
   })
-  .transform((thread) => ({
-    id: thread.id,
-    cwd: thread.cwd,
-    label: (thread.name?.trim() || thread.preview.trim() || "Untitled session")
-      .replace(/\s+/gu, " ")
-      .slice(0, 120),
-    status: thread.status.type,
-  }));
+  .transform((thread) => {
+    const name = thread.name?.trim();
+    const label =
+      name && name !== defaultSessionName
+        ? name
+        : thread.preview.trim() || name || "Untitled session";
+    return {
+      id: thread.id,
+      cwd: thread.cwd,
+      label: label.replace(/\s+/gu, " ").slice(0, 120),
+      status: thread.status.type,
+    };
+  });
 
 /** Codex CLI 的四种预设；协议参数只在适配层使用，菜单与执行共用此定义。 */
 const permissionModes = [
@@ -299,9 +307,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         /** 显式命名会物化空会话，保证首次发言前也能列出并在重启后恢复。 */
         await rpc.request("thread/name/set", {
           threadId: thread.id,
-          name: input.name.trim() || "New session",
+          name: input.name.trim() || defaultSessionName,
         });
-        return { id: thread.id, label: input.name.trim() || "New session" };
+        return { id: thread.id, label: input.name.trim() || defaultSessionName };
       }).catch(() => {
         throw new Error(
           "Codex session creation unconfirmed. Current session unchanged. Check /list before retrying /new.",
