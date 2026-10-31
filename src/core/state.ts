@@ -218,6 +218,22 @@ export function createState(options: {
   /** 菜单始终读取当前事务快照，避免捕获 update 替换前的状态。 */
   const { closeMenu, ...menus } = createMenus({ read: () => state, update, enqueueReply });
 
+  /** 从已保存答案生成选中提示，提交、关闭和迟到回执都保留用户的选择。 */
+  function formatInteractionMessage(
+    interaction: State["interactions"][number],
+    message: State["interactions"][number]["messages"][number],
+    reason: string,
+  ) {
+    const answer = interaction.questions[message.questionIndex ?? -1]?.answer;
+    let text = message.text;
+    if (answer) {
+      /** 仅限制展示长度，为原问题正文留出空间；实际提交的答案保持完整。 */
+      const preview = [...answer].slice(0, 1000).join("");
+      text += `\n\nSelected: ${preview}${preview.length < answer.length ? "…" : ""}`;
+    }
+    return `${text}\n\n${reason}`;
+  }
+
   /** 关闭请求或单个已答问题；撤回未发送提示，已发送消息保留正文并移除按钮。 */
   function closeInteraction(id: string, reason: string, questionIndex?: number) {
     const interaction = state.interactions.find((item) => item.id === id);
@@ -237,7 +253,7 @@ export function createState(options: {
       );
       for (const message of interaction.messages) {
         if (questionIndex !== undefined && message.questionIndex !== questionIndex) continue;
-        enqueueReply(task.channelId, `${message.text}\n\n${reason}`, {
+        enqueueReply(task.channelId, formatInteractionMessage(interaction, message, reason), {
           interactionId: id,
           messageId: message.messageId,
           ...(message.questionIndex !== undefined ? { questionIndex: message.questionIndex } : {}),
@@ -892,7 +908,11 @@ export function createState(options: {
           )
             enqueueReply(
               task.channelId,
-              `${delivery.text}\n\n${interaction.resolution ?? "Request closed."}`,
+              formatInteractionMessage(
+                interaction,
+                delivery,
+                interaction.resolution ?? "Request closed.",
+              ),
               {
                 interactionId: interaction.id,
                 messageId: delivery.messageId,
