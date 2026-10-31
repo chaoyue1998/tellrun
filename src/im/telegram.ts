@@ -59,6 +59,7 @@ export function createTelegramConnection(
     | "pendingDraft"
     | "removeReply"
     | "retryReply"
+    | "replyRetryAt"
     | "reply"
     | "activeTask"
   >,
@@ -81,6 +82,25 @@ export function createTelegramConnection(
   /** 中断初始化、拉取和输入提示；正在处理的消息由 start 等待完成。 */
   const polling = new AbortController();
   let started = false;
+  /** 429 同时暂停文字、附件和即时提示；接收更新不受出站限流阻塞。 */
+  let retryAfterAt = 0;
+  bot.api.config.use(async (prev, method, payload, signal) => {
+    if (connectionMethods.has(method)) return prev(method, payload, signal);
+    while (Date.now() < retryAfterAt) {
+      try {
+        await setTimeout(retryAfterAt - Date.now(), undefined, { signal: signal as AbortSignal });
+      } catch (error) {
+        throw new HttpError("Telegram rate limit wait interrupted.", error);
+      }
+    }
+    const result = await prev(method, payload, signal);
+    if (!result.ok && result.error_code === 429)
+      retryAfterAt = Math.max(
+        retryAfterAt,
+        Date.now() + (result.parameters?.retry_after ?? 5) * 1_000,
+      );
+    return result;
+  });
   /** 连接请求自行重试；输入提示、草稿和回调答复不自动重发过期内容。 */
   bot.api.config.use((prev, method, payload, signal) =>
     connectionMethods.has(method) || transientMethods.has(method)
@@ -344,7 +364,7 @@ export function createTelegramConnection(
         throw error;
       }
     },
-    /** 接收、回复与输入提示独立运行，慢请求不会阻塞 /stop 的入站处理。 */
+    /** 接收、文字、附件与输入提示独立运行，慢上传不阻塞审批和控制回复。 */
     async start() {
       started = true;
       const workers: Promise<void>[] = [];
@@ -357,6 +377,13 @@ export function createTelegramConnection(
           accountId: String(bot.botInfo.id),
           userId: String(config.ownerId),
         };
+        retryAfterAt = Math.max(retryAfterAt, state.replyRetryAt(source));
+        /** 每 10 秒续期；文本与草稿串行，附件完成后同样使旧草稿失效。 */
+        let nextDraftAt = 0;
+        let sentDraft: { taskId: number; text: string; at: number } | undefined;
+        let draftId = randomInt(1, 2_147_483_647);
+        /** 附件可能在草稿请求途中完成，迟到草稿回执不能覆盖这次失效。 */
+        let draftRevision = 0;
         workers.push(
           (async () => {
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
@@ -382,15 +409,18 @@ export function createTelegramConnection(
               }
             }
           })(),
-          (async () => {
-            /** 每 10 秒续期，为慢请求和重试留余量；草稿与正式回复始终串行发送。 */
-            let nextDraftAt = 0;
-            let sentDraft: { taskId: number; text: string; at: number } | undefined;
-            /** 连续更新复用 ID；重新展示时换 ID，避免客户端重播整段生成动画。 */
-            let draftId = randomInt(1, 2_147_483_647);
+          ...(["text", "attachment"] as const).map(async (kind) => {
             while (!polling.signal.aborted) {
-              const reply = state.claimReply(source);
+              if (Date.now() < retryAfterAt) {
+                await setTimeout(100);
+                continue;
+              }
+              const reply = state.claimReply(source, kind);
               if (!reply) {
+                if (kind === "attachment") {
+                  await setTimeout(100);
+                  continue;
+                }
                 const draft = state.pendingDraft(source);
                 /** 超长输出继续续期最近的有效预览，避免停止刷新后整段消失。 */
                 if (draft && draft.text.length > 32768 && draft.taskId === sentDraft?.taskId)
@@ -407,11 +437,12 @@ export function createTelegramConnection(
                   nextDraftAt = Date.now() + 1000;
                   if (draft.taskId !== sentDraft?.taskId || Date.now() - sentDraft.at >= 30_000)
                     draftId = (draftId % 2_147_483_647) + 1;
+                  const revision = draftRevision;
                   try {
                     await bot.api.sendRichMessageDraft(Number(draft.chatId), draftId, {
                       markdown: draft.text,
                     });
-                    sentDraft = { ...draft, at: Date.now() };
+                    sentDraft = { ...draft, at: revision === draftRevision ? Date.now() : 0 };
                   } catch (error) {
                     if (polling.signal.aborted) return;
                     if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
@@ -532,7 +563,10 @@ export function createTelegramConnection(
                       },
                 );
                 /** 新消息清除草稿，编辑消息不会；保留有效正文并让下一次恢复换用新 ID。 */
-                if (!reply.messageId && sentDraft) sentDraft.at = 0;
+                if (!reply.messageId) {
+                  draftRevision++;
+                  if (sentDraft) sentDraft.at = 0;
+                }
               } catch (error) {
                 if (
                   !(
@@ -563,9 +597,13 @@ export function createTelegramConnection(
                 } else
                   state.retryReply(
                     reply.id,
-                    error instanceof GrammyError && error.parameters.retry_after !== undefined
-                      ? error.parameters.retry_after
-                      : Math.min(60, 2 ** Math.min(reply.attempts, 6)),
+                    Math.max(
+                      Math.ceil((retryAfterAt - Date.now()) / 1_000),
+                      error instanceof GrammyError && error.parameters.retry_after !== undefined
+                        ? error.parameters.retry_after
+                        : Math.min(60, 2 ** Math.min(reply.attempts, 6)),
+                    ),
+                    retryAfterAt > Date.now(),
                   );
                 logger.warn(
                   { outboxId: reply.id, permanent, errorType: error.name },
@@ -575,7 +613,7 @@ export function createTelegramConnection(
                 );
               }
             }
-          })(),
+          }),
           (async () => {
             /** 输入提示最多持续 5 秒，每 4 秒刷新；仅当前实例已派发的任务显示。 */
             let nextTypingAt = 0;

@@ -56,6 +56,8 @@ export const stateSchema = z
         cwd: z.string().min(1),
         sessionId: z.string().nullable(),
         paused: z.boolean(),
+        /** 出站限流按机器人账号共用；撤回消息后也保留，避免重启绕过等待。 */
+        replyRetryAt: nonnegativeInteger.optional(),
         /** 模式标识属于 Agent；空值沿用默认模式。 */
         permissionMode: z.string().min(1).nullable(),
         permissionMenu: menuSchema.nullable(),
@@ -190,6 +192,10 @@ export const stateSchema = z
         markdown: z.boolean().optional(),
         /** 每张图片独立排队，失败重试不重发已成功的文字或其他图片。 */
         attachment: resultAttachmentSchema.optional(),
+        /** 控制回复可越过普通结果；缺省记录仍按普通回复发送。 */
+        priority: z.boolean().optional(),
+        /** 同一回复的前一段或正文；前项出队后才能发送，重启后仍保持顺序。 */
+        afterId: id.optional(),
         attempts: nonnegativeInteger,
         retryAt: nonnegativeInteger,
         interactionId: z.uuid().optional(),
@@ -224,7 +230,9 @@ export const stateSchema = z
           (row.enabled ? row.nextRunAt !== null : row.nextRunAt === null && row.pendingAt === null),
       ) &&
       state.tasks.every((row) => !row.cron || row.cron.id < state.nextCronId) &&
-      state.outbox.every((row) => channels.has(row.channelId)) &&
+      state.outbox.every(
+        (row) => channels.has(row.channelId) && (row.afterId === undefined || row.afterId < row.id),
+      ) &&
       new Set(state.interactions.map((row) => row.id)).size === state.interactions.length &&
       state.interactions.every(
         (row) =>

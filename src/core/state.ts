@@ -32,8 +32,8 @@ export function createState(options: {
   let updating = false;
   /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
   let draft: { taskId: number; text: string } | undefined;
-  /** 单个发送循环正在处理的回复；交互关闭时仍需保留它的消息清理关联。 */
-  let delivering: State["outbox"][number] | undefined;
+  /** 文字与附件各有一个在途请求；交互关闭时仍保留迟到回执的清理关联。 */
+  const delivering = new Map<number, State["outbox"][number]>();
 
   /** 交互撤回可能清空发送队列；实例内保持递增，避免迟到发送回执删除新消息。 */
   let replyId = state.outbox.reduce((max, item) => Math.max(max, item.id), 0);
@@ -50,7 +50,7 @@ export function createState(options: {
       state.interactions = state.interactions.filter(
         (item) =>
           item.status !== "closed" ||
-          item.id === delivering?.interactionId ||
+          [...delivering.values()].some((reply) => reply.interactionId === item.id) ||
           state.outbox.some((reply) => reply.interactionId === item.id),
       );
       const latest = new Set(
@@ -77,12 +77,24 @@ export function createState(options: {
     }
   }
 
+  /** 账号级限流独立于消息保存，撤回、重启或新回复不能绕过尚未结束的等待。 */
+  function replyRetryAt(source: Pick<ChannelIdentity, "platform" | "accountId">) {
+    return state.channels.reduce(
+      (at, channel) =>
+        channel.platform === source.platform && channel.accountId === source.accountId
+          ? Math.max(at, channel.replyRetryAt ?? 0)
+          : at,
+      0,
+    );
+  }
+
   /** 回复按展示格式分段，并与触发它的状态变更一起保存。 */
   function enqueueReply(
     channelId: number,
     text: string | undefined,
     {
       attachments = [],
+      priority = true,
       ...delivery
     }: Pick<
       State["outbox"][number],
@@ -93,6 +105,7 @@ export function createState(options: {
       | "modelMenuId"
       | "sessions"
       | "markdown"
+      | "priority"
     > & { attachments?: AgentAttachment[] } = {},
   ) {
     if (text === undefined) return;
@@ -134,8 +147,10 @@ export function createState(options: {
     }
     for (const [index, part] of parts.entries()) {
       state.outbox.push({
+        ...(index ? { afterId: replyId } : {}),
         id: ++replyId,
         channelId,
+        priority,
         text:
           parts.length > 1
             ? `(${index + 1}/${parts.length})\n${delivery.markdown ? "\n" : ""}${part}`
@@ -154,6 +169,7 @@ export function createState(options: {
     /** 附件与正文在同一状态事务中落盘，每个附件拥有独立发送回执。 */
     for (const attachment of attachments)
       state.outbox.push({
+        afterId: replyId,
         id: ++replyId,
         channelId,
         text: "",
@@ -291,7 +307,7 @@ export function createState(options: {
                 }[result.status]
               }\n${result.text}`
         }`,
-        { markdown: true, attachments: result.attachments ?? [] },
+        { markdown: true, priority: false, attachments: result.attachments ?? [] },
       );
       for (const [index, input] of task.inputs.entries()) {
         if (!["pending", "preparing", "sending"].includes(input.status)) continue;
@@ -808,44 +824,74 @@ export function createState(options: {
       for (const interaction of state.interactions)
         closeInteraction(interaction.id, "Service restarted. Request closed.");
     },
-    /** 按机器人与授权用户领取最早回复，内存关联保留到发送成功或失败。 */
-    claimReply(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-      if (delivering) return;
+    replyRetryAt,
+    /** 控制回复优先且各自保序；普通结果仍按队列顺序，文字和附件可分别在途。 */
+    claimReply(
+      source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">,
+      kind: "text" | "attachment" = "text",
+    ) {
+      if (
+        replyRetryAt(source) > Date.now() ||
+        [...delivering.values()].some(
+          (reply) => Boolean(reply.attachment) === (kind === "attachment"),
+        )
+      )
+        return;
       for (const channel of state.channels) {
         if (channel.permissionMenu && channel.permissionMenu.expiresAt <= Date.now())
           update(() => closeMenu(channel.id, "permissionMenu"));
         if (channel.modelMenu && channel.modelMenu.expiresAt <= Date.now())
           update(() => closeMenu(channel.id, "modelMenu"));
       }
-      for (const reply of state.outbox) {
-        const interaction = state.interactions.find((item) => item.id === reply.interactionId);
-        if (
-          reply.interactionId &&
-          !reply.messageId &&
-          (interaction?.status !== "pending" ||
-            (interaction.expiresAt !== null && interaction.expiresAt <= Date.now()) ||
-            (reply.questionIndex !== undefined &&
-              interaction.questions[reply.questionIndex]?.answer !== null))
-        )
-          continue;
-        const channel = state.channels.find((channel) => channel.id === reply.channelId);
-        if (
-          channel?.platform === source.platform &&
-          channel.accountId === source.accountId &&
-          channel.userId === source.userId
-        ) {
-          if (reply.retryAt > Date.now()) return;
-          delivering = structuredClone(reply);
-          return structuredClone({
-            ...reply,
-            chatId: channel.chatId,
-            interaction,
-            permissionMenu:
-              channel.permissionMenu?.id === reply.permissionMenuId
-                ? channel.permissionMenu
-                : undefined,
-            modelMenu: channel.modelMenu?.id === reply.modelMenuId ? channel.modelMenu : undefined,
-          });
+      for (const priority of kind === "text" ? [true, false] : [false]) {
+        for (const reply of state.outbox) {
+          if (Boolean(reply.priority) !== priority) continue;
+          const interaction = state.interactions.find((item) => item.id === reply.interactionId);
+          if (
+            reply.interactionId &&
+            !reply.messageId &&
+            (interaction?.status !== "pending" ||
+              (interaction.expiresAt !== null && interaction.expiresAt <= Date.now()) ||
+              (reply.questionIndex !== undefined &&
+                interaction.questions[reply.questionIndex]?.answer !== null))
+          )
+            continue;
+          const channel = state.channels.find((channel) => channel.id === reply.channelId);
+          if (
+            channel?.platform === source.platform &&
+            channel.accountId === source.accountId &&
+            channel.userId === source.userId
+          ) {
+            if (
+              reply.retryAt > Date.now() ||
+              Boolean(reply.attachment) !== (kind === "attachment") ||
+              (reply.afterId !== undefined &&
+                (delivering.has(reply.afterId) ||
+                  state.outbox.some((item) => item.id === reply.afterId))) ||
+              (reply.messageId !== undefined &&
+                state.outbox.some(
+                  (item) =>
+                    item.id < reply.id &&
+                    item.channelId === reply.channelId &&
+                    item.messageId === reply.messageId,
+                ))
+            ) {
+              if (!priority) return;
+              continue;
+            }
+            delivering.set(reply.id, structuredClone(reply));
+            return structuredClone({
+              ...reply,
+              chatId: channel.chatId,
+              interaction,
+              permissionMenu:
+                channel.permissionMenu?.id === reply.permissionMenuId
+                  ? channel.permissionMenu
+                  : undefined,
+              modelMenu:
+                channel.modelMenu?.id === reply.modelMenuId ? channel.modelMenu : undefined,
+            });
+          }
         }
       }
     },
@@ -863,10 +909,8 @@ export function createState(options: {
     ) {
       update(() => {
         const channelId =
-          delivering?.id === id
-            ? delivering.channelId
-            : state.outbox.find((reply) => reply.id === id)?.channelId;
-        if (delivering?.id === id) delivering = undefined;
+          delivering.get(id)?.channelId ?? state.outbox.find((reply) => reply.id === id)?.channelId;
+        delivering.delete(id);
         state.outbox = state.outbox.filter((reply) => reply.id !== id);
         if ((delivery?.permissionMenuId || delivery?.modelMenuId) && channelId !== undefined) {
           const channel = state.channels.find((item) => item.id === channelId);
@@ -924,16 +968,23 @@ export function createState(options: {
         }
       });
     },
-    /** 发送失败只更新回复的重试信息，不影响任务执行状态。 */
-    retryReply(id: number, seconds: number) {
+    /** 普通失败仅重试当前回复；平台限流同时暂停账号内的其他投递。 */
+    retryReply(id: number, seconds: number, retryAll = false) {
       update(() => {
-        if (delivering?.id === id) delivering = undefined;
         const reply = state.outbox.find((reply) => reply.id === id);
+        const channel = retryAll
+          ? state.channels.find(
+              (channel) => channel.id === (reply?.channelId ?? delivering.get(id)?.channelId),
+            )
+          : undefined;
+        delivering.delete(id);
         if (reply)
           Object.assign(reply, {
             attempts: reply.attempts + 1,
             retryAt: Date.now() + seconds * 1000,
           });
+        if (channel)
+          channel.replyRetryAt = Math.max(channel.replyRetryAt ?? 0, Date.now() + seconds * 1_000);
       });
     },
   };

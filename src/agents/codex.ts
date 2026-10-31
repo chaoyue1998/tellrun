@@ -381,6 +381,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       /** 保留已展示或已回答的问题标识，重复事件与恢复快照不能重新打开旧问题。 */
       const seenQuestions = new Set<string>();
       const fileChanges = new Map<string, z.infer<typeof fileChangesSchema>>();
+      /** 未变化的差异复用 Markdown；新事件替换数组后自动重新格式化。 */
+      const formattedChanges = new WeakMap<z.infer<typeof fileChangesSchema>, string>();
+      /** 首段即时展示，后续增量在一秒窗口内合并，避免逐字重建完整输出。 */
+      let previewTimer: ReturnType<typeof setTimeout> | undefined;
+      let nextPreviewAt = 0;
       /** 新任务等启动响应，恢复任务等完整快照，再处理当前轮次的早到事件。 */
       const earlyMessages: CodexMessage[] = [];
       let earlyMessageSize = 0;
@@ -400,6 +405,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       function finish(result?: AgentResult) {
         if (settled) return;
         settled = true;
+        clearTimeout(previewTimer);
         for (const interaction of interactions.values()) clearTimeout(interaction.timer);
         interactions.clear();
         completed.resolve(
@@ -427,25 +433,51 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       /** 预览和结果共用完整内容；保留过程说明、最终回复及文件差异，由 IM 分段发送。 */
       function formatOutput() {
         return [...messages]
-          .map(([id, text]) =>
-            [
-              text,
-              ...(fileChanges.get(id) ?? []).map((change) => {
-                /** 差异作为代码展示；围栏长于内容中的反引号，避免 Markdown 被误解析。 */
-                const fence = "`".repeat(
-                  (change.diff.match(/`+/g) ?? []).reduce(
-                    (length, marker) => Math.max(length, marker.length + 1),
-                    3,
-                  ),
-                );
-                return `${fence}diff\n${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}${change.diff.endsWith("\n") ? "" : "\n"}${fence}`;
-              }),
-            ]
+          .map(([id, text]) => {
+            const changes = fileChanges.get(id);
+            if (changes && !formattedChanges.has(changes))
+              formattedChanges.set(
+                changes,
+                changes
+                  .map((change) => {
+                    /** 差异作为代码展示；围栏长于内容中的反引号，避免 Markdown 被误解析。 */
+                    const fence = "`".repeat(
+                      (change.diff.match(/`+/g) ?? []).reduce(
+                        (length, marker) => Math.max(length, marker.length + 1),
+                        3,
+                      ),
+                    );
+                    return `${fence}diff\n${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}${change.diff.endsWith("\n") ? "" : "\n"}${fence}`;
+                  })
+                  .join("\n\n"),
+              );
+            return [text, changes ? formattedChanges.get(changes) : undefined]
               .filter(Boolean)
-              .join("\n\n"),
-          )
+              .join("\n\n");
+          })
           .filter(Boolean)
           .join("\n\n");
+      }
+
+      /** 所有文本与差异事件共用节流；尾部更新即使没有后续事件也会展示。 */
+      function publishPreview() {
+        if (settled || controller.signal.aborted || previewTimer) return;
+        if (Date.now() < nextPreviewAt) {
+          previewTimer = setTimeout(() => {
+            previewTimer = undefined;
+            try {
+              publishPreview();
+            } catch {
+              fail("Cannot update Codex preview. Task status unknown.");
+            }
+          }, nextPreviewAt - Date.now());
+          return;
+        }
+        const text = formatOutput();
+        /** 空的 item/started 不占用首段预览窗口，首个实际文本仍即时展示。 */
+        if (!nextPreviewAt && !text.trim()) return;
+        nextPreviewAt = Date.now() + 1_000;
+        input.onText(text);
       }
 
       /** 通信故障不等于执行失败；保留不确定状态并结束当前连接。 */
@@ -495,6 +527,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       controller.signal.addEventListener(
         "abort",
         () => {
+          clearTimeout(previewTimer);
           for (const interaction of interactions.values()) clearTimeout(interaction.timer);
           interactions.clear();
           if (settled) return;
@@ -662,7 +695,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             if (event.threadId === sessionId && event.turnId === runId) {
               fileChanges.set(event.itemId, event.changes);
               if (!messages.has(event.itemId)) messages.set(event.itemId, "File changes");
-              input.onText(formatOutput());
+              publishPreview();
             }
           } else if (message.method === "item/agentMessage/delta") {
             const event = z
@@ -675,7 +708,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               .parse(message.params);
             if (event.threadId !== sessionId || !recordRun(event.turnId)) return;
             messages.set(event.itemId, (messages.get(event.itemId) ?? "") + event.delta);
-            input.onText(formatOutput());
+            publishPreview();
           } else if (message.method === "item/started" || message.method === "item/completed") {
             const event = z
               .object({
@@ -707,7 +740,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 messages.delete(event.item.id);
               } else {
                 messages.set(event.item.id, "图片已生成，但 Codex 未提供可发送的本地文件路径。");
-                input.onText(formatOutput());
+                publishPreview();
               }
             }
             if (event.item.type === "fileChange") {
@@ -716,11 +749,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 event.item.id,
                 `File changes${event.item.status ? ` (${event.item.status})` : ""}`,
               );
-              input.onText(formatOutput());
+              publishPreview();
             }
             if (event.item.type === "agentMessage" && event.item.text !== undefined) {
               messages.set(event.item.id, event.item.text);
-              input.onText(formatOutput());
+              publishPreview();
             }
             if (
               message.method === "item/completed" &&
@@ -1036,6 +1069,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         interactions.clear();
         clearTimeout(stopTimer);
         clearTimeout(errorTimer);
+        clearTimeout(previewTimer);
         rpc.close();
         active = undefined;
       }
