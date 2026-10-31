@@ -2,7 +2,7 @@ import { randomInt } from "node:crypto";
 import { Agent } from "node:https";
 import { setTimeout } from "node:timers/promises";
 import { autoRetry } from "@grammyjs/auto-retry";
-import { Bot, BotError, GrammyError, HttpError } from "grammy";
+import { Bot, BotError, type Context, GrammyError, HttpError } from "grammy";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import { AttachmentError } from "../core/attachments.js";
@@ -165,24 +165,29 @@ export function createTelegramConnection(
     }
   });
 
-  bot.on("message", async (ctx) => {
-    let command =
-      ctx.message.text === undefined
+  /** 入站排序与消息处理共用命令识别；null 表示不由当前机器人处理。 */
+  function telegramCommand(message: NonNullable<Context["message"]>) {
+    if (message.chat.type !== "private" || message.from?.id !== config.ownerId) return null;
+    const command =
+      message.text === undefined
         ? undefined
-        : ctx.message.entities?.find(
-            (entity) => entity.type === "bot_command" && entity.offset === 0,
-          );
-    const [name, target] = command
-      ? (ctx.message.text?.slice(1, command.length).split("@") ?? [])
-      : [];
+        : message.entities?.find((entity) => entity.type === "bot_command" && entity.offset === 0);
+    const [name, target] = command ? (message.text?.slice(1, command.length).split("@") ?? []) : [];
     /** 问题回复可包含绝对路径等斜杠文本；已知控制命令仍优先处理。 */
     if (
-      ctx.message.reply_to_message?.from?.id === ctx.me.id &&
-      !commands.some((item) => item.command === name)
+      !command ||
+      (message.reply_to_message?.from?.id === bot.botInfo.id &&
+        !commands.some((item) => item.command === name))
     )
-      command = undefined;
-    if (command && target !== undefined && target.toLowerCase() !== ctx.me.username?.toLowerCase())
       return;
+    if (target !== undefined && target.toLowerCase() !== bot.botInfo.username?.toLowerCase())
+      return null;
+    return { name: name ?? "", args: message.text?.slice(command.length).trim() ?? "" };
+  }
+
+  bot.on("message", async (ctx) => {
+    const command = telegramCommand(ctx.message);
+    if (command === null) return;
 
     const attachments = telegramAttachments(ctx.message);
     await handleMessage({
@@ -194,11 +199,7 @@ export function createTelegramConnection(
       },
       eventId: String(ctx.update.update_id),
       content: command
-        ? {
-            type: "command",
-            name: name ?? "",
-            args: ctx.message.text?.slice(command.length).trim() ?? "",
-          }
+        ? { type: "command", ...command }
         : ctx.message.text !== undefined
           ? {
               type: "text",
@@ -384,6 +385,8 @@ export function createTelegramConnection(
         let draftId = randomInt(1, 2_147_483_647);
         /** 附件可能在草稿请求途中完成，迟到草稿回执不能覆盖这次失效。 */
         let draftRevision = 0;
+        /** 已收到的命令先完成本地处理或发起查询，再调度回复、附件和输入提示。 */
+        let handlingCommands: Promise<void> | undefined;
         workers.push(
           (async () => {
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
@@ -402,15 +405,36 @@ export function createTelegramConnection(
                 source,
                 (eventId) => updates.length === 0 || Number(eventId) < offset,
               );
-              for (const update of updates) {
+              const batch = updates.map((update) => ({
+                update,
+                command: Boolean(update.message && telegramCommand(update.message)),
+              }));
+              handlingCommands = (async () => {
+                for (const { update, command } of batch) {
+                  if (polling.signal.aborted) return;
+                  if (command) await bot.handleUpdate(update);
+                }
+              })();
+              await handlingCommands;
+              handlingCommands = undefined;
+              for (const { update, command } of batch) {
                 if (polling.signal.aborted) return;
-                await bot.handleUpdate(update);
-                offset = update.update_id + 1;
+                if (!command) await bot.handleUpdate(update);
               }
+              /** 调整处理顺序后，整批保存成功才能确认最大编号，失败或关停仍可重投。 */
+              if (polling.signal.aborted) return;
+              offset = updates.reduce(
+                (next, update) => Math.max(next, update.update_id + 1),
+                offset,
+              );
             }
           })(),
           ...(["text", "attachment"] as const).map(async (kind) => {
             while (!polling.signal.aborted) {
+              if (handlingCommands) {
+                await handlingCommands;
+                continue;
+              }
               if (Date.now() < retryAfterAt) {
                 await setTimeout(100);
                 continue;
@@ -618,6 +642,10 @@ export function createTelegramConnection(
             /** 输入提示最多持续 5 秒，每 4 秒刷新；仅当前实例已派发的任务显示。 */
             let nextTypingAt = 0;
             while (!polling.signal.aborted) {
+              if (handlingCommands) {
+                await handlingCommands;
+                continue;
+              }
               if (
                 Date.now() >= nextTypingAt &&
                 ["dispatching", "running"].includes(state.activeTask(source)?.status ?? "") &&
