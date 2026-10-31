@@ -1,9 +1,9 @@
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { setTimeout } from "node:timers/promises";
-import { AttachmentError, maxAttachmentBytes } from "../storage/attachments.js";
-import type { Store } from "../storage/store.js";
 import type { UpdateChecker } from "../updates.js";
+import { AttachmentError, maxAttachmentBytes } from "./attachments.js";
+import type { CoreState } from "./state.js";
 import type {
   Agent,
   AgentAttachment,
@@ -16,7 +16,7 @@ import type {
 
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
 export function createRelayService(options: {
-  store: Store;
+  state: CoreState;
   agent: Agent;
   updates: UpdateChecker;
   prepareAttachments: AttachmentLoader;
@@ -44,22 +44,22 @@ export function createRelayService(options: {
     cancelled: "Stopped",
     interrupted: "Unconfirmed",
   };
-  options.store.recoverTasks();
+  options.state.recoverTasks();
 
   return {
     /** 返回前保存消息和必要回复；重复事件直接忽略，不重新执行控制或任务。 */
     async handleMessage(message: IncomingMessage) {
       if (stopping) throw new Error("Service stopping. Message not accepted.");
       let controlQuery: (() => Promise<void>) | undefined;
-      const reply = options.store.accept(message, (channel) => {
-        const task = options.store.activeTask();
+      const reply = options.state.accept(message, (channel) => {
+        const task = options.state.activeTask();
         if (message.content.type === "permissions" || message.content.type === "model")
-          return options.store.chooseOption(channel.id, message.content);
+          return options.state.chooseOption(channel.id, message.content);
         if (
           message.content.type === "interaction" ||
           (message.content.type === "text" && message.content.replyToMessageId !== undefined)
         ) {
-          const answer = options.store.answerInteraction(channel.id, message.content);
+          const answer = options.state.answerInteraction(channel.id, message.content);
           if (answer !== undefined || message.content.type === "interaction") return answer;
         }
         if (
@@ -98,7 +98,7 @@ export function createRelayService(options: {
                   : await options.agent.readSession(snapshot.cwd, content.id, modelLoading.signal);
             } catch (error) {
               if (!stopping)
-                options.store.reply(
+                options.state.reply(
                   snapshot.id,
                   error instanceof Error && error.message.startsWith("Codex ")
                     ? error.message
@@ -110,7 +110,7 @@ export function createRelayService(options: {
             }
             /** 接口成功后才更新绑定；存储错误交给工作循环处理。 */
             if (!stopping)
-              options.store.setSession(
+              options.state.setSession(
                 snapshot.id,
                 snapshot.cwd,
                 session.id,
@@ -125,13 +125,13 @@ export function createRelayService(options: {
             case "help":
               return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/restart — Restart Tellrun and reload configuration\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.";
             case "cron":
-              return options.store.handleCron(channel.id, message.content.args);
+              return options.state.handleCron(channel.id, message.content.args);
             case "model":
               if (message.content.args) return "Use /model to choose a model with the buttons.";
-              options.store.openMenu(channel.id, "model");
+              options.state.openMenu(channel.id, "model");
               return;
             case "permissions":
-              options.store.openMenu(channel.id, "permissions", options.agent.permissionModes);
+              options.state.openMenu(channel.id, "permissions", options.agent.permissionModes);
               return;
             case "status": {
               /** 查询期间保存请求时的选择，后续切换不会改写这次状态快照。 */
@@ -188,7 +188,7 @@ export function createRelayService(options: {
                 const upgradeHint = update?.available
                   ? `\n\nSend /update to ask ${options.agent.name} to upgrade Tellrun.`
                   : "";
-                options.store.reply(
+                options.state.reply(
                   snapshot.id,
                   `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}${task && task.cwd !== snapshot.cwd ? `\nTask directory: ${task.cwd}` : ""}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
                 );
@@ -200,7 +200,7 @@ export function createRelayService(options: {
               if (task) return "Wait for the current task to finish, then send /update.";
               if (channel.paused) return "Paused. Send /resume before /update.";
               /** 复用普通任务的快照、去重、审批和恢复流程，不向执行中的任务追加升级指令。 */
-              options.store.createTask(channel, options.updates.upgradePrompt());
+              options.state.createTask(channel, options.updates.upgradePrompt());
               return `Tellrun update queued for ${options.agent.name}.`;
             case "restart":
               if (message.content.args) return "Use /restart without arguments.";
@@ -222,7 +222,7 @@ export function createRelayService(options: {
               } catch {
                 return "Cannot access directory. Check the path and permissions.";
               }
-              if (cwd !== channel.cwd) options.store.setSession(channel.id, cwd, null);
+              if (cwd !== channel.cwd) options.state.setSession(channel.id, cwd, null);
               return `Directory: ${cwd}\n${channel.paused ? "Paused. Send /resume to continue." : "Send a task to Codex."}`;
             }
             case "list": {
@@ -234,11 +234,11 @@ export function createRelayService(options: {
                   sessions = await options.agent.listSessions(snapshot.cwd, modelLoading.signal);
                 } catch {
                   if (!stopping)
-                    options.store.reply(snapshot.id, "Cannot load sessions. Try /list again.");
+                    options.state.reply(snapshot.id, "Cannot load sessions. Try /list again.");
                   return;
                 }
                 if (!stopping)
-                  options.store.reply(
+                  options.state.reply(
                     snapshot.id,
                     sessions.length
                       ? "Tap a session to switch."
@@ -255,19 +255,19 @@ export function createRelayService(options: {
               return;
             }
             case "stop":
-              options.store.setPaused(channel.id, true);
+              options.state.setPaused(channel.id, true);
               if (!task || task.channelId !== channel.id)
                 return "Paused. No task running in this chat. Send /resume to continue.";
-              options.store.cancelTask(task.id);
+              options.state.cancelTask(task.id);
               return `Stop requested for task #${task.id}. Wait for its result, then /resume.`;
             case "resume":
               if (task) return "Wait for the task to finish before /resume.";
-              options.store.setPaused(channel.id, false);
+              options.state.setPaused(channel.id, false);
               return "Ready for new tasks. Interrupted tasks will not be rerun.";
             case "last": {
-              const last = options.store.lastTask(channel.id);
+              const last = options.state.lastTask(channel.id);
               if (!last) return "No tasks yet.";
-              options.store.reply(
+              options.state.reply(
                 channel.id,
                 `Task #${last.id}${last.cron ? ` · Cron #${last.cron.id}` : ""} ${statuses[last.status]}\n\n${last.result ?? "No result yet."}`,
                 { markdown: true },
@@ -294,10 +294,10 @@ export function createRelayService(options: {
           if (task.channelId !== channel.id)
             return `Task #${task.id} is running in another chat. Message not sent.`;
           if (task.status === "cancelling") return "Task stopping. Wait for its result.";
-          options.store.appendTaskInput(task.id, message.content.text, attachments);
+          options.state.appendTaskInput(task.id, message.content.text, attachments);
           return;
         }
-        options.store.createTask(channel, message.content.text, attachments);
+        options.state.createTask(channel, message.content.text, attachments);
       });
       /** 只有入站去重记录保存成功后才执行；重复事件不会重复切换会话或重启。 */
       if (controlQuery) {
@@ -311,7 +311,7 @@ export function createRelayService(options: {
         (message.content.type === "command" && message.content.name === "stop") ||
         (message.content.type === "interaction" && message.content.action === "stop")
       ) {
-        const active = options.store.activeTask();
+        const active = options.state.activeTask();
         if (!active || active.status === "cancelling") inputPreparation?.abort();
         if (active?.status === "cancelling") options.agent.stop();
       }
@@ -326,7 +326,7 @@ export function createRelayService(options: {
             await query;
             continue;
           }
-          const menu = options.store.pendingModels(source);
+          const menu = options.state.pendingModels(source);
           if (!menu) {
             await setTimeout(100);
             continue;
@@ -337,7 +337,7 @@ export function createRelayService(options: {
           } catch {
             /** 查询失败只提示重新打开菜单，不影响任务和已有选择。 */
           }
-          if (!stopping) options.store.fillModels(menu.channelId, menu.id, models);
+          if (!stopping) options.state.fillModels(menu.channelId, menu.id, models);
         }
       } finally {
         modelLoading.abort();
@@ -347,16 +347,16 @@ export function createRelayService(options: {
     /** 调度独立于执行和菜单查询；启动先跳过离线时段，再按持久化时间触发。 */
     async schedule(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       if (stopping) return;
-      options.store.recoverCrons(source);
+      options.state.recoverCrons(source);
       while (!stopping) {
-        options.store.tickCrons(source);
+        options.state.tickCrons(source);
         await setTimeout(1_000);
       }
     },
     /** 领取任务后再次检查目录；运行结果与最终回复在同一个快照中保存。 */
     async run(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       while (!stopping) {
-        const task = options.store.claimTask(source);
+        const task = options.state.claimTask(source);
         if (!task) {
           await setTimeout(250);
           continue;
@@ -365,7 +365,7 @@ export function createRelayService(options: {
           if (realpathSync(task.cwd) !== task.cwd || !statSync(task.cwd).isDirectory())
             throw new Error("Directory changed.");
         } catch {
-          options.store.finishTask(task.id, {
+          options.state.finishTask(task.id, {
             status: "failed",
             text: "Directory missing, changed, or inaccessible. Task not started. Set /cwd and try again.",
           });
@@ -378,10 +378,10 @@ export function createRelayService(options: {
           try {
             attachments = await options.prepareAttachments(task.attachments, preparing.signal);
             if (stopping) return;
-            if (preparing.signal.aborted || !options.store.markDispatching(task.id)) continue;
+            if (preparing.signal.aborted || !options.state.markDispatching(task.id)) continue;
           } catch (error) {
             if (stopping) return;
-            options.store.finishTask(task.id, {
+            options.state.finishTask(task.id, {
               status: preparing.signal.aborted ? "cancelled" : "failed",
               text: preparing.signal.aborted
                 ? "Stopped before starting."
@@ -406,15 +406,15 @@ export function createRelayService(options: {
             permissionMode: task.permissionMode,
             model: task.model,
             reasoningEffort: task.reasoningEffort,
-            onSession: (id) => options.store.recordSession(task.id, id),
+            onSession: (id) => options.state.recordSession(task.id, id),
             onStarted: (runId) => {
-              options.store.markRunning(task.id, runId);
-              if (options.store.activeTask()?.status === "cancelling") options.agent.stop();
+              options.state.markRunning(task.id, runId);
+              if (options.state.activeTask()?.status === "cancelling") options.agent.stop();
             },
-            onText: (text) => options.store.setDraft(task.id, text),
-            onNotice: (text) => options.store.reply(task.channelId, `Task #${task.id}\n${text}`),
-            onInteraction: (request) => options.store.addInteraction(task.id, request),
-            onInteractionClosed: (id, reason) => options.store.closeInteraction(id, reason),
+            onText: (text) => options.state.setDraft(task.id, text),
+            onNotice: (text) => options.state.reply(task.channelId, `Task #${task.id}\n${text}`),
+            onInteraction: (request) => options.state.addInteraction(task.id, request),
+            onInteractionClosed: (id, reason) => options.state.closeInteraction(id, reason),
           })
           .finally(() => {
             finished = true;
@@ -423,7 +423,7 @@ export function createRelayService(options: {
         /** 补充输入独立于入站处理和任务完成等待，慢 RPC 不阻塞 /status 与 /stop。 */
         const steering = (async () => {
           while (!finished && !stopping) {
-            const input = options.store.claimTaskInput(task.id);
+            const input = options.state.claimTaskInput(task.id);
             if (!input) {
               await setTimeout(50);
               continue;
@@ -435,7 +435,7 @@ export function createRelayService(options: {
                 preparing.signal,
               );
               if (finished || stopping) return;
-              if (!options.store.markTaskInputSending(task.id, input.index)) continue;
+              if (!options.state.markTaskInputSending(task.id, input.index)) continue;
               await options.agent.steer(input.text, attachments);
             } catch (cause) {
               if (finished || stopping) return;
@@ -445,16 +445,16 @@ export function createRelayService(options: {
                   ? cause.message
                   : "Submission unconfirmed. Not retried; check the session before resending.";
             }
-            options.store.finishTaskInput(task.id, input.index, error);
+            options.state.finishTaskInput(task.id, input.index, error);
           }
         })();
         /** 交互提交独立于慢速补充 RPC；停止、服务端解决和用户选择之间至多提交一次。 */
         const answering = (async () => {
           while (!finished && !stopping) {
-            const interaction = options.store.claimInteraction(task.id);
+            const interaction = options.state.claimInteraction(task.id);
             if (interaction) {
               const submitted = await options.agent.respond(interaction.id, interaction.answer);
-              options.store.closeInteraction(
+              options.state.closeInteraction(
                 interaction.id,
                 submitted
                   ? "Submitted. Waiting for results."
@@ -466,11 +466,11 @@ export function createRelayService(options: {
         })();
         try {
           const [result] = await Promise.all([running, steering, answering]);
-          if (result) options.store.finishTask(task.id, result);
+          if (result) options.state.finishTask(task.id, result);
         } catch (error) {
           options.agent.disconnect();
           await Promise.allSettled([running, steering, answering]);
-          options.store.finishTask(task.id, {
+          options.state.finishTask(task.id, {
             status: "interrupted",
             text: "Service error; shutting down. Check the directory and local processes before /resume.",
           });

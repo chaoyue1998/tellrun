@@ -5,9 +5,9 @@ import { autoRetry } from "@grammyjs/auto-retry";
 import { Bot, BotError, GrammyError, HttpError } from "grammy";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
+import { AttachmentError } from "../core/attachments.js";
+import type { CoreState } from "../core/state.js";
 import type { MessageHandler } from "../core/types.js";
-import { AttachmentError } from "../storage/attachments.js";
-import type { Store } from "../storage/store.js";
 import {
   createTelegramAttachmentLoader,
   sendTelegramAttachment,
@@ -51,7 +51,17 @@ const maxConnectionRetryDelayMs = 30_000;
 export function createTelegramConnection(
   config: Config["telegram"],
   handleMessage: MessageHandler,
-  store: Store,
+  /** 连接器只确认入站、读取投递状态和保存回执，不直接操作任务、审批或菜单。 */
+  state: Pick<
+    CoreState,
+    | "confirmUpdates"
+    | "claimReply"
+    | "pendingDraft"
+    | "removeReply"
+    | "retryReply"
+    | "reply"
+    | "activeTask"
+  >,
   logger: Logger,
 ) {
   /** 默认继承终端代理；显式配置使用优先级更高的小写变量，保留 NO_PROXY 规则。 */
@@ -341,6 +351,12 @@ export function createTelegramConnection(
       try {
         if (polling.signal.aborted) return;
         logger.info({ botId: bot.botInfo.id }, "Telegram polling started");
+        /** 回复、草稿和活动提示都限定为本次连接认证的机器人与用户。 */
+        const source = {
+          platform: "telegram",
+          accountId: String(bot.botInfo.id),
+          userId: String(config.ownerId),
+        };
         workers.push(
           (async () => {
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
@@ -354,7 +370,11 @@ export function createTelegramConnection(
                 }),
               );
               if (!updates || polling.signal.aborted) return;
-              store.confirmUpdates(String(bot.botInfo.id), offset, updates.length === 0);
+              /** 成功拉取才确认旧事件；空响应清理过期记录，数值 offset 规则属于 Telegram。 */
+              state.confirmUpdates(
+                source,
+                (eventId) => updates.length === 0 || Number(eventId) < offset,
+              );
               for (const update of updates) {
                 if (polling.signal.aborted) return;
                 await bot.handleUpdate(update);
@@ -369,9 +389,9 @@ export function createTelegramConnection(
             /** 连续更新复用 ID；重新展示时换 ID，避免客户端重播整段生成动画。 */
             let draftId = randomInt(1, 2_147_483_647);
             while (!polling.signal.aborted) {
-              const reply = store.claimReply(String(bot.botInfo.id), String(config.ownerId));
+              const reply = state.claimReply(source);
               if (!reply) {
-                const draft = store.pendingDraft(String(bot.botInfo.id), String(config.ownerId));
+                const draft = state.pendingDraft(source);
                 /** 超长输出继续续期最近的有效预览，避免停止刷新后整段消失。 */
                 if (draft && draft.text.length > 32768 && draft.taskId === sentDraft?.taskId)
                   draft.text = sentDraft.text;
@@ -492,7 +512,7 @@ export function createTelegramConnection(
                         )
                       : await bot.api.sendMessage(reply.chatId, reply.text, markup)
                   ).message_id;
-                store.removeReply(
+                state.removeReply(
                   reply.id,
                   reply.messageId && !reply.modelMenuId && !reply.permissionMenuId
                     ? undefined
@@ -531,7 +551,7 @@ export function createTelegramConnection(
                     error.error_code !== 429);
                 if (permanent) {
                   if (reply.attachment)
-                    store.reply(
+                    state.reply(
                       reply.channelId,
                       `附件发送失败：${reply.attachment.name}\n${
                         error instanceof AttachmentError
@@ -539,9 +559,9 @@ export function createTelegramConnection(
                           : "Telegram 拒绝接收附件，原文件仍保留在生成位置。"
                       }`,
                     );
-                  store.removeReply(reply.id);
+                  state.removeReply(reply.id);
                 } else
-                  store.retryReply(
+                  state.retryReply(
                     reply.id,
                     error instanceof GrammyError && error.parameters.retry_after !== undefined
                       ? error.parameters.retry_after
@@ -562,8 +582,8 @@ export function createTelegramConnection(
             while (!polling.signal.aborted) {
               if (
                 Date.now() >= nextTypingAt &&
-                ["dispatching", "running"].includes(store.activeTask()?.status ?? "") &&
-                !store.activeTask()?.interactions.some((item) => item.blocking)
+                ["dispatching", "running"].includes(state.activeTask(source)?.status ?? "") &&
+                !state.activeTask(source)?.interactions.some((item) => item.blocking)
               ) {
                 nextTypingAt = Date.now() + 4_000;
                 try {

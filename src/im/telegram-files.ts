@@ -2,12 +2,9 @@ import { randomUUID } from "node:crypto";
 import { access, constants, stat } from "node:fs/promises";
 import { type Agent, get } from "node:https";
 import { type Api, GrammyError, InputFile } from "grammy";
+import { AttachmentError, maxAttachmentBytes } from "../core/attachments.js";
 import type { AgentAttachment, Attachment } from "../core/types.js";
-import {
-  AttachmentError,
-  createAttachmentLoader,
-  maxAttachmentBytes,
-} from "../storage/attachments.js";
+import { createAttachmentLoader } from "../storage/attachments.js";
 
 /** Telegram 照片上传上限为 10 MB；更大的图片按文件发送。 */
 const maxPhotoBytes = 10 * 1024 * 1024;

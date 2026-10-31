@@ -1,5 +1,5 @@
 import { Cron } from "croner";
-import { activeTaskStatuses, type State } from "../storage/schema.js";
+import { activeTaskStatuses, type State } from "./schema.js";
 import type { ChannelIdentity } from "./types.js";
 
 /** 只使用五段 Cron；Croner 负责校验和时区计算，不创建独立执行定时器。 */
@@ -30,8 +30,8 @@ function formatTime(timestamp: number | null, timezone: string) {
   }).format(timestamp);
 }
 
-/** 命令、触发记录和任务创建共用存储事务；计划本身不直接调用 Agent。 */
-export function createCrons(storage: {
+/** 命令、触发记录和任务创建共用业务事务；计划本身不直接调用 Agent。 */
+export function createCrons(context: {
   read: () => State;
   update: <T>(action: () => T) => T;
   enqueueReply: (channelId: number, text: string) => void;
@@ -44,7 +44,7 @@ export function createCrons(storage: {
   /** 调度只读取当前机器人和授权用户的计划，旧配置的计划不能误触发。 */
   function channelsFor(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
     return new Map(
-      storage
+      context
         .read()
         .channels.filter(
           (channel) =>
@@ -62,7 +62,7 @@ export function createCrons(storage: {
     if (cron.nextRunAt !== null) return;
     cron.enabled = false;
     cron.pendingAt = null;
-    storage.enqueueReply(
+    context.enqueueReply(
       cron.channelId,
       `Cron #${cron.id} disabled: invalid expression or timezone, or no future run. Delete and recreate the schedule.`,
     );
@@ -71,7 +71,7 @@ export function createCrons(storage: {
   return {
     /** 已接收命令由外层事务去重；参数校验完成后才修改计划。 */
     handleCron(channelId: number, args: string, now = Date.now()) {
-      const state = storage.read();
+      const state = context.read();
       const channel = state.channels.find((item) => item.id === channelId);
       if (!channel?.cwd) return "Set a working directory with /cwd first.";
       const cwd = channel.cwd;
@@ -117,8 +117,8 @@ export function createCrons(storage: {
         const nextRunAt = nextRun(expression, timezone, now);
         if (!prompt || nextRunAt === null)
           return `Invalid cron expression or no future run. Use five fields.\n\n${usage}`;
-        return storage.update(() => {
-          const state = storage.read();
+        return context.update(() => {
+          const state = context.read();
           const id = state.nextCronId++;
           state.crons.push({
             id,
@@ -149,8 +149,8 @@ export function createCrons(storage: {
         action[1] === "enable" ? nextRun(cron.expression, cron.timezone, now) : null;
       if (action[1] === "enable" && nextRunAt === null)
         return "No future run could be calculated. Delete and recreate the schedule.";
-      return storage.update(() => {
-        const state = storage.read();
+      return context.update(() => {
+        const state = context.read();
         const current = state.crons.find((item) => item.id === cron.id);
         if (!current) return "Schedule not found.";
         const active = state.tasks.some(
@@ -167,8 +167,8 @@ export function createCrons(storage: {
     },
     /** 暂停清空等待触发；恢复时跳过暂停期间到期的次数，不产生过期工作。 */
     resetCronPending(channelId: number, now = Date.now()) {
-      storage.update(() => {
-        for (const cron of storage.read().crons) {
+      context.update(() => {
+        for (const cron of context.read().crons) {
           if (cron.channelId !== channelId) continue;
           cron.pendingAt = null;
           if (cron.enabled && (cron.nextRunAt === null || cron.nextRunAt <= now))
@@ -182,7 +182,7 @@ export function createCrons(storage: {
       now = Date.now(),
     ) {
       const channels = channelsFor(source);
-      const due = storage
+      const due = context
         .read()
         .crons.filter(
           (cron) =>
@@ -191,9 +191,9 @@ export function createCrons(storage: {
               (channels.get(cron.channelId)?.paused && cron.pendingAt !== null)),
         );
       if (!due.length) return;
-      storage.update(() => {
+      context.update(() => {
         for (const saved of due) {
-          const cron = storage.read().crons.find((item) => item.id === saved.id);
+          const cron = context.read().crons.find((item) => item.id === saved.id);
           if (!cron) continue;
           if (channels.get(cron.channelId)?.paused) cron.pendingAt = null;
           if (cron.enabled && (cron.nextRunAt === null || cron.nextRunAt <= now))
@@ -207,10 +207,10 @@ export function createCrons(storage: {
       now = Date.now(),
     ) {
       const channels = channelsFor(source);
-      const crons = storage
+      const crons = context
         .read()
         .crons.filter((cron) => cron.enabled && channels.has(cron.channelId));
-      const busy = storage.read().tasks.some((task) => activeTaskStatuses.has(task.status));
+      const busy = context.read().tasks.some((task) => activeTaskStatuses.has(task.status));
       if (
         !crons.some(
           (cron) =>
@@ -219,8 +219,8 @@ export function createCrons(storage: {
         )
       )
         return;
-      storage.update(() => {
-        const state = storage.read();
+      context.update(() => {
+        const state = context.read();
         for (const cron of state.crons) {
           const channel = channels.get(cron.channelId);
           if (!cron.enabled || !channel) continue;
@@ -243,8 +243,8 @@ export function createCrons(storage: {
         if (!cron || !channel || cron.pendingAt === null) return;
         const scheduledAt = cron.pendingAt;
         cron.pendingAt = null;
-        const task = storage.createTask(channel, cron, scheduledAt);
-        storage.enqueueReply(
+        const task = context.createTask(channel, cron, scheduledAt);
+        context.enqueueReply(
           channel.id,
           `Cron #${cron.id} queued task #${task.id}.\nScheduled: ${formatTime(scheduledAt, cron.timezone)} (${cron.timezone})\nDirectory: ${cron.cwd}\nTask: ${cron.prompt}`,
         );

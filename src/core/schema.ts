@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-/** 存储操作与状态校验共用的未结束任务状态。 */
+/** 任务规则与状态校验共用的未结束任务状态。 */
 export const activeTaskStatuses = new Set<string>([
   "queued",
   "preparing",
@@ -92,33 +92,31 @@ export const stateSchema = z
         eventId: z.string(),
       }),
     ),
-    /** 定时任务 ID 持续递增，删除后不复用；旧状态默认没有定时任务。 */
-    nextCronId: id.default(1),
-    crons: z
-      .array(
-        z.strictObject({
-          id,
-          channelId: id,
-          expression: z.string().min(1),
-          timezone: z.string().min(1),
-          prompt: z.string().min(1),
-          cwd: z.string().min(1),
-          model: z.string().min(1).nullable(),
-          reasoningEffort: z.string().min(1).nullable(),
-          permissionMode: z.string().min(1).nullable(),
-          enabled: z.boolean(),
-          nextRunAt: nonnegativeInteger.nullable(),
-          /** 忙碌时同一计划最多保留一次待执行，不积累每次触发记录。 */
-          pendingAt: nonnegativeInteger.nullable(),
-        }),
-      )
-      .default([]),
+    /** 定时任务 ID 持续递增，删除后不复用。 */
+    nextCronId: id,
+    crons: z.array(
+      z.strictObject({
+        id,
+        channelId: id,
+        expression: z.string().min(1),
+        timezone: z.string().min(1),
+        prompt: z.string().min(1),
+        cwd: z.string().min(1),
+        model: z.string().min(1).nullable(),
+        reasoningEffort: z.string().min(1).nullable(),
+        permissionMode: z.string().min(1).nullable(),
+        enabled: z.boolean(),
+        nextRunAt: nonnegativeInteger.nullable(),
+        /** 忙碌时同一计划最多保留一次待执行，不积累每次触发记录。 */
+        pendingAt: nonnegativeInteger.nullable(),
+      }),
+    ),
     tasks: z.array(
       z.strictObject({
         id,
         channelId: id,
         /** 执行快照独立于计划，删除计划后仍能跟踪已开始的任务。 */
-        cron: z.strictObject({ id, scheduledAt: nonnegativeInteger }).nullable().default(null),
+        cron: z.strictObject({ id, scheduledAt: nonnegativeInteger }).nullable(),
         cwd: z.string(),
         sessionId: z.string().nullable(),
         /** 派发前显式保存空值，取得轮次 ID 后用于重启恢复。 */
@@ -188,7 +186,7 @@ export const stateSchema = z
         id,
         channelId: id,
         text: z.string(),
-        /** 仅任务输出使用 Markdown；旧队列和控制消息默认保留原文。 */
+        /** 任务输出可使用 Markdown；未标记的控制消息保留原文。 */
         markdown: z.boolean().optional(),
         /** 每张图片独立排队，失败重试不重发已成功的文字或其他图片。 */
         attachment: resultAttachmentSchema.optional(),
@@ -241,5 +239,5 @@ export const stateSchema = z
     );
   }, "Invalid state IDs, references, or active task count.");
 
-/** 存储操作共用的文件结构，由运行时校验规则推导。 */
+/** 核心层定义业务状态结构，持久化边界复用同一校验规则。 */
 export type State = z.infer<typeof stateSchema>;

@@ -4,13 +4,8 @@ import { basename, join } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { appDirectory } from "../config.js";
+import { AttachmentError, maxAttachmentBytes } from "../core/attachments.js";
 import type { Attachment, AttachmentLoader } from "../core/types.js";
-
-/** Telegram 官方 Bot API 的单文件下载上限；同时校验声明大小和实际字节数。 */
-export const maxAttachmentBytes = 20 * 1024 * 1024;
-
-/** 只向用户返回固定错误信息，避免底层网络错误携带 Bot Token。 */
-export class AttachmentError extends Error {}
 
 /** 清理跨平台路径与控制字符，限制 UTF-8 文件名长度，始终写入独立附件目录。 */
 function safeFilename(name: string) {

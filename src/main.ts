@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { createCodexAgent } from "./agents/codex.js";
 import { appDirectory, loadConfig } from "./config.js";
 import { createRelayService } from "./core/relay.js";
+import { createState } from "./core/state.js";
 import { createTelegramConnection } from "./im/telegram.js";
 import { createLogger } from "./logger.js";
 import { openStore, type Store } from "./storage/store.js";
@@ -56,6 +57,12 @@ try {
   const config = loadConfig();
   phase = "Loading state";
   store = openStore();
+  /** 文件生命周期留在入口；核心层只接收初始快照、保存能力和默认工作目录。 */
+  const state = createState({
+    initialState: store.initialState,
+    save: store.save,
+    cwd: realpathSync(process.cwd()),
+  });
   if (readyFile) rmSync(readyFile, { force: true });
   phase = "Checking agent";
   const agent = await createCodexAgent(config.codexPath);
@@ -68,11 +75,11 @@ try {
         if (!relay) throw new Error("Relay not initialized.");
         return relay.handleMessage(message);
       },
-      store,
+      state,
       logger,
     );
     relay = createRelayService({
-      store,
+      state,
       agent,
       updates: createUpdateChecker(config.telegram.proxyUrl),
       prepareAttachments: im.prepareAttachments,
