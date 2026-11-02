@@ -13,22 +13,22 @@ import {
   telegramAttachments,
 } from "./telegram-files.js";
 
-/** 默认菜单和控制命令识别共用定义，菜单说明统一使用英文。 */
+/** 按会话、任务、配置与计划、维护、帮助排序；菜单与命令识别共用，说明使用英文。 */
 const commands = [
-  { command: "start", description: "Show usage instructions" },
-  { command: "help", description: "Show available commands" },
-  { command: "cwd", description: "Show or change the working directory" },
   { command: "new", description: "Create a new session with an optional name" },
   { command: "list", description: "Show up to 10 recent sessions with switch buttons" },
+  { command: "cwd", description: "Show or change the working directory" },
+  { command: "status", description: "Show status and check for updates" },
+  { command: "last", description: "Show the latest task result" },
+  { command: "interrupt", description: "Interrupt the current task" },
+  { command: "stop", description: "Stop all background terminals in the current session" },
   { command: "model", description: "Select model and reasoning effort for future tasks" },
   { command: "permissions", description: "Select the permission mode for future tasks" },
   { command: "cron", description: "List, create, enable, disable, or delete scheduled tasks" },
-  { command: "status", description: "Show status and check for updates" },
-  { command: "update", description: "Ask Codex to upgrade Tellrun" },
   { command: "restart", description: "Restart Tellrun and reload configuration" },
-  { command: "last", description: "Show the latest task result" },
-  { command: "stop", description: "Stop all background terminals in the current session" },
-  { command: "interrupt", description: "Interrupt the current task" },
+  { command: "update", description: "Ask Codex to upgrade Tellrun" },
+  { command: "help", description: "Show available commands" },
+  { command: "start", description: "Show usage instructions" },
 ];
 
 /** 初始化操作可安全重复；与长轮询一起由连接循环负责退避重试。 */

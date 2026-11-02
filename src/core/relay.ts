@@ -7,7 +7,6 @@ import type { CoreState } from "./state.js";
 import type {
   Agent,
   AgentAttachment,
-  AgentModel,
   AgentOption,
   AttachmentLoader,
   ChannelIdentity,
@@ -123,7 +122,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/restart — Restart Tellrun and reload configuration\n/last — Last result\n/stop — Stop all background terminals in the current session\n/interrupt — Interrupt the current task; send a new message after it ends\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/cwd <path> — Set directory; start a new session\n/status — Status and update check\n/last — Last result\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.state.handleCron(channel.id, message.content.args);
             case "model":
@@ -343,13 +342,12 @@ export function createRelayService(options: {
             await setTimeout(100);
             continue;
           }
-          let models: AgentModel[] | undefined;
-          try {
-            models = await options.agent.listModels(menu.cwd, modelLoading.signal);
-          } catch {
-            /** 查询失败只提示重新打开菜单，不影响任务和已有选择。 */
-          }
-          if (!stopping) options.state.fillModels(menu.channelId, menu.id, models);
+          /** 配置与目录独立查询；无法解析当前选择时仍可展示可用的模型按钮。 */
+          const [models, current] = await Promise.all([
+            options.agent.listModels(menu.cwd, modelLoading.signal).catch(() => undefined),
+            options.agent.describeModel(menu.cwd, menu, modelLoading.signal).catch(() => undefined),
+          ]);
+          if (!stopping) options.state.fillModels(menu.channelId, menu.id, models, current);
         }
       } finally {
         modelLoading.abort();

@@ -72,20 +72,37 @@ export function createMenus(context: {
             channel.modelMenu.expiresAt > Date.now(),
         );
       if (channel?.modelMenu)
-        return { channelId: channel.id, cwd: channel.cwd, id: channel.modelMenu.id };
+        return {
+          channelId: channel.id,
+          cwd: channel.cwd,
+          id: channel.modelMenu.id,
+          model: channel.model,
+          reasoningEffort: channel.reasoningEffort,
+        };
     },
     /** 新菜单、换目录和过期后丢弃旧查询；失败时保留原模型选择。 */
-    fillModels(channelId: number, id: string, models: readonly AgentModel[] | undefined) {
+    fillModels(
+      channelId: number,
+      id: string,
+      models: readonly AgentModel[] | undefined,
+      current: (AgentOption & { reasoningEffort: string }) | undefined,
+    ) {
       const menu = context.read().channels.find((channel) => channel.id === channelId)?.modelMenu;
       if (menu?.id !== id || menu.stage !== "loading" || menu.expiresAt <= Date.now()) return;
       context.update(() => {
         const channel = context.read().channels.find((channel) => channel.id === channelId);
         if (!channel?.modelMenu) return;
         closeMenu(channelId, "modelMenu");
+        /** 有效配置只用于展示；查询失败时仅回退到完整的手动选择。 */
+        const text = current
+          ? `Current: ${current.label} · ${current.reasoningEffort}`
+          : channel.model && channel.reasoningEffort
+            ? `Current: ${models?.find((model) => model.id === channel.model)?.label ?? channel.model} · ${channel.reasoningEffort}`
+            : "Current: Unavailable (try /model again)";
         if (!models?.length) {
           context.enqueueReply(
             channelId,
-            `Current: ${channel.model ?? "Default"} · ${channel.reasoningEffort ?? "Default"}\n${
+            `${text}\n${
               models
                 ? "No models available. Check agent settings."
                 : "Could not load models. Try /model again."
@@ -94,11 +111,7 @@ export function createMenus(context: {
           return;
         }
         channel.modelMenu = { ...menu, stage: "model", options: [...models], messages: [] };
-        context.enqueueReply(
-          channelId,
-          `Current: ${models.find((model) => model.id === channel.model)?.label ?? channel.model ?? "Default"} · ${channel.reasoningEffort ?? "Default"}`,
-          { modelMenuId: id },
-        );
+        context.enqueueReply(channelId, text, { modelMenuId: id });
       });
     },
     /** 校验聊天、原消息、菜单和有效期；选择不改变已提交任务的快照。 */

@@ -57,20 +57,20 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 
 | Command               | Purpose                                                                                      |
 | --------------------- | -------------------------------------------------------------------------------------------- |
-| `/start`, `/help`     | Show usage instructions                                                                      |
-| `/cwd`                | Show the current working directory                                                           |
-| `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
 | `/new [name]`         | Create and select a session, with an optional name                                           |
 | `/list`               | Show up to 10 recent project sessions as buttons; tap to switch                              |
+| `/cwd`                | Show the current working directory                                                           |
+| `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
+| `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
+| `/last`               | Show the latest finished task's status and result                                            |
+| `/interrupt`          | Interrupt the current task; send a new message after it ends                                 |
+| `/stop`               | Stop all background terminals in the current Codex session                                   |
 | `/model`              | Show the current selection and choose model and reasoning effort                             |
 | `/permissions`        | Choose the permission mode for subsequent tasks                                              |
 | `/cron`               | List, create, delete, enable, or disable scheduled tasks                                     |
-| `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
-| `/update`             | Ask Codex to upgrade Tellrun using the installation details                                  |
 | `/restart`            | Restart Tellrun and reload configuration while preserving session and task state             |
-| `/last`               | Show the latest finished task's status and result                                            |
-| `/stop`               | Stop all background terminals in the current Codex session                                   |
-| `/interrupt`          | Interrupt the current task; send a new message after it ends                                 |
+| `/update`             | Ask Codex to upgrade Tellrun using the installation details                                  |
+| `/help`, `/start`     | Show usage instructions                                                                      |
 
 ### Session management
 
