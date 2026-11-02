@@ -43,7 +43,7 @@ export function createCrons(context: {
 }) {
   /** 调度只读取当前机器人和授权用户的计划，旧配置的计划不能误触发。 */
   function channelsFor(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-    return new Map(
+    return new Set(
       context
         .read()
         .channels.filter(
@@ -52,7 +52,7 @@ export function createCrons(context: {
             channel.accountId === source.accountId &&
             channel.userId === source.userId,
         )
-        .map((channel) => [channel.id, channel]),
+        .map((channel) => channel.id),
     );
   }
 
@@ -88,14 +88,11 @@ export function createCrons(context: {
         "Example: /cron add 0 9 * * 1-5 Check the project and report issues",
       ].join("\n");
       const input = args.trim();
-      const paused = channel.paused
-        ? "\nChat paused. Send /resume to allow future scheduled runs."
-        : "";
       if (!input) {
         const crons = state.crons.filter((cron) => cron.channelId === channelId);
-        if (!crons.length) return `No scheduled tasks.${paused}\n\n${usage}`;
+        if (!crons.length) return `No scheduled tasks.\n\n${usage}`;
         return [
-          `Scheduled tasks: ${crons.length}${paused}`,
+          `Scheduled tasks: ${crons.length}`,
           ...crons.map((cron) => {
             const running = state.tasks.find(
               (task) => task.cron?.id === cron.id && activeTaskStatuses.has(task.status),
@@ -134,7 +131,7 @@ export function createCrons(context: {
             nextRunAt,
             pendingAt: null,
           });
-          return `Cron #${id} created (enabled).\n${expression}\nTimezone: ${timezone}\nDirectory: ${cwd}\nTask: ${prompt}\nNext: ${formatTime(nextRunAt, timezone)}${paused}`;
+          return `Cron #${id} created (enabled).\n${expression}\nTimezone: ${timezone}\nDirectory: ${cwd}\nTask: ${prompt}\nNext: ${formatTime(nextRunAt, timezone)}`;
         });
       }
       const action = input.match(/^(del|enable|disable)\s+([1-9]\d*)$/);
@@ -144,7 +141,7 @@ export function createCrons(context: {
       );
       if (!cron) return "Schedule not found. Send /cron to see task IDs.";
       if (action[1] === "enable" && cron.enabled)
-        return `Cron #${cron.id} is already enabled.\nNext: ${formatTime(cron.nextRunAt, cron.timezone)} (${cron.timezone})${paused}`;
+        return `Cron #${cron.id} is already enabled.\nNext: ${formatTime(cron.nextRunAt, cron.timezone)} (${cron.timezone})`;
       const nextRunAt =
         action[1] === "enable" ? nextRun(cron.expression, cron.timezone, now) : null;
       if (action[1] === "enable" && nextRunAt === null)
@@ -162,18 +159,7 @@ export function createCrons(context: {
           current.nextRunAt = nextRunAt;
           current.pendingAt = null;
         }
-        return `Cron #${current.id} ${action[1] === "del" ? "deleted" : current.enabled ? "enabled" : "disabled"}.${action[1] === "enable" ? `\nNext: ${formatTime(nextRunAt, current.timezone)} (${current.timezone})${paused}` : active ? "\nThe active task will continue. Use /stop to stop it." : ""}`;
-      });
-    },
-    /** 暂停清空等待触发；恢复时跳过暂停期间到期的次数，不产生过期工作。 */
-    resetCronPending(channelId: number, now = Date.now()) {
-      context.update(() => {
-        for (const cron of context.read().crons) {
-          if (cron.channelId !== channelId) continue;
-          cron.pendingAt = null;
-          if (cron.enabled && (cron.nextRunAt === null || cron.nextRunAt <= now))
-            advance(cron, now);
-        }
+        return `Cron #${current.id} ${action[1] === "del" ? "deleted" : current.enabled ? "enabled" : "disabled"}.${action[1] === "enable" ? `\nNext: ${formatTime(nextRunAt, current.timezone)} (${current.timezone})` : active ? "\nThe active task will continue. Use /interrupt to interrupt it." : ""}`;
       });
     },
     /** 只跳过停机期间错过的触发；停机前已记录的待执行项继续保留。 */
@@ -187,15 +173,14 @@ export function createCrons(context: {
         .crons.filter(
           (cron) =>
             channels.has(cron.channelId) &&
-            ((cron.enabled && (cron.nextRunAt === null || cron.nextRunAt <= now)) ||
-              (channels.get(cron.channelId)?.paused && cron.pendingAt !== null)),
+            cron.enabled &&
+            (cron.nextRunAt === null || cron.nextRunAt <= now),
         );
       if (!due.length) return;
       context.update(() => {
         for (const saved of due) {
           const cron = context.read().crons.find((item) => item.id === saved.id);
           if (!cron) continue;
-          if (channels.get(cron.channelId)?.paused) cron.pendingAt = null;
           if (cron.enabled && (cron.nextRunAt === null || cron.nextRunAt <= now))
             advance(cron, now);
         }
@@ -215,29 +200,21 @@ export function createCrons(context: {
         !crons.some(
           (cron) =>
             (cron.nextRunAt !== null && cron.nextRunAt <= now) ||
-            (cron.pendingAt !== null && (!busy || channels.get(cron.channelId)?.paused)),
+            (cron.pendingAt !== null && !busy),
         )
       )
         return;
       context.update(() => {
         const state = context.read();
         for (const cron of state.crons) {
-          const channel = channels.get(cron.channelId);
-          if (!cron.enabled || !channel) continue;
-          if (channel.paused) cron.pendingAt = null;
+          if (!cron.enabled || !channels.has(cron.channelId)) continue;
           if (cron.nextRunAt === null || cron.nextRunAt > now) continue;
-          if (!channel.paused) cron.pendingAt ??= cron.nextRunAt;
+          cron.pendingAt ??= cron.nextRunAt;
           advance(cron, now);
         }
         if (state.tasks.some((task) => activeTaskStatuses.has(task.status))) return;
         const cron = state.crons
-          .filter(
-            (item) =>
-              item.enabled &&
-              item.pendingAt !== null &&
-              channels.has(item.channelId) &&
-              !channels.get(item.channelId)?.paused,
-          )
+          .filter((item) => item.enabled && item.pendingAt !== null && channels.has(item.channelId))
           .sort((a, b) => (a.pendingAt ?? 0) - (b.pendingAt ?? 0) || a.id - b.id)[0];
         const channel = cron && state.channels.find((item) => item.id === cron.channelId);
         if (!cron || !channel || cron.pendingAt === null) return;

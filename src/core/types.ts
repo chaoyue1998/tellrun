@@ -42,7 +42,7 @@ export interface IncomingMessage {
     | {
         type: "interaction";
         id: string;
-        action: "approval" | "stop" | "option";
+        action: "approval" | "interrupt" | "option";
         messageId: number;
         questionIndex?: number;
         optionIndex?: number;
@@ -145,7 +145,7 @@ export interface Agent {
     onStarted: (runId: string) => void;
     /** 完整输出快照，包含过程说明、最终回复和文件差异；调用方不能等待 IM 发送。 */
     onText: (text: string) => void;
-    /** 执行异常等通知进入持久化消息队列，不依赖流式草稿或任务结束。 */
+    /** 执行异常等通知进入持久化消息队列，不依赖流式预览或任务结束。 */
     onNotice: (text: string) => void;
     onInteraction: (interaction: AgentInteraction) => void;
     onInteractionClosed: (id: string, reason: string) => void;
@@ -156,8 +156,10 @@ export interface Agent {
   steer(prompt: string, attachments?: AgentAttachment[]): Promise<void>;
   /** 只断开客户端；run 返回 undefined，后台任务及持久状态继续保留。 */
   disconnect(): void;
-  /** 用户明确停止时才请求取消当前轮次。 */
-  stop(): void;
+  /** 清理指定会话的后台终端，不取消 Agent 当前轮次。 */
+  stop(cwd: string, sessionId: string, signal: AbortSignal): Promise<void>;
+  /** 用户明确中断时才请求取消当前轮次。 */
+  interrupt(): void;
 }
 
 /** 返回时表示消息标识及回复意图已保存，不等待 Agent 执行或 IM 发送。 */

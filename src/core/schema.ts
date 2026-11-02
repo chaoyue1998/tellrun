@@ -43,7 +43,7 @@ const menuSchema = z.strictObject({
   messages: z.array(z.strictObject({ messageId: id, text: z.string() })),
 });
 
-/** 仅接受当前状态结构；字段缺失或格式无效时拒绝启动，不迁移或清空文件。 */
+/** 仅接受当前完整状态结构，字段缺失、额外字段或格式无效时拒绝启动。 */
 export const stateSchema = z
   .strictObject({
     channels: z.array(
@@ -55,7 +55,6 @@ export const stateSchema = z
         userId: z.string(),
         cwd: z.string().min(1),
         sessionId: z.string().nullable(),
-        paused: z.boolean(),
         /** 出站限流按机器人账号共用；撤回消息后也保留，避免重启绕过等待。 */
         replyRetryAt: nonnegativeInteger.optional(),
         /** 模式标识属于 Agent；空值沿用默认模式。 */
@@ -123,6 +122,8 @@ export const stateSchema = z
         sessionId: z.string().nullable(),
         /** 派发前显式保存空值，取得轮次 ID 后用于重启恢复。 */
         runId: z.string().min(1).nullable(),
+        /** 实时预览的正式消息，重连和终态沿用同一条消息。 */
+        previewMessageId: id.optional(),
         prompt: z.string(),
         attachments: attachmentsSchema,
         permissionMode: z.string().min(1).nullable(),
@@ -188,6 +189,8 @@ export const stateSchema = z
         id,
         channelId: id,
         text: z.string(),
+        /** 最终结果关联执行快照，用于接回预览发送的迟到回执。 */
+        taskId: id.optional(),
         /** 任务输出可使用 Markdown；未标记的控制消息保留原文。 */
         markdown: z.boolean().optional(),
         /** 每张图片独立排队，失败重试不重发已成功的文字或其他图片。 */

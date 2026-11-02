@@ -32,7 +32,7 @@ export function createState(options: {
   let updating = false;
   /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
   let draft: { taskId: number; text: string } | undefined;
-  /** 文字与附件各有一个在途请求；交互关闭时仍保留迟到回执的清理关联。 */
+  /** 控制回复、普通文字与附件各有一个在途请求；交互关闭后保留迟到回执的关联。 */
   const delivering = new Map<number, State["outbox"][number]>();
 
   /** 交互撤回可能清空发送队列；实例内保持递增，避免迟到发送回执删除新消息。 */
@@ -106,15 +106,17 @@ export function createState(options: {
       | "sessions"
       | "markdown"
       | "priority"
+      | "taskId"
     > & { attachments?: AgentAttachment[] } = {},
   ) {
     if (text === undefined) return;
-    const parts = delivery.messageId
-      ? [text]
-      : delivery.markdown
-        ? [text || "(No text reply)"]
-        : (text.match(/[\s\S]{1,2000}/gu) ?? ["(No text reply)"]);
-    if (delivery.markdown && !delivery.messageId && text.length > 30000) {
+    const parts =
+      delivery.messageId && !delivery.taskId
+        ? [text]
+        : delivery.markdown
+          ? [text || "(No text reply)"]
+          : (text.match(/[\s\S]{1,2000}/gu) ?? ["(No text reply)"]);
+    if (delivery.markdown && (!delivery.messageId || delivery.taskId) && text.length > 30000) {
       parts.length = 0;
       let part = "";
       /** 保存围栏与语言标记，代码跨段时关闭并在下一段重新打开。 */
@@ -158,6 +160,8 @@ export function createState(options: {
         attempts: 0,
         retryAt: Date.now(),
         ...delivery,
+        /** 长结果只将第一段写回预览，其余分段按顺序新建。 */
+        ...(index && delivery.taskId ? { messageId: undefined } : {}),
         ...(delivery.permissionMenuId ||
         delivery.modelMenuId ||
         delivery.sessions?.length ||
@@ -287,13 +291,6 @@ export function createState(options: {
       Object.assign(task, { status: result.status, result: result.text });
       for (const interaction of state.interactions.filter((item) => item.taskId === id))
         closeInteraction(interaction.id, "Task ended. Request closed.");
-      if (result.status === "interrupted") {
-        const channel = state.channels.find((channel) => channel.id === task.channelId);
-        if (channel) {
-          channel.paused = true;
-          crons.resetCronPending(channel.id);
-        }
-      }
       enqueueReply(
         task.channelId,
         `${task.cron ? `Cron #${task.cron.id}\n` : ""}${
@@ -307,7 +304,13 @@ export function createState(options: {
                 }[result.status]
               }\n${result.text}`
         }`,
-        { markdown: true, priority: false, attachments: result.attachments ?? [] },
+        {
+          taskId: id,
+          messageId: task.previewMessageId,
+          markdown: true,
+          priority: false,
+          attachments: result.attachments ?? [],
+        },
       );
       for (const [index, input] of task.inputs.entries()) {
         if (!["pending", "preparing", "sending"].includes(input.status)) continue;
@@ -321,7 +324,7 @@ export function createState(options: {
     if (draft?.taskId === id) draft = undefined;
   }
 
-  /** 命令与交互按钮共用停止逻辑；先使交互失效，再由核心层请求中断。 */
+  /** 命令与问题卡片共用中断逻辑；先使交互失效，再由核心层请求中断。 */
   function cancelTask(id: number) {
     if (
       ["queued", "preparing"].includes(state.tasks.find((task) => task.id === id)?.status ?? "")
@@ -368,7 +371,6 @@ export function createState(options: {
             /** 创建聊天时固定服务启动目录，后续命令直接使用已保存的路径。 */
             cwd: options.cwd,
             sessionId: null,
-            paused: false,
             permissionMode: null,
             permissionMenu: null,
             model: null,
@@ -430,28 +432,13 @@ export function createState(options: {
             channel.reasoningEffort = null;
           }
           Object.assign(channel, { cwd, sessionId });
-          /** 会话选择与成功回复一同落盘；暂停状态以接口返回时的值为准。 */
-          if (reply)
-            enqueueReply(
-              channelId,
-              `${reply}${channel.paused ? "\nPaused. Send /resume to continue." : ""}`,
-            );
+          /** 会话选择与成功回复一同落盘。 */
+          if (reply) enqueueReply(channelId, reply);
         }
       });
     },
     ...menus,
     ...crons,
-    /** 暂停状态跨重启保留，恢复须由用户明确触发。 */
-    setPaused(channelId: number, paused: boolean) {
-      update(() => {
-        const channel = state.channels.find((channel) => channel.id === channelId);
-        if (channel) {
-          const wasPaused = channel.paused;
-          channel.paused = paused;
-          if (paused || wasPaused) crons.resetCronPending(channelId);
-        }
-      });
-    },
     /** 返回任务快照；连接器查询时限定来源，避免向其他账号显示活动状态。 */
     activeTask(source?: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       const task = state.tasks.find(
@@ -475,12 +462,12 @@ export function createState(options: {
           })
         : undefined;
     },
-    /** 内存预览保留完整内容；IM 决定能否展示草稿，正式结果始终完整分段发送。 */
+    /** 内存预览保留完整内容；IM 决定能否展示预览，正式结果始终完整分段发送。 */
     setDraft(id: number, text: string) {
       if (state.tasks.some((task) => task.id === id && task.status === "running"))
         draft = { taskId: id, text };
     },
-    /** 仅向当前机器人与授权用户返回执行中的草稿，停止后不再刷新。 */
+    /** 仅向当前机器人与授权用户返回执行中的预览，停止后不再刷新。 */
     pendingDraft(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       if (!draft?.text.trim()) return;
       if (
@@ -498,7 +485,16 @@ export function createState(options: {
         channel.accountId === source.accountId &&
         channel.userId === source.userId
       )
-        return { ...draft, chatId: channel.chatId };
+        return { ...draft, chatId: channel.chatId, messageId: task?.previewMessageId };
+    },
+    /** 只保存首次预览的消息编号；任务已结束时将最终结果接到这条消息上。 */
+    recordPreview(id: number, messageId: number) {
+      update(() => {
+        const task = state.tasks.find((item) => item.id === id);
+        if (task) task.previewMessageId = messageId;
+        const reply = state.outbox.find((item) => item.taskId === id && !item.attachment);
+        if (reply) reply.messageId = messageId;
+      });
     },
     /** 最近结果按聊天隔离，供 /last 再次查看。 */
     lastTask(channelId: number) {
@@ -563,7 +559,6 @@ export function createState(options: {
       if (
         !task ||
         !channel ||
-        (channel.paused && !task.runId) ||
         channel.platform !== source.platform ||
         channel.accountId !== source.accountId ||
         channel.userId !== source.userId
@@ -679,21 +674,14 @@ export function createState(options: {
         (interaction.expiresAt !== null && interaction.expiresAt <= Date.now())
       )
         return "Request closed. Check /status.";
-      /** 只有问题卡片提供停止操作，审批卡片仅接受审批选项。 */
+      /** 只有问题卡片提供中断操作，审批卡片仅接受审批选项。 */
       if (
         interaction.kind === "question" &&
         content.type === "interaction" &&
-        content.action === "stop"
+        content.action === "interrupt"
       ) {
-        update(() => {
-          const channel = state.channels.find((channel) => channel.id === channelId);
-          if (channel) {
-            channel.paused = true;
-            crons.resetCronPending(channel.id);
-          }
-          cancelTask(task.id);
-        });
-        return "Stopping. Wait for the result.";
+        cancelTask(task.id);
+        return "Interrupt requested. You can send another message when it ends.";
       }
       if (interaction.kind === "approval") {
         if (
@@ -818,22 +806,24 @@ export function createState(options: {
         }
         finishTask(task.id, {
           status: "interrupted",
-          text: "Service restarted; task result unknown. Check the project, then /resume and send a new task.",
+          text: "Service restarted; task result unknown. Check the project before sending a new task.",
         });
       }
       for (const interaction of state.interactions)
         closeInteraction(interaction.id, "Service restarted. Request closed.");
     },
     replyRetryAt,
-    /** 控制回复优先且各自保序；普通结果仍按队列顺序，文字和附件可分别在途。 */
+    /** 控制回复独立于普通输出领取；同类保序，跨类仍遵守附件和编辑的依赖。 */
     claimReply(
       source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">,
-      kind: "text" | "attachment" = "text",
+      kind: "priority" | "text" | "attachment" = "text",
     ) {
       if (
         replyRetryAt(source) > Date.now() ||
         [...delivering.values()].some(
-          (reply) => Boolean(reply.attachment) === (kind === "attachment"),
+          (reply) =>
+            Boolean(reply.attachment) === (kind === "attachment") &&
+            Boolean(reply.priority) === (kind === "priority"),
         )
       )
         return;
@@ -843,55 +833,52 @@ export function createState(options: {
         if (channel.modelMenu && channel.modelMenu.expiresAt <= Date.now())
           update(() => closeMenu(channel.id, "modelMenu"));
       }
-      for (const priority of kind === "text" ? [true, false] : [false]) {
-        for (const reply of state.outbox) {
-          if (Boolean(reply.priority) !== priority) continue;
-          const interaction = state.interactions.find((item) => item.id === reply.interactionId);
+      for (const reply of state.outbox) {
+        if (Boolean(reply.priority) !== (kind === "priority")) continue;
+        const interaction = state.interactions.find((item) => item.id === reply.interactionId);
+        if (
+          reply.interactionId &&
+          !reply.messageId &&
+          (interaction?.status !== "pending" ||
+            (interaction.expiresAt !== null && interaction.expiresAt <= Date.now()) ||
+            (reply.questionIndex !== undefined &&
+              interaction.questions[reply.questionIndex]?.answer !== null))
+        )
+          continue;
+        const channel = state.channels.find((channel) => channel.id === reply.channelId);
+        if (
+          channel?.platform === source.platform &&
+          channel.accountId === source.accountId &&
+          channel.userId === source.userId
+        ) {
           if (
-            reply.interactionId &&
-            !reply.messageId &&
-            (interaction?.status !== "pending" ||
-              (interaction.expiresAt !== null && interaction.expiresAt <= Date.now()) ||
-              (reply.questionIndex !== undefined &&
-                interaction.questions[reply.questionIndex]?.answer !== null))
-          )
-            continue;
-          const channel = state.channels.find((channel) => channel.id === reply.channelId);
-          if (
-            channel?.platform === source.platform &&
-            channel.accountId === source.accountId &&
-            channel.userId === source.userId
+            reply.retryAt > Date.now() ||
+            Boolean(reply.attachment) !== (kind === "attachment") ||
+            (reply.afterId !== undefined &&
+              (delivering.has(reply.afterId) ||
+                state.outbox.some((item) => item.id === reply.afterId))) ||
+            (reply.messageId !== undefined &&
+              state.outbox.some(
+                (item) =>
+                  item.id < reply.id &&
+                  item.channelId === reply.channelId &&
+                  item.messageId === reply.messageId,
+              ))
           ) {
-            if (
-              reply.retryAt > Date.now() ||
-              Boolean(reply.attachment) !== (kind === "attachment") ||
-              (reply.afterId !== undefined &&
-                (delivering.has(reply.afterId) ||
-                  state.outbox.some((item) => item.id === reply.afterId))) ||
-              (reply.messageId !== undefined &&
-                state.outbox.some(
-                  (item) =>
-                    item.id < reply.id &&
-                    item.channelId === reply.channelId &&
-                    item.messageId === reply.messageId,
-                ))
-            ) {
-              if (!priority) return;
-              continue;
-            }
-            delivering.set(reply.id, structuredClone(reply));
-            return structuredClone({
-              ...reply,
-              chatId: channel.chatId,
-              interaction,
-              permissionMenu:
-                channel.permissionMenu?.id === reply.permissionMenuId
-                  ? channel.permissionMenu
-                  : undefined,
-              modelMenu:
-                channel.modelMenu?.id === reply.modelMenuId ? channel.modelMenu : undefined,
-            });
+            if (kind !== "priority") return;
+            continue;
           }
+          delivering.set(reply.id, structuredClone(reply));
+          return structuredClone({
+            ...reply,
+            chatId: channel.chatId,
+            interaction,
+            permissionMenu:
+              channel.permissionMenu?.id === reply.permissionMenuId
+                ? channel.permissionMenu
+                : undefined,
+            modelMenu: channel.modelMenu?.id === reply.modelMenuId ? channel.modelMenu : undefined,
+          });
         }
       }
     },

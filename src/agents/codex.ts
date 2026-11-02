@@ -401,9 +401,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       let runId: string | undefined;
       let dispatched = Boolean(input.runId);
       let settled = false;
-      /** 原生 Cancel 的已确认中断视为用户取消，不能误报异常并暂停聊天。 */
+      /** 原生 Cancel 的已确认中断视为用户取消，不能误报为状态不确定。 */
       let cancelledByApproval = false;
-      let stopTimer: ReturnType<typeof setTimeout> | undefined;
+      let interruptTimer: ReturnType<typeof setTimeout> | undefined;
       /** 同一轮的自动重试只提示一次，避免网络抖动刷屏。 */
       let retryNotified = false;
       /** 不可重试错误后短暂等待正式终态，缺失时按状态未确认收尾。 */
@@ -426,7 +426,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   [
                     result.text,
                     result.status === "interrupted"
-                      ? "建议先用 /status 和 /last 查看状态及输出，并在本机确认任务是否已经停止。确认后发送 /resume 恢复接收，再说明如何继续；/resume 不会自动重跑任务。"
+                      ? "建议先用 /status 和 /last 查看状态及输出，并在本机确认任务是否已经停止。确认后直接发送新消息说明如何继续；原任务不会自动重跑。"
                       : "",
                     formatOutput(),
                   ]
@@ -544,8 +544,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             rpc.close("Tellrun disconnected. Task continues in Codex.");
             return;
           }
-          stopTimer = setTimeout(
-            () => fail("Stop unconfirmed; Codex disconnected. Check the project before /resume."),
+          interruptTimer = setTimeout(
+            () =>
+              fail(
+                "Interruption unconfirmed; Codex disconnected. Check the project before sending a new message.",
+              ),
             5_000,
           );
           if (sessionId && runId) {
@@ -605,7 +608,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                       const pending = interactions.get(interaction.id);
                       if (!pending) return;
                       if (interaction.blocking) {
-                        fail("Request timed out. Check /last, then /resume.");
+                        fail("Request timed out. Check /last before sending a new message.");
                       } else {
                         interactions.delete(interaction.id);
                         /** 异步问题没有待响应 RPC；过期只关闭按钮，不提交默认答案。 */
@@ -666,7 +669,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               if (!retryNotified) {
                 retryNotified = true;
                 input.onNotice(
-                  "Codex 执行遇到异常，正在自动重试。建议暂时等待，无需重复提交任务；可用 /status 查看状态，持续无进展时可用 /stop 停止。",
+                  "Codex 执行遇到异常，正在自动重试。建议暂时等待，无需重复提交任务；可用 /status 查看状态，持续无进展时可用 /interrupt 中断。",
                 );
               }
             } else if (!errorTimer) {
@@ -877,7 +880,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             JSON.stringify(fileChanges.get(interaction.fileReview.itemId)) !==
               interaction.fileReview.changes
           ) {
-            fail("Changes updated. Review locally, then /resume.");
+            fail("Changes updated. Review locally before sending a new message.");
             return false;
           }
         } else if (
@@ -1075,7 +1078,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         respond = undefined;
         for (const interaction of interactions.values()) clearTimeout(interaction.timer);
         interactions.clear();
-        clearTimeout(stopTimer);
+        clearTimeout(interruptTimer);
         clearTimeout(errorTimer);
         clearTimeout(previewTimer);
         rpc.close();
@@ -1098,8 +1101,14 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     disconnect() {
       active?.abort("disconnect");
     },
-    /** 用户停止等待当前轮次终态；不会退出共享后台服务。 */
-    stop() {
+    /** 独立控制连接直接清理指定会话的后台终端，不恢复会话或启动轮次。 */
+    async stop(cwd, sessionId, signal) {
+      await withSessionConnection(cwd, signal, async (rpc) =>
+        rpc.request("thread/backgroundTerminals/clean", { threadId: sessionId }),
+      );
+    },
+    /** 中断当前轮次并等待真实终态，不退出共享后台服务。 */
+    interrupt() {
       active?.abort();
     },
   };

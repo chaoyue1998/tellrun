@@ -193,7 +193,7 @@ export function parseCodexInteraction(
       })
       .parse(value);
     if (params.questions.some((question) => question.isSecret))
-      return { error: "Secret input unsupported. Handle locally, then /resume." };
+      return { error: "Secret input unsupported. Handle locally before sending a new message." };
     if (new Set(params.questions.map((question) => question.id)).size !== params.questions.length)
       throw new Error("Duplicate question IDs.");
     interaction.kind = "question";
@@ -209,12 +209,15 @@ export function parseCodexInteraction(
       allowText: question.isOther || !question.options?.length,
     }));
   } else {
-    return { error: "Unsupported request. Handle locally, then /resume.", unsupported: true };
+    return {
+      error: "Unsupported request. Handle locally before sending a new message.",
+      unsupported: true,
+    };
   }
   if (JSON.stringify(interaction).length > 64_000)
-    return { error: "Request too large. Handle locally, then /resume." };
+    return { error: "Request too large. Handle locally before sending a new message." };
   if (interaction.kind === "approval" && !interaction.choices.length)
-    return { error: "No supported approval options. Handle locally, then /resume." };
+    return { error: "No supported approval options. Handle locally before sending a new message." };
   return {
     request: interaction,
     approvals,

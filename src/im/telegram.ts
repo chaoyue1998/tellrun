@@ -1,8 +1,7 @@
-import { randomInt } from "node:crypto";
 import { Agent } from "node:https";
 import { setTimeout } from "node:timers/promises";
 import { autoRetry } from "@grammyjs/auto-retry";
-import { Bot, BotError, type Context, GrammyError, HttpError } from "grammy";
+import { Bot, BotError, GrammyError, HttpError } from "grammy";
 import type { Logger } from "pino";
 import type { Config } from "../config.js";
 import { AttachmentError } from "../core/attachments.js";
@@ -28,8 +27,8 @@ const commands = [
   { command: "update", description: "Ask Codex to upgrade Tellrun" },
   { command: "restart", description: "Restart Tellrun and reload configuration" },
   { command: "last", description: "Show the latest task result" },
-  { command: "stop", description: "Stop the current task and pause" },
-  { command: "resume", description: "Accept new tasks" },
+  { command: "stop", description: "Stop all background terminals in the current session" },
+  { command: "interrupt", description: "Interrupt the current task" },
 ];
 
 /** 初始化操作可安全重复；与长轮询一起由连接循环负责退避重试。 */
@@ -41,7 +40,7 @@ const connectionMethods = new Set([
   "getUpdates",
 ]);
 /** 即时提示不重试过期内容，统一使用短超时并随连接关停。 */
-const transientMethods = new Set(["sendChatAction", "sendRichMessageDraft", "answerCallbackQuery"]);
+const transientMethods = new Set(["sendChatAction", "answerCallbackQuery"]);
 /** 文件上传需要更长时限，关停时保留队列供下次发送。 */
 const uploadMethods = new Set(["sendPhoto", "sendDocument"]);
 /** 普通连接故障最多退避 30 秒；Telegram 的 retry_after 可以要求等待更久。 */
@@ -57,6 +56,7 @@ export function createTelegramConnection(
     | "confirmUpdates"
     | "claimReply"
     | "pendingDraft"
+    | "recordPreview"
     | "removeReply"
     | "retryReply"
     | "replyRetryAt"
@@ -101,7 +101,7 @@ export function createTelegramConnection(
       );
     return result;
   });
-  /** 连接请求自行重试；输入提示、草稿和回调答复不自动重发过期内容。 */
+  /** 连接请求自行重试；输入提示和回调答复不自动重发过期内容。 */
   bot.api.config.use((prev, method, payload, signal) =>
     connectionMethods.has(method) || transientMethods.has(method)
       ? prev(method, payload, signal)
@@ -112,12 +112,13 @@ export function createTelegramConnection(
           signal,
         ),
   );
-  /** Markdown 被拒绝时保留原文，草稿与正式回复共用同一富消息降级方式。 */
+  /** Markdown 被拒绝时保留原文；未改变的编辑无需尝试格式降级。 */
   bot.api.config.use(async (prev, method, payload, signal) => {
     const result = await prev(method, payload, signal);
     if (
       !result.ok &&
       result.error_code === 400 &&
+      !/message is not modified/i.test(result.description) &&
       "rich_message" in payload &&
       payload.rich_message?.markdown
     )
@@ -165,29 +166,24 @@ export function createTelegramConnection(
     }
   });
 
-  /** 入站排序与消息处理共用命令识别；null 表示不由当前机器人处理。 */
-  function telegramCommand(message: NonNullable<Context["message"]>) {
-    if (message.chat.type !== "private" || message.from?.id !== config.ownerId) return null;
-    const command =
-      message.text === undefined
+  bot.on("message", async (ctx) => {
+    let command =
+      ctx.message.text === undefined
         ? undefined
-        : message.entities?.find((entity) => entity.type === "bot_command" && entity.offset === 0);
-    const [name, target] = command ? (message.text?.slice(1, command.length).split("@") ?? []) : [];
+        : ctx.message.entities?.find(
+            (entity) => entity.type === "bot_command" && entity.offset === 0,
+          );
+    const [name, target] = command
+      ? (ctx.message.text?.slice(1, command.length).split("@") ?? [])
+      : [];
     /** 问题回复可包含绝对路径等斜杠文本；已知控制命令仍优先处理。 */
     if (
-      !command ||
-      (message.reply_to_message?.from?.id === bot.botInfo.id &&
-        !commands.some((item) => item.command === name))
+      ctx.message.reply_to_message?.from?.id === ctx.me.id &&
+      !commands.some((item) => item.command === name)
     )
+      command = undefined;
+    if (command && target !== undefined && target.toLowerCase() !== ctx.me.username?.toLowerCase())
       return;
-    if (target !== undefined && target.toLowerCase() !== bot.botInfo.username?.toLowerCase())
-      return null;
-    return { name: name ?? "", args: message.text?.slice(command.length).trim() ?? "" };
-  }
-
-  bot.on("message", async (ctx) => {
-    const command = telegramCommand(ctx.message);
-    if (command === null) return;
 
     const attachments = telegramAttachments(ctx.message);
     await handleMessage({
@@ -199,7 +195,11 @@ export function createTelegramConnection(
       },
       eventId: String(ctx.update.update_id),
       content: command
-        ? { type: "command", ...command }
+        ? {
+            type: "command",
+            name: name ?? "",
+            args: ctx.message.text?.slice(command.length).trim() ?? "",
+          }
         : ctx.message.text !== undefined
           ? {
               type: "text",
@@ -216,7 +216,9 @@ export function createTelegramConnection(
 
   /** 先保存选择，再关闭客户端等待提示；答复回调失败不能撤销或重发已保存的决定。 */
   bot.on("callback_query:data", async (ctx) => {
-    const match = ctx.callbackQuery.data.match(/^i:([0-9a-f-]{36}):(a(\d+)|stop|q(\d+)_(\d+))$/);
+    const match = ctx.callbackQuery.data.match(
+      /^i:([0-9a-f-]{36}):(a(\d+)|interrupt|q(\d+)_(\d+))$/,
+    );
     const selection = ctx.callbackQuery.data.match(/^([pm]):([0-9a-f-]{36}):(\d+)$/);
     /** 会话按钮作为独立事件交给核心层校验和切换。 */
     const session = ctx.callbackQuery.data.match(/^s:(\S+)$/u);
@@ -248,7 +250,7 @@ export function createTelegramConnection(
                       ? "approval"
                       : match?.[4] !== undefined
                         ? "option"
-                        : "stop",
+                        : "interrupt",
                   messageId: ctx.callbackQuery.message.message_id,
                   ...(match?.[3] !== undefined
                     ? { optionIndex: Number(match[3]) }
@@ -365,28 +367,23 @@ export function createTelegramConnection(
         throw error;
       }
     },
-    /** 接收、文字、附件与输入提示独立运行，慢上传不阻塞审批和控制回复。 */
+    /** 接收、控制回复、普通文字、附件与输入提示独立运行。 */
     async start() {
       started = true;
       const workers: Promise<void>[] = [];
       try {
         if (polling.signal.aborted) return;
         logger.info({ botId: bot.botInfo.id }, "Telegram polling started");
-        /** 回复、草稿和活动提示都限定为本次连接认证的机器人与用户。 */
+        /** 回复、预览和活动提示都限定为本次连接认证的机器人与用户。 */
         const source = {
           platform: "telegram",
           accountId: String(bot.botInfo.id),
           userId: String(config.ownerId),
         };
         retryAfterAt = Math.max(retryAfterAt, state.replyRetryAt(source));
-        /** 每 10 秒续期；文本与草稿串行，附件完成后同样使旧草稿失效。 */
-        let nextDraftAt = 0;
-        let sentDraft: { taskId: number; text: string; at: number } | undefined;
-        let draftId = randomInt(1, 2_147_483_647);
-        /** 附件可能在草稿请求途中完成，迟到草稿回执不能覆盖这次失效。 */
-        let draftRevision = 0;
-        /** 已收到的命令先完成本地处理或发起查询，再调度回复、附件和输入提示。 */
-        let handlingCommands: Promise<void> | undefined;
+        /** 普通消息原地更新预览，避免原生生成草稿限制客户端发送命令。 */
+        let nextPreviewAt = 0;
+        let sentPreview: { taskId: number; text: string } | undefined;
         workers.push(
           (async () => {
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
@@ -405,23 +402,12 @@ export function createTelegramConnection(
                 source,
                 (eventId) => updates.length === 0 || Number(eventId) < offset,
               );
-              const batch = updates.map((update) => ({
-                update,
-                command: Boolean(update.message && telegramCommand(update.message)),
-              }));
-              handlingCommands = (async () => {
-                for (const { update, command } of batch) {
-                  if (polling.signal.aborted) return;
-                  if (command) await bot.handleUpdate(update);
-                }
-              })();
-              await handlingCommands;
-              handlingCommands = undefined;
-              for (const { update, command } of batch) {
+              /** 按 Telegram 顺序保存；处理只提交状态，不等待任务或回复发送。 */
+              for (const update of updates) {
                 if (polling.signal.aborted) return;
-                if (!command) await bot.handleUpdate(update);
+                await bot.handleUpdate(update);
               }
-              /** 调整处理顺序后，整批保存成功才能确认最大编号，失败或关停仍可重投。 */
+              /** 整批保存成功才推进确认编号，失败或关停仍可重投。 */
               if (polling.signal.aborted) return;
               offset = updates.reduce(
                 (next, update) => Math.max(next, update.update_id + 1),
@@ -429,49 +415,59 @@ export function createTelegramConnection(
               );
             }
           })(),
-          ...(["text", "attachment"] as const).map(async (kind) => {
+          ...(["priority", "text", "attachment"] as const).map(async (kind) => {
             while (!polling.signal.aborted) {
-              if (handlingCommands) {
-                await handlingCommands;
-                continue;
-              }
               if (Date.now() < retryAfterAt) {
                 await setTimeout(100);
                 continue;
               }
               const reply = state.claimReply(source, kind);
               if (!reply) {
-                if (kind === "attachment") {
+                if (kind !== "text") {
                   await setTimeout(100);
                   continue;
                 }
                 const draft = state.pendingDraft(source);
-                /** 超长输出继续续期最近的有效预览，避免停止刷新后整段消失。 */
-                if (draft && draft.text.length > 32768 && draft.taskId === sentDraft?.taskId)
-                  draft.text = sentDraft.text;
+                if (draft?.taskId !== sentPreview?.taskId && nextPreviewAt === Infinity)
+                  nextPreviewAt = 0;
                 if (
                   draft &&
-                  /** 首次输出已超限时等待最终分段发送，不截取正文。 */
+                  /** 超长输出保留已显示的预览，终态按完整正文分段。 */
                   draft.text.length <= 32768 &&
-                  Date.now() >= nextDraftAt &&
-                  (draft.taskId !== sentDraft?.taskId ||
-                    draft.text !== sentDraft.text ||
-                    Date.now() - sentDraft.at >= 10_000)
+                  Date.now() >= nextPreviewAt &&
+                  (draft.taskId !== sentPreview?.taskId || draft.text !== sentPreview.text)
                 ) {
-                  nextDraftAt = Date.now() + 1000;
-                  if (draft.taskId !== sentDraft?.taskId || Date.now() - sentDraft.at >= 30_000)
-                    draftId = (draftId % 2_147_483_647) + 1;
-                  const revision = draftRevision;
+                  nextPreviewAt = Date.now() + 1000;
                   try {
-                    await bot.api.sendRichMessageDraft(Number(draft.chatId), draftId, {
-                      markdown: draft.text,
-                    });
-                    sentDraft = { ...draft, at: revision === draftRevision ? Date.now() : 0 };
+                    if (draft.messageId)
+                      await bot.api.editMessageText(draft.chatId, draft.messageId, {
+                        markdown: draft.text,
+                      });
+                    else
+                      state.recordPreview(
+                        draft.taskId,
+                        (
+                          await bot.api.sendRichMessage(
+                            draft.chatId,
+                            { markdown: draft.text },
+                            { disable_notification: true },
+                          )
+                        ).message_id,
+                      );
+                    sentPreview = draft;
                   } catch (error) {
                     if (polling.signal.aborted) return;
                     if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
                     if (error instanceof GrammyError && error.error_code === 401) throw error;
-                    nextDraftAt =
+                    if (
+                      error instanceof GrammyError &&
+                      error.error_code === 400 &&
+                      /message is not modified/i.test(error.description)
+                    ) {
+                      sentPreview = draft;
+                      continue;
+                    }
+                    nextPreviewAt =
                       error instanceof GrammyError &&
                       error.error_code >= 400 &&
                       error.error_code < 500 &&
@@ -480,6 +476,7 @@ export function createTelegramConnection(
                         : Date.now() +
                           (error instanceof GrammyError ? (error.parameters.retry_after ?? 5) : 5) *
                             1000;
+                    if (nextPreviewAt === Infinity) sentPreview = draft;
                     logger.warn(
                       {
                         errorType: error.name,
@@ -531,7 +528,14 @@ export function createTelegramConnection(
                                     },
                                   ])),
                               ...(interaction.kind === "question"
-                                ? [[{ text: "Stop", callback_data: `i:${interaction.id}:stop` }]]
+                                ? [
+                                    [
+                                      {
+                                        text: "Interrupt",
+                                        callback_data: `i:${interaction.id}:interrupt`,
+                                      },
+                                    ],
+                                  ]
                                 : []),
                             ],
                           },
@@ -550,14 +554,29 @@ export function createTelegramConnection(
                   messageId = (
                     await sendTelegramAttachment(bot.api, reply.chatId, reply.attachment)
                   ).message_id;
-                else if (messageId)
-                  await bot.api.editMessageText(
-                    reply.chatId,
-                    messageId,
-                    reply.markdown ? { markdown: reply.text } : reply.text,
-                    markup,
-                  );
-                else
+                else if (messageId) {
+                  try {
+                    await bot.api.editMessageText(
+                      reply.chatId,
+                      messageId,
+                      reply.markdown ? { markdown: reply.text } : reply.text,
+                      markup,
+                    );
+                  } catch (error) {
+                    if (!(error instanceof GrammyError) || error.error_code !== 400) throw error;
+                    if (!/message is not modified/i.test(error.description)) {
+                      if (!reply.taskId) throw error;
+                      /** 预览被用户删除或无法编辑时，最终结果仍独立投递。 */
+                      messageId = (
+                        await bot.api.sendRichMessage(
+                          reply.chatId,
+                          { markdown: reply.text },
+                          markup,
+                        )
+                      ).message_id;
+                    }
+                  }
+                } else
                   messageId = (
                     reply.markdown
                       ? await bot.api.sendRichMessage(
@@ -586,11 +605,6 @@ export function createTelegramConnection(
                           : {}),
                       },
                 );
-                /** 新消息清除草稿，编辑消息不会；保留有效正文并让下一次恢复换用新 ID。 */
-                if (!reply.messageId) {
-                  draftRevision++;
-                  if (sentDraft) sentDraft.at = 0;
-                }
               } catch (error) {
                 if (
                   !(
@@ -642,10 +656,6 @@ export function createTelegramConnection(
             /** 输入提示最多持续 5 秒，每 4 秒刷新；仅当前实例已派发的任务显示。 */
             let nextTypingAt = 0;
             while (!polling.signal.aborted) {
-              if (handlingCommands) {
-                await handlingCommands;
-                continue;
-              }
               if (
                 Date.now() >= nextTypingAt &&
                 ["dispatching", "running"].includes(state.activeTask(source)?.status ?? "") &&

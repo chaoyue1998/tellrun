@@ -26,7 +26,7 @@ export function createRelayService(options: {
   let stopping = false;
   /** 当前任务的附件准备可独立取消，不能阻塞停止指令或拖住服务退出。 */
   let inputPreparation: AbortController | undefined;
-  /** 菜单查询独立于任务，关停时取消查询并等待退出后再关闭存储。 */
+  /** 菜单和会话控制独立于任务，关停时取消请求并等待退出后再关闭存储。 */
   const modelLoading = new AbortController();
   /** 状态与会话请求立即执行；工作循环统一接收结果并等待退出。 */
   const controlQueries: Promise<void>[] = [];
@@ -77,7 +77,7 @@ export function createRelayService(options: {
           message.content.type === "session" ||
           (message.content.type === "command" && message.content.name === "new")
         ) {
-          if (task) return "Wait for the task to finish, or use /stop first.";
+          if (task) return "Wait for the task to finish, or use /interrupt first.";
           const { content } = message;
           const snapshot = structuredClone(channel);
           controlQuery = async () => {
@@ -123,7 +123,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/restart — Restart Tellrun and reload configuration\n/last — Last result\n/stop — Stop task and pause\n/resume — Accept new tasks\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/cwd <path> — Set directory; start a new session\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/status — Status and update check\n/update — Ask Codex to upgrade Tellrun\n/restart — Restart Tellrun and reload configuration\n/last — Last result\n/stop — Stop all background terminals in the current session\n/interrupt — Interrupt the current task; send a new message after it ends\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.state.handleCron(channel.id, message.content.args);
             case "model":
@@ -198,7 +198,6 @@ export function createRelayService(options: {
             case "update":
               if (message.content.args) return "Use /update without arguments.";
               if (task) return "Wait for the current task to finish, then send /update.";
-              if (channel.paused) return "Paused. Send /resume before /update.";
               /** 复用普通任务的快照、去重、审批和恢复流程，不向执行中的任务追加升级指令。 */
               options.state.createTask(channel, options.updates.upgradePrompt());
               return `Tellrun update queued for ${options.agent.name}.`;
@@ -212,7 +211,7 @@ export function createRelayService(options: {
             case "cwd": {
               if (!message.content.args)
                 return `Directory: ${channel.cwd}\nUse /cwd /absolute/path to change directory and start a new session.`;
-              if (task) return "Wait for the task to finish, or use /stop first.";
+              if (task) return "Wait for the task to finish, or use /interrupt first.";
               if (!isAbsolute(message.content.args))
                 return "Use an absolute path: /cwd /path/to/project.";
               let cwd: string;
@@ -223,7 +222,7 @@ export function createRelayService(options: {
                 return "Cannot access directory. Check the path and permissions.";
               }
               if (cwd !== channel.cwd) options.state.setSession(channel.id, cwd, null);
-              return `Directory: ${cwd}\n${channel.paused ? "Paused. Send /resume to continue." : "Send a task to Codex."}`;
+              return `Directory: ${cwd}\nSend a task to Codex.`;
             }
             case "list": {
               if (message.content.args) return "Use /list without arguments.";
@@ -254,16 +253,30 @@ export function createRelayService(options: {
               };
               return;
             }
-            case "stop":
-              options.state.setPaused(channel.id, true);
-              if (!task || task.channelId !== channel.id)
-                return "Paused. No task running in this chat. Send /resume to continue.";
+            case "stop": {
+              if (message.content.args) return "Use /stop without arguments.";
+              /** 固定命令收到时的目标；定时任务使用其独立会话，不能误停另一个聊天。 */
+              const { cwd, sessionId } = task?.channelId === channel.id ? task : channel;
+              if (!sessionId) return "No Codex session available yet.";
+              controlQuery = async () => {
+                try {
+                  await options.agent.stop(cwd, sessionId, modelLoading.signal);
+                  if (!stopping) options.state.reply(channel.id, "Background terminals stopped.");
+                } catch {
+                  if (!stopping)
+                    options.state.reply(
+                      channel.id,
+                      "Background terminal cleanup unconfirmed. Check the local Codex session.",
+                    );
+                }
+              };
+              return;
+            }
+            case "interrupt":
+              if (message.content.args) return "Use /interrupt without arguments.";
+              if (!task || task.channelId !== channel.id) return "No task running in this chat.";
               options.state.cancelTask(task.id);
-              return `Stop requested for task #${task.id}. Wait for its result, then /resume.`;
-            case "resume":
-              if (task) return "Wait for the task to finish before /resume.";
-              options.state.setPaused(channel.id, false);
-              return "Ready for new tasks. Interrupted tasks will not be rerun.";
+              return `Interrupt requested for task #${task.id}. You can send another message when it ends.`;
             case "last": {
               const last = options.state.lastTask(channel.id);
               if (!last) return "No tasks yet.";
@@ -280,7 +293,6 @@ export function createRelayService(options: {
         }
         if (message.content.type !== "text" && message.content.type !== "attachments")
           return "Send text, a photo, or a file. See /help.";
-        if (channel.paused) return "Paused. Check /last, then /resume to send a new task.";
         const attachments =
           message.content.type === "attachments" ? message.content.attachments : [];
         if (
@@ -306,14 +318,14 @@ export function createRelayService(options: {
         /** 错误由工作循环等待原 Promise 时传播，提前标记避免未处理拒绝。 */
         void query.catch(() => {});
       }
-      /** 只有选择和停止状态落盘后才影响运行时；回调答复不承担提交职责。 */
+      /** 只有选择和中断状态落盘后才影响运行时；回调答复不承担提交职责。 */
       if (
-        (message.content.type === "command" && message.content.name === "stop") ||
-        (message.content.type === "interaction" && message.content.action === "stop")
+        (message.content.type === "command" && message.content.name === "interrupt") ||
+        (message.content.type === "interaction" && message.content.action === "interrupt")
       ) {
         const active = options.state.activeTask();
         if (!active || active.status === "cancelling") inputPreparation?.abort();
-        if (active?.status === "cancelling") options.agent.stop();
+        if (active?.status === "cancelling") options.agent.interrupt();
       }
       return reply;
     },
@@ -409,7 +421,7 @@ export function createRelayService(options: {
             onSession: (id) => options.state.recordSession(task.id, id),
             onStarted: (runId) => {
               options.state.markRunning(task.id, runId);
-              if (options.state.activeTask()?.status === "cancelling") options.agent.stop();
+              if (options.state.activeTask()?.status === "cancelling") options.agent.interrupt();
             },
             onText: (text) => options.state.setDraft(task.id, text),
             onNotice: (text) => options.state.reply(task.channelId, `Task #${task.id}\n${text}`),
@@ -472,7 +484,7 @@ export function createRelayService(options: {
           await Promise.allSettled([running, steering, answering]);
           options.state.finishTask(task.id, {
             status: "interrupted",
-            text: "Service error; shutting down. Check the directory and local processes before /resume.",
+            text: "Service error; shutting down. Check the directory and local processes before sending a new task.",
           });
           throw error;
         } finally {
