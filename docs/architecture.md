@@ -333,7 +333,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 | cancelled   | 排队任务被取消，或用户停止后收到确定的中断终态               |
 | interrupted | 连接或进程故障导致执行状态无法确认                           |
 
-普通路径为 queued → dispatching → running → completed / failed，带附件时在 queued 与 dispatching 之间增加 preparing。/status 在 preparing 阶段显示正在下载附件；/interrupt 可直接取消尚未派发的任务。等待交互时任务仍保存为 running，由关联交互的 kind、blocking 和状态推导等待语义，/status 展示待审批或待回答。存在阻塞交互时暂停输入提示和预览；非阻塞问题不影响执行。终态记录不可被迟到事件覆盖。
+普通路径为 queued → dispatching → running → completed / failed，带附件时在 queued 与 dispatching 之间增加 preparing。/status 在 preparing 阶段显示正在下载附件；/interrupt 可直接取消尚未派发的任务。等待交互时任务仍保存为 running，由关联交互的 kind、blocking 和状态推导等待语义，/status 展示待审批或待回答。存在阻塞交互时暂停输入提示，只有阻塞审批暂停预览；选择题通过独立消息等待用户选择，无论是否标记为阻塞，Codex 已产生的后续输出都继续显示，等待回答和提交答案不拦住预览。Codex 自身是否等待答案仍遵循原生协议。终态记录不可被迟到事件覆盖。
 
 `/stop` 固定命令收到时的目标会话：当前聊天存在活动任务时使用任务的 cwd 和 sessionId，否则使用当前选择的会话。通过独立连接调用 `thread/backgroundTerminals/clean`，只清理后台终端，不调用 thread/resume 或 turn/interrupt；无会话时明确提示，RPC 失败不报告成功。`/interrupt` 先保存任务的 cancelling 状态并作废待处理按钮，再通过 `turn/interrupt` 中断活动 turn；收到实际终态后更新界面，确认中断记为 cancelled，下一条消息沿用当前会话开始新轮次。空闲时仅提示没有运行中的任务。5 秒内无法确认中断时，关闭本次连接并记录 interrupted，提示核对本机状态；保留新输入入口，后续仍通过 thread/read 检查会话是否空闲。两种控制均不清空定时等待触发。[后台终端清理](https://learn.chatgpt.com/docs/app-server#clean-background-terminals)、[中断轮次](https://learn.chatgpt.com/docs/app-server#interrupt-a-turn)
 

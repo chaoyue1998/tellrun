@@ -477,9 +477,14 @@ export function createState(options: {
     /** 仅向当前机器人与授权用户返回执行中的预览，停止后不再刷新。 */
     pendingDraft(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
       if (!draft?.messages.length) return;
+      /** 选择题独立等待答案，不屏蔽 Codex 已产生的后续输出。 */
       if (
         state.interactions.some(
-          (item) => item.taskId === draft?.taskId && item.blocking && item.status !== "closed",
+          (item) =>
+            item.taskId === draft?.taskId &&
+            item.kind === "approval" &&
+            item.blocking &&
+            item.status !== "closed",
         )
       )
         return;
