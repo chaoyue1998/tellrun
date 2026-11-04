@@ -50,10 +50,18 @@ export interface IncomingMessage {
     | { type: "unsupported" };
 }
 
+/** 按 Agent 确认的输入边界分段，稳定标识用于恢复消息关联。 */
+export interface AgentMessage {
+  id?: string;
+  text: string;
+}
+
 /** 只有运行时确认结束才算完成；连接丢失单独记为 interrupted。 */
 export interface AgentResult {
   status: "completed" | "failed" | "cancelled" | "interrupted";
+  /** 完整结果供 /last 查看，消息投递优先保留 Agent 提供的分段。 */
   text: string;
+  messages?: AgentMessage[];
   /** 运行时明确返回的产物路径，与文字结果一起持久化并发送。 */
   attachments?: AgentAttachment[];
 }
@@ -145,8 +153,8 @@ export interface Agent {
     reasoningEffort?: string | null;
     onSession: (sessionId: string) => void;
     onStarted: (runId: string) => void;
-    /** 完整输出快照，包含过程说明、最终回复和文件差异；调用方不能等待 IM 发送。 */
-    onText: (text: string) => void;
+    /** 按输入生效顺序提供完整分段快照；同一标识更新原消息，不等待 IM 发送。 */
+    onText: (messages: AgentMessage[]) => void;
     /** 执行异常等通知进入持久化消息队列，不依赖流式预览或任务结束。 */
     onNotice: (text: string) => void;
     onInteraction: (interaction: AgentInteraction) => void;

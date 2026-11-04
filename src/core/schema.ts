@@ -122,8 +122,12 @@ export const stateSchema = z
         sessionId: z.string().nullable(),
         /** 派发前显式保存空值，取得轮次 ID 后用于重启恢复。 */
         runId: z.string().min(1).nullable(),
-        /** 实时预览的正式消息，重连和终态沿用同一条消息。 */
+        /** 旧版整轮预览恢复时由首条输出沿用。 */
         previewMessageId: id.optional(),
+        /** Agent 输出分段与消息一一关联，重启和终态均沿用各自的消息。 */
+        previewMessages: z
+          .array(z.strictObject({ segmentId: z.string().min(1), messageId: id }))
+          .optional(),
         prompt: z.string(),
         attachments: attachmentsSchema,
         permissionMode: z.string().min(1).nullable(),
@@ -191,6 +195,8 @@ export const stateSchema = z
         text: z.string(),
         /** 最终结果关联执行快照，用于接回预览发送的迟到回执。 */
         taskId: id.optional(),
+        /** Agent 分段标识限定迟到回执，只接回该分段的第一条消息。 */
+        segmentId: z.string().min(1).optional(),
         /** 任务输出可使用 Markdown；未标记的控制消息保留原文。 */
         markdown: z.boolean().optional(),
         /** 每张图片独立排队，失败重试不重发已成功的文字或其他图片。 */

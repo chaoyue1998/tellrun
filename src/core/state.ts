@@ -4,6 +4,7 @@ import { activeTaskStatuses, type State } from "./schema.js";
 import type {
   AgentAttachment,
   AgentInteraction,
+  AgentMessage,
   AgentResult,
   Attachment,
   ChannelIdentity,
@@ -31,7 +32,7 @@ export function createState(options: {
   if (!options.initialState) options.save(state);
   let updating = false;
   /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
-  let draft: { taskId: number; text: string } | undefined;
+  let draft: { taskId: number; messages: AgentMessage[] } | undefined;
   /** 控制回复、普通文字与附件各有一个在途请求；交互关闭后保留迟到回执的关联。 */
   const delivering = new Map<number, State["outbox"][number]>();
 
@@ -107,6 +108,7 @@ export function createState(options: {
       | "markdown"
       | "priority"
       | "taskId"
+      | "segmentId"
     > & { attachments?: AgentAttachment[] } = {},
   ) {
     if (text === undefined) return;
@@ -291,27 +293,32 @@ export function createState(options: {
       Object.assign(task, { status: result.status, result: result.text });
       for (const interaction of state.interactions.filter((item) => item.taskId === id))
         closeInteraction(interaction.id, "Task ended. Request closed.");
-      enqueueReply(
-        task.channelId,
-        `${task.cron ? `Cron #${task.cron.id}\n` : ""}${
-          result.status === "completed"
-            ? result.text
-            : `Task #${id} ${
-                {
-                  failed: "Failed",
-                  cancelled: "Stopped",
-                  interrupted: "Unconfirmed",
-                }[result.status]
-              }\n${result.text}`
-        }`,
-        {
-          taskId: id,
-          messageId: task.previewMessageId,
-          markdown: true,
-          priority: false,
-          attachments: result.attachments ?? [],
-        },
-      );
+      const messages = result.messages?.length ? result.messages : [{ text: result.text }];
+      for (const [index, message] of messages.entries())
+        enqueueReply(
+          task.channelId,
+          `${task.cron ? `Cron #${task.cron.id}\n` : ""}${
+            result.status !== "completed" && index === messages.length - 1
+              ? `Task #${id} ${
+                  {
+                    failed: "Failed",
+                    cancelled: "Stopped",
+                    interrupted: "Unconfirmed",
+                  }[result.status]
+                }\n`
+              : ""
+          }${message.text}`,
+          {
+            taskId: id,
+            segmentId: message.id,
+            messageId:
+              task.previewMessages?.find((preview) => preview.segmentId === message.id)
+                ?.messageId ?? (index === 0 ? task.previewMessageId : undefined),
+            markdown: true,
+            priority: false,
+            attachments: index === messages.length - 1 ? (result.attachments ?? []) : [],
+          },
+        );
       for (const [index, input] of task.inputs.entries()) {
         if (!["pending", "preparing", "sending"].includes(input.status)) continue;
         enqueueReply(
@@ -462,14 +469,14 @@ export function createState(options: {
           })
         : undefined;
     },
-    /** 内存预览保留完整内容；IM 决定能否展示预览，正式结果始终完整分段发送。 */
-    setDraft(id: number, text: string) {
+    /** 内存保留 Agent 分段的最新正文，收到追加输入本身不改变消息边界。 */
+    setDraft(id: number, messages: AgentMessage[]) {
       if (state.tasks.some((task) => task.id === id && task.status === "running"))
-        draft = { taskId: id, text };
+        draft = { taskId: id, messages };
     },
     /** 仅向当前机器人与授权用户返回执行中的预览，停止后不再刷新。 */
     pendingDraft(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-      if (!draft?.text.trim()) return;
+      if (!draft?.messages.length) return;
       if (
         state.interactions.some(
           (item) => item.taskId === draft?.taskId && item.blocking && item.status !== "closed",
@@ -485,14 +492,31 @@ export function createState(options: {
         channel.accountId === source.accountId &&
         channel.userId === source.userId
       )
-        return { ...draft, chatId: channel.chatId, messageId: task?.previewMessageId };
+        return {
+          ...draft,
+          chatId: channel.chatId,
+          messages: draft.messages.map((message, index) => ({
+            ...message,
+            messageId:
+              task?.previewMessages?.find((preview) => preview.segmentId === message.id)
+                ?.messageId ?? (index === 0 ? task?.previewMessageId : undefined),
+          })),
+        };
     },
-    /** 只保存首次预览的消息编号；任务已结束时将最终结果接到这条消息上。 */
-    recordPreview(id: number, messageId: number) {
+    /** 回执按 Agent 分段关联；慢发送不能把新输入对应的结果接到旧消息上。 */
+    recordPreview(id: number, messageId: number, segmentId?: string) {
       update(() => {
         const task = state.tasks.find((item) => item.id === id);
-        if (task) task.previewMessageId = messageId;
-        const reply = state.outbox.find((item) => item.taskId === id && !item.attachment);
+        if (task) {
+          if (segmentId) {
+            task.previewMessages ??= [];
+            if (!task.previewMessages.some((preview) => preview.segmentId === segmentId))
+              task.previewMessages.push({ segmentId, messageId });
+          } else task.previewMessageId = messageId;
+        }
+        const reply = state.outbox.find(
+          (item) => item.taskId === id && item.segmentId === segmentId && !item.attachment,
+        );
         if (reply) reply.messageId = messageId;
       });
     },

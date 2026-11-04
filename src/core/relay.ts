@@ -424,7 +424,7 @@ export function createRelayService(options: {
               options.state.markRunning(task.id, runId);
               if (options.state.activeTask()?.status === "cancelling") options.agent.interrupt();
             },
-            onText: (text) => options.state.setDraft(task.id, text),
+            onText: (messages) => options.state.setDraft(task.id, messages),
             onNotice: (text) => options.state.reply(task.channelId, `Task #${task.id}\n${text}`),
             onInteraction: (request) => options.state.addInteraction(task.id, request),
             onInteractionClosed: (id, reason) => options.state.closeInteraction(id, reason),

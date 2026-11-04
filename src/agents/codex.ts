@@ -11,6 +11,7 @@ import type {
   Agent,
   AgentAttachment,
   AgentInteraction,
+  AgentMessage,
   AgentModel,
   AgentOption,
   AgentResult,
@@ -407,8 +408,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         };
       }
       const completed = Promise.withResolvers<AgentResult | undefined>();
-      /** 按首次出现顺序保存全部回复与文件变更标题，完整事件覆盖同一条增量。 */
-      const messages = new Map<string, string>();
+      /** 按原生顺序保存输出；null 标记 Codex 已纳入上下文的用户输入边界。 */
+      const messages = new Map<string, string | null>();
       /** 仅收集当前轮次已生成的图片，按路径去重以避免重复发送同一产物。 */
       const generatedImages = new Map<string, AgentAttachment>();
       /** 应用随机 ID 隔离每次连接；已见 RPC 编号保留到任务结束，重复请求不生成新按钮。 */
@@ -454,32 +455,43 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         clearTimeout(previewTimer);
         for (const interaction of interactions.values()) clearTimeout(interaction.timer);
         interactions.clear();
-        completed.resolve(
-          result
-            ? {
-                ...result,
-                ...(generatedImages.size ? { attachments: [...generatedImages.values()] } : {}),
-                text:
-                  /** 异常和恢复建议放在已有输出之前，避免长回复淹没通知。 */
-                  [
-                    result.text,
-                    result.status === "interrupted"
-                      ? "建议先用 /status 和 /last 查看状态及输出，并在本机确认任务是否已经停止。确认后直接发送新消息说明如何继续；原任务不会自动重跑。"
-                      : "",
-                    formatOutput(),
-                  ]
-                    .filter(Boolean)
-                    .join("\n\n") ||
-                  (generatedImages.size ? "图片已生成。" : "Codex finished with no text output."),
-              }
-            : undefined,
-        );
+        if (!result) {
+          completed.resolve(undefined);
+          return;
+        }
+        const output = formatOutput();
+        /** 异常放在当前分段之前，/last 中仍放在完整输出之前。 */
+        const notice = [
+          result.text,
+          result.status === "interrupted"
+            ? "建议先用 /status 和 /last 查看状态及输出，并在本机确认任务是否已经停止。确认后直接发送新消息说明如何继续；原任务不会自动重跑。"
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+        completed.resolve({
+          ...result,
+          ...(generatedImages.size ? { attachments: [...generatedImages.values()] } : {}),
+          text:
+            [notice, ...output.map((message) => message.text)].filter(Boolean).join("\n\n") ||
+            (generatedImages.size ? "图片已生成。" : "Codex finished with no text output."),
+          messages: output.map((message, index) =>
+            notice && index === output.length - 1
+              ? { ...message, text: `${notice}\n\n${message.text}` }
+              : message,
+          ),
+        });
       }
 
-      /** 预览和结果共用完整内容；保留过程说明、最终回复及文件差异，由 IM 分段发送。 */
+      /** 只按已完成的用户输入条目分段；同一上下文中的回复和差异合并展示。 */
       function formatOutput() {
         return [...messages]
-          .map(([id, text]) => {
+          .reduce<AgentMessage[]>((output, [id, text]) => {
+            if (text === null) {
+              /** 连续输入之间没有输出时保留同一分段，不创建空消息。 */
+              if (!output.length || output.at(-1)?.text.trim()) output.push({ id, text: "" });
+              return output;
+            }
             const changes = fileChanges.get(id);
             if (changes && !formattedChanges.has(changes))
               formattedChanges.set(
@@ -497,12 +509,19 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   })
                   .join("\n\n"),
               );
-            return [text, changes ? formattedChanges.get(changes) : undefined]
-              .filter(Boolean)
-              .join("\n\n");
-          })
-          .filter(Boolean)
-          .join("\n\n");
+            if (!output.length) output.push({ id, text: "" });
+            const message = output.at(-1);
+            if (message)
+              message.text = [
+                message.text,
+                text,
+                changes ? formattedChanges.get(changes) : undefined,
+              ]
+                .filter(Boolean)
+                .join("\n\n");
+            return output;
+          }, [])
+          .filter((message) => message.text.trim());
       }
 
       /** 所有文本与差异事件共用节流；尾部更新即使没有后续事件也会展示。 */
@@ -519,11 +538,11 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           }, nextPreviewAt - Date.now());
           return;
         }
-        const text = formatOutput();
+        const output = formatOutput();
         /** 空的 item/started 不占用首段预览窗口，首个实际文本仍即时展示。 */
-        if (!nextPreviewAt && !text.trim()) return;
+        if (!nextPreviewAt && !output.length) return;
         nextPreviewAt = Date.now() + 1_000;
-        input.onText(text);
+        input.onText(output);
       }
 
       /** 通信故障不等于执行失败；保留不确定状态并结束当前连接。 */
@@ -814,6 +833,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               openInteraction(message);
             /** 官方客户端把异步答案作为用户消息广播；其他端已答的题立即关闭。 */
             if (event.item.type === "userMessage") {
+              /** 请求接收与输入生效分开；重复事件覆盖同一标记，不挪动已有输出。 */
+              if (message.method === "item/completed") messages.set(event.item.id, null);
               for (const content of z
                 .array(z.object({ type: z.string(), text: z.string().optional() }))
                 .parse(event.item.content)) {

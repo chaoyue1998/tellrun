@@ -383,7 +383,12 @@ export function createTelegramConnection(
         retryAfterAt = Math.max(retryAfterAt, state.replyRetryAt(source));
         /** 普通消息原地更新预览，避免原生生成草稿限制客户端发送命令。 */
         let nextPreviewAt = 0;
-        let sentPreview: { taskId: number; text: string } | undefined;
+        let sentPreview:
+          | {
+              taskId: number;
+              messages: Map<string | undefined, { text: string; failed?: boolean }>;
+            }
+          | undefined;
         workers.push(
           (async () => {
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
@@ -428,20 +433,27 @@ export function createTelegramConnection(
                   continue;
                 }
                 const draft = state.pendingDraft(source);
-                if (draft?.taskId !== sentPreview?.taskId && nextPreviewAt === Infinity)
-                  nextPreviewAt = 0;
+                if (draft && draft.taskId !== sentPreview?.taskId)
+                  sentPreview = { taskId: draft.taskId, messages: new Map() };
+                /** 只跟随 Agent 给出的输入分段；同一分段的过程输出和结果原地更新。 */
+                const message = draft?.messages.find(
+                  (message) =>
+                    message.text.trim() &&
+                    !sentPreview?.messages.get(message.id)?.failed &&
+                    message.text !== sentPreview?.messages.get(message.id)?.text,
+                );
                 if (
                   draft &&
-                  /** 超长输出保留已显示的预览，终态按完整正文分段。 */
-                  draft.text.length <= 32768 &&
-                  Date.now() >= nextPreviewAt &&
-                  (draft.taskId !== sentPreview?.taskId || draft.text !== sentPreview.text)
+                  message &&
+                  /** 超长输出保留已有预览，后续内容等待终态按顺序完整分段。 */
+                  message.text.length <= 32768 &&
+                  Date.now() >= nextPreviewAt
                 ) {
                   nextPreviewAt = Date.now() + 1000;
                   try {
-                    if (draft.messageId)
-                      await bot.api.editMessageText(draft.chatId, draft.messageId, {
-                        markdown: draft.text,
+                    if (message.messageId)
+                      await bot.api.editMessageText(draft.chatId, message.messageId, {
+                        markdown: message.text,
                       });
                     else
                       state.recordPreview(
@@ -449,12 +461,13 @@ export function createTelegramConnection(
                         (
                           await bot.api.sendRichMessage(
                             draft.chatId,
-                            { markdown: draft.text },
+                            { markdown: message.text },
                             { disable_notification: true },
                           )
                         ).message_id,
+                        message.id,
                       );
-                    sentPreview = draft;
+                    sentPreview?.messages.set(message.id, { text: message.text });
                   } catch (error) {
                     if (polling.signal.aborted) return;
                     if (!(error instanceof HttpError || error instanceof GrammyError)) throw error;
@@ -464,19 +477,21 @@ export function createTelegramConnection(
                       error.error_code === 400 &&
                       /message is not modified/i.test(error.description)
                     ) {
-                      sentPreview = draft;
+                      sentPreview?.messages.set(message.id, { text: message.text });
                       continue;
                     }
-                    nextPreviewAt =
+                    if (
                       error instanceof GrammyError &&
                       error.error_code >= 400 &&
                       error.error_code < 500 &&
                       error.error_code !== 429
-                        ? Number.POSITIVE_INFINITY
-                        : Date.now() +
-                          (error instanceof GrammyError ? (error.parameters.retry_after ?? 5) : 5) *
-                            1000;
-                    if (nextPreviewAt === Infinity) sentPreview = draft;
+                    )
+                      sentPreview?.messages.set(message.id, { text: message.text, failed: true });
+                    else
+                      nextPreviewAt =
+                        Date.now() +
+                        (error instanceof GrammyError ? (error.parameters.retry_after ?? 5) : 5) *
+                          1000;
                     logger.warn(
                       {
                         errorType: error.name,
