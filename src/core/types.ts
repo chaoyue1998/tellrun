@@ -104,6 +104,8 @@ export interface AgentModelSelection {
 export interface Agent {
   name: string;
   version: string;
+  /** 安全的初始化诊断；Agent 不可用时仍保留 IM 控制入口。 */
+  unavailableReason?: string;
   /** 第一项为默认模式；模式 ID 由各 Agent 自行解释。 */
   permissionModes: readonly AgentOption[];
   /** 按最近更新时间列出当前目录最多 10 个会话；名称和历史由 Agent 保存。 */

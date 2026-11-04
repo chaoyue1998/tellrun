@@ -28,7 +28,7 @@
 
 ## 安装与后台管理
 
-使用者在服务器安装 Node.js、Codex 并完成 Codex 认证后，通过 `npm install -g tellrun` 安装程序。运行 `tellrun setup`，以明文输入 Telegram Bot Token 并填写本人 ID，检查 Codex 可用性，保存配置后可启动或重启后台服务。配置文件不保存终端环境；可选的 `telegram.proxyUrl` 由用户自行配置，未设置时继承运行环境的代理。CLI 与后台管理已接入，npm 发布与 Linux 实际部署验收仍待完成；安装用户无需克隆源码或手动复制 `.env`。
+使用者在服务器安装 Node.js、Codex 并完成 Codex 认证后，通过 `npm install -g tellrun` 安装程序。运行 `tellrun setup`，以明文输入 Telegram Bot Token 并填写本人 ID，检查 Codex 可用性，保存配置后可启动或重启后台服务。配置文件不保存终端环境；前台 Codex 沿用当前终端环境，systemd／launchd 后台通过用户默认 shell 读取交互式登录环境，重启机器后仍沿用用户配置的代理、PATH、认证和证书变量，无需额外配置系统服务。环境读取失败时明确报告 Codex 不可用，保留 Telegram 的状态查询和重启入口。可选的 `telegram.proxyUrl` 由用户自行配置，未设置时继承 Tellrun 运行环境的代理。CLI 与后台管理已接入，npm 发布与 Linux 实际部署验收仍待完成；安装用户无需克隆源码或手动复制 `.env`。
 
 提供 start、stop、restart、status 和 logs 命令，另提供前台 run 用于诊断。停止须等待实际退出，重复启动不创建多份服务；启动失败时给出原因和日志入口。配置向导在 Linux 检查退出 SSH 后持续运行的条件并提供开机自启，在 macOS 提供登录自启。macOS 使用当前用户的 LaunchAgent，无需管理员权限，注销后停止；两种后台均在 Telegram 初始化成功后才报告就绪。
 

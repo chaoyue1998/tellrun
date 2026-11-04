@@ -373,6 +373,10 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 
 配置、运行状态、锁和服务定义统一保存在当前用户主目录下的 `.tellrun/`；源码开发与全局安装共用同一布局。源码 npm scripts 仍可读取 `.env` 覆盖 Telegram 凭据和 Codex 路径；后台启动要求向导已保存完整配置，不依赖 CLI 的临时环境。
 
+Codex 适配器在前台直接继承当前进程环境，保留用户临时 export 的覆盖；systemd／launchd 后台根据已有的 NOTIFY_SOCKET／TELLRUN_LAUNCHD 标识，通过用户账户的默认 shell 读取交互式登录环境，不根据是否连接 TTY 猜测运行方式。CLI 版本检查、daemon bootstrap 和控制 socket 定位共用该环境。代理、PATH、CODEX_HOME、证书、自定义 provider 和工具变量均沿用用户配置，过滤 Tellrun／Telegram 专用变量和宿主服务通知标识；用户 PATH 优先，Tellrun 所用 Node 目录仅作为后备。环境只保存在内存中，不复制到 config.json 或系统服务定义。
+
+后台读取使用 NUL 分隔 shell 欢迎文字与 JSON，10 秒超时；失败时将 Codex 标记为不可用并隐藏原始输出，不回退到缺失配置的服务环境，也不阻止 Telegram 初始化。/status 展示原因，Codex 任务返回明确失败，/restart 可在修复 shell 配置后重新加载。已有 daemon 继续复用，不因环境变化中断其他客户端的任务；新环境在之后启动的 daemon 中生效。识别到 workspace routing discovery timed out 时，提示检查网络和代理，并在确认所有任务结束后从环境正常的终端重启 Codex 后台；Tellrun 不自动停止共享 daemon。
+
 `/status` 的版本检查由独立的 `updates.ts` 模块提供，与模型查询并行运行，不占用入站控制路径。运行版本在进程启动时从本包 package.json 读取；每次查询都通过 HTTPS 请求 npm 的 tellrun dist-tags，仅接受 latest 指向的正式版本，按主、次、补丁版本的整数大小比较，同号正式版高于本地预发布版，不提示降级。检查沿用 Telegram 的代理选择，总时限 3 秒，响应体上限 16 KiB，服务退出取消请求。成功和失败结果均不缓存。检查失败明确展示不可用，有新版本时提示通过 `/update` 交给 Codex 升级；不定时推送。
 
 `/update` 不接受参数，空闲时通过现有 createTask 保存普通任务，沿用会话、目录、模型和权限快照。任务说明包含进程启动版本、实际包目录和 Node.js 路径，并要求 Agent 执行时查询 npm 最新正式版本、核对安装方式、保留配置状态、升级后验证服务。说明要求停服前安排完整的安装、重启、失败恢复步骤及必要审批，避免机器人离线后无法交互；Codex 独立后台继续执行，Tellrun 重启后按已保存轮次接回。消息服务只生成任务说明，不调用安装命令，不更改权限模式，不把升级追加到活动任务。入站去重、持久化、审批、中断和结果回复沿用普通任务流程；无需先执行 `/status`，版本检查失败也不妨碍提交任务。
@@ -386,7 +390,7 @@ auto-retry 仅用于 Telegram API。普通请求总时限为 15 秒，长轮询�
 | Telegram 代理                | `telegram.proxyUrl` 可选，由用户自行配置；未指定时继承运行环境的代理，setup 保留已有显式配置                           |
 | 工作目录                     | 后续由任务或会话指定，不设置目录白名单                                                                                 |
 | Codex 命令                   | 配置时解析可执行文件的绝对路径；与后台服务使用同一 OS 用户，沿用其认证与配置                                           |
-| 后台运行环境                 | config.json 不保存终端环境；macOS 服务的 PATH 只包含 Node、Codex 所在目录及常见系统、Homebrew 路径，凭据不写入服务定义 |
+| Codex 运行环境               | 前台沿用当前进程环境；systemd／launchd 后台读取用户默认 shell，不保存代理或认证副本；读取失败保留 Telegram 控制入口 |
 | 运行状态                     | `~/.tellrun/state.json`；临时单实例锁为同目录的 `state.json.lock/`                                                     |
 | Linux 服务定义               | `~/.tellrun/tellrun.service`，通过 systemctl --user link 注册；日志保存在 journal                                      |
 | macOS 服务定义               | `~/.tellrun/tellrun.plist`；启用登录自启时链接到 `~/Library/LaunchAgents/io.github.chaoyue1998.tellrun.plist`          |

@@ -189,7 +189,7 @@ export function createRelayService(options: {
                   : "";
                 options.state.reply(
                   snapshot.id,
-                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}\nDirectory: ${snapshot.cwd}${task && task.cwd !== snapshot.cwd ? `\nTask directory: ${task.cwd}` : ""}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
+                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}${options.agent.unavailableReason ? `\n${options.agent.unavailableReason}` : ""}\nDirectory: ${snapshot.cwd}${task && task.cwd !== snapshot.cwd ? `\nTask directory: ${task.cwd}` : ""}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
                 );
               };
               return;
@@ -232,7 +232,10 @@ export function createRelayService(options: {
                   sessions = await options.agent.listSessions(snapshot.cwd, modelLoading.signal);
                 } catch {
                   if (!stopping)
-                    options.state.reply(snapshot.id, "Cannot load sessions. Try /list again.");
+                    options.state.reply(
+                      snapshot.id,
+                      options.agent.unavailableReason ?? "Cannot load sessions. Try /list again.",
+                    );
                   return;
                 }
                 if (!stopping)

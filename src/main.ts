@@ -66,7 +66,8 @@ try {
   if (readyFile) rmSync(readyFile, { force: true });
   phase = "Checking agent";
   const agent = await createCodexAgent(config.codexPath);
-  logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
+  if (agent.unavailableReason) logger.warn({ agent: agent.name }, agent.unavailableReason);
+  else logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
 
   if (!stopping) {
     im = createTelegramConnection(

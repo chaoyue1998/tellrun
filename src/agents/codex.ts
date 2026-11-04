@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { JSONRPCErrorException } from "json-rpc-2.0";
@@ -27,6 +27,7 @@ import { type CodexMessage, createCodexRpc } from "./codex-rpc.js";
 const turnSchema = z.object({
   id: z.string().min(1),
   status: z.enum(["inProgress", "completed", "failed", "interrupted"]),
+  error: z.object({ message: z.string() }).nullish(),
 });
 
 /** 空会话通过占位名称落盘；展示时不能遮住 Codex 原生的消息预览。 */
@@ -85,22 +86,51 @@ const permissionModes = [
 
 /** 连接独立的 Codex 后台服务；Tellrun 退出不结束后台轮次。 */
 export async function createCodexAgent(command = "codex"): Promise<Agent> {
-  /** 保留运行时、认证和代理环境，不向子进程传入 Telegram 凭据。 */
-  const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) =>
-      /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|LC_.*|TERM|TMPDIR|TEMP|TMP|SYSTEMROOT|WINDIR|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|CODEX_HOME|OPENAI_API_KEY|OPENAI_BASE_URL|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy|SSL_CERT_FILE|SSL_CERT_DIR)$/.test(
-        key,
-      ),
+  /** 前台保留当前终端的临时 export；仅系统服务需要补读用户 shell 配置。 */
+  let env = process.env;
+  /** 环境故障仅禁用 Codex 操作，Telegram 控制入口仍可查询状态和重启。 */
+  let unavailableReason: string | undefined;
+  if (
+    process.platform !== "win32" &&
+    (process.env.NOTIFY_SOCKET || process.env.TELLRUN_LAUNCHD === "1")
+  ) {
+    try {
+      const { stdout } = await promisify(execFile)(
+        userInfo().shell || process.env.SHELL || "/bin/sh",
+        [
+          "-ilc",
+          /** Node 路径按 shell 字面量转义；NUL 分隔启动欢迎文字和环境 JSON。 */
+          `exec '${process.execPath.replaceAll("'", "'\\''")}' -e 'process.stdout.write("\\0" + JSON.stringify(process.env))'`,
+        ],
+        { cwd: homedir(), timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 1_048_576 },
+      );
+      if (!stdout.includes("\0")) throw new Error("Missing shell environment.");
+      env = z
+        .record(z.string(), z.string())
+        .parse(JSON.parse(stdout.slice(stdout.lastIndexOf("\0") + 1)));
+    } catch {
+      /** 不回传可能含凭据的启动输出，也不回退到缺少代理的服务环境。 */
+      unavailableReason =
+        "Codex 不可用：无法读取用户 shell 环境。请检查默认 shell 启动配置是否报错或等待输入，修复后发送 /restart。";
+    }
+  }
+  /** 保留 provider 和工具环境，移除 Tellrun 配置及宿主服务通知标识。 */
+  env = Object.fromEntries(
+    Object.entries(env).filter(
+      ([key]) => !/^(TELEGRAM_|TELLRUN_|CODEX_PATH$|NOTIFY_SOCKET$|INVOCATION_ID$)/.test(key),
     ),
   );
-  /** npm 版 Codex 通过 env 查找 node；后台服务也应复用运行 Tellrun 的 Node。 */
-  env.PATH = [dirname(process.execPath), env.PATH].filter(Boolean).join(delimiter);
-  const { stdout } = await promisify(execFile)(command, ["--version"], {
-    timeout: 5_000,
-    maxBuffer: 4_096,
-    env,
-  });
-  if (!/^codex-cli \S+$/.test(stdout.trim())) throw new Error("Unrecognized Codex CLI version.");
+  /** 优先使用用户 PATH 中的 Node；当前运行时仅作为 npm 版 Codex 的后备路径。 */
+  env.PATH = [env.PATH, dirname(process.execPath)].filter(Boolean).join(delimiter);
+  const { stdout } = unavailableReason
+    ? { stdout: "" }
+    : await promisify(execFile)(command, ["--version"], {
+        timeout: 5_000,
+        maxBuffer: 4_096,
+        env,
+      });
+  if (!unavailableReason && !/^codex-cli \S+$/.test(stdout.trim()))
+    throw new Error("Unrecognized Codex CLI version.");
   let active: AbortController | undefined;
   /** 只绑定当前任务的连接，不能把迟到输入送入下一轮或其他客户端的轮次。 */
   let steer: Agent["steer"] | undefined;
@@ -108,6 +138,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
   /** 任务、会话管理与只读查询共用连接流程，各自使用独立 socket。 */
   async function connectServer(cwd: string, signal: AbortSignal): Promise<WebSocket> {
+    signal.throwIfAborted();
+    if (unavailableReason) throw new Error(unavailableReason);
     for (let attempt = 0; attempt < 2; attempt++) {
       signal.throwIfAborted();
       const socket = await new Promise<WebSocket | undefined>((resolve) => {
@@ -115,7 +147,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           createConnection: () =>
             connect(
               join(
-                env.CODEX_HOME ?? join(homedir(), ".codex"),
+                env.CODEX_HOME ?? join(env.HOME ?? homedir(), ".codex"),
                 "app-server-control",
                 "app-server-control.sock",
               ),
@@ -254,7 +286,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
   return {
     name: "Codex",
-    version: stdout.trim().replace(/^codex-cli /, ""),
+    version: unavailableReason ? "Unavailable" : stdout.trim().replace(/^codex-cli /, ""),
+    ...(unavailableReason ? { unavailableReason } : {}),
     permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
     async listSessions(cwd, signal) {
       return withSessionConnection(cwd, signal, async (rpc) => {
@@ -285,7 +318,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         } while (cursor);
         return sessions;
       }).catch(() => {
-        throw new Error("Codex session list unavailable. Try /list again.");
+        throw new Error(unavailableReason ?? "Codex session list unavailable. Try /list again.");
       });
     },
     async createSession(input, signal) {
@@ -312,7 +345,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         return { id: thread.id, label: input.name.trim() || defaultSessionName };
       }).catch(() => {
         throw new Error(
-          "Codex session creation unconfirmed. Current session unchanged. Check /list before retrying /new.",
+          unavailableReason ??
+            "Codex session creation unconfirmed. Current session unchanged. Check /list before retrying /new.",
         );
       });
     },
@@ -322,7 +356,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           .object({ thread: sessionSchema })
           .parse(await rpc.request("thread/read", { threadId: sessionId })),
       ).catch(() => {
-        throw new Error("Codex session unavailable. Open /list and choose a session again.");
+        throw new Error(
+          unavailableReason ?? "Codex session unavailable. Open /list and choose a session again.",
+        );
       });
       if (thread.id !== sessionId || thread.cwd !== cwd)
         throw new Error("Codex session is not in the current directory. Choose one from /list.");
@@ -365,7 +401,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               : { status: "cancelled", text: "Stopped before connecting." };
         return {
           status: input.runId ? "interrupted" : "failed",
-          text: "Codex daemon unavailable. Run codex app-server daemon bootstrap on the host, then retry. Existing work was not stopped or resubmitted.",
+          text:
+            unavailableReason ??
+            "Codex daemon unavailable. Run codex app-server daemon bootstrap on the host, then retry. Existing work was not stopped or resubmitted.",
         };
       }
       const completed = Promise.withResolvers<AgentResult | undefined>();
@@ -831,7 +869,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   event.turn.status === "completed"
                     ? ""
                     : event.turn.status === "failed"
-                      ? "Codex 执行失败。建议用 /last 查看最后输出；检查本机 Codex 的登录、模型权限和网络，排除问题后再发送继续要求。"
+                      ? event.turn.error?.message.includes("workspace routing discovery timed out")
+                        ? "Codex 工作区路由发现超时，请检查主机网络和代理。已有 Codex 后台不会自动继承新环境；确认所有 Codex 任务结束后，在代理正常的终端执行 codex app-server daemon restart，再发送 /restart 和继续要求。"
+                        : "Codex 执行失败。建议用 /last 查看最后输出；检查本机 Codex 的登录、模型权限和网络，排除问题后再发送继续要求。"
                       : "Codex 会话已中断，已有文件改动未回滚。",
               });
             }
