@@ -320,11 +320,8 @@ export function createRelayService(options: {
         /** 错误由工作循环等待原 Promise 时传播，提前标记避免未处理拒绝。 */
         void query.catch(() => {});
       }
-      /** 只有选择和中断状态落盘后才影响运行时；回调答复不承担提交职责。 */
-      if (
-        (message.content.type === "command" && message.content.name === "interrupt") ||
-        (message.content.type === "interaction" && message.content.action === "interrupt")
-      ) {
+      /** 中断命令的状态落盘后才影响运行时。 */
+      if (message.content.type === "command" && message.content.name === "interrupt") {
         const active = options.state.activeTask();
         if (!active || active.status === "cancelling") inputPreparation?.abort();
         if (active?.status === "cancelling") options.agent.interrupt();

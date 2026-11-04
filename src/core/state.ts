@@ -331,7 +331,7 @@ export function createState(options: {
     if (draft?.taskId === id) draft = undefined;
   }
 
-  /** 命令与问题卡片共用中断逻辑；先使交互失效，再由核心层请求中断。 */
+  /** 先使交互失效，再由核心层请求中断。 */
   function cancelTask(id: number) {
     if (
       ["queued", "preparing"].includes(state.tasks.find((task) => task.id === id)?.status ?? "")
@@ -703,15 +703,6 @@ export function createState(options: {
         (interaction.expiresAt !== null && interaction.expiresAt <= Date.now())
       )
         return "Request closed. Check /status.";
-      /** 只有问题卡片提供中断操作，审批卡片仅接受审批选项。 */
-      if (
-        interaction.kind === "question" &&
-        content.type === "interaction" &&
-        content.action === "interrupt"
-      ) {
-        cancelTask(task.id);
-        return "Interrupt requested. You can send another message when it ends.";
-      }
       if (interaction.kind === "approval") {
         if (
           content.type !== "interaction" ||

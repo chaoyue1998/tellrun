@@ -216,9 +216,7 @@ export function createTelegramConnection(
 
   /** 先保存选择，再关闭客户端等待提示；答复回调失败不能撤销或重发已保存的决定。 */
   bot.on("callback_query:data", async (ctx) => {
-    const match = ctx.callbackQuery.data.match(
-      /^i:([0-9a-f-]{36}):(a(\d+)|interrupt|q(\d+)_(\d+))$/,
-    );
+    const match = ctx.callbackQuery.data.match(/^i:([0-9a-f-]{36}):(a(\d+)|q(\d+)_(\d+))$/);
     const selection = ctx.callbackQuery.data.match(/^([pm]):([0-9a-f-]{36}):(\d+)$/);
     /** 会话按钮作为独立事件交给核心层校验和切换。 */
     const session = ctx.callbackQuery.data.match(/^s:(\S+)$/u);
@@ -245,18 +243,11 @@ export function createTelegramConnection(
               : {
                   type: "interaction",
                   id: match?.[1] ?? "",
-                  action:
-                    match?.[3] !== undefined
-                      ? "approval"
-                      : match?.[4] !== undefined
-                        ? "option"
-                        : "interrupt",
+                  action: match?.[3] !== undefined ? "approval" : "option",
                   messageId: ctx.callbackQuery.message.message_id,
                   ...(match?.[3] !== undefined
                     ? { optionIndex: Number(match[3]) }
-                    : match?.[4] !== undefined
-                      ? { questionIndex: Number(match[4]), optionIndex: Number(match[5]) }
-                      : {}),
+                    : { questionIndex: Number(match?.[4]), optionIndex: Number(match?.[5]) }),
                 },
         })) ?? "Received.";
     }
@@ -526,8 +517,9 @@ export function createTelegramConnection(
                         (interaction.expiresAt === null || interaction.expiresAt > Date.now())
                       ? {
                           reply_markup: {
-                            inline_keyboard: [
-                              ...(interaction.kind === "approval"
+                            /** 审批和问题仅展示 Agent 提供的选项。 */
+                            inline_keyboard:
+                              interaction.kind === "approval"
                                 ? interaction.choices.map((choice, index) => [
                                     {
                                       text: choice.label,
@@ -541,18 +533,7 @@ export function createTelegramConnection(
                                       text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
                                       callback_data: `i:${interaction.id}:q${reply.questionIndex}_${index}`,
                                     },
-                                  ])),
-                              ...(interaction.kind === "question"
-                                ? [
-                                    [
-                                      {
-                                        text: "Interrupt",
-                                        callback_data: `i:${interaction.id}:interrupt`,
-                                      },
-                                    ],
-                                  ]
-                                : []),
-                            ],
+                                  ]),
                           },
                         }
                       : { reply_markup: { inline_keyboard: [] } };

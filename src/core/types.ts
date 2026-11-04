@@ -42,7 +42,7 @@ export interface IncomingMessage {
     | {
         type: "interaction";
         id: string;
-        action: "approval" | "interrupt" | "option";
+        action: "approval" | "option";
         messageId: number;
         questionIndex?: number;
         optionIndex?: number;
