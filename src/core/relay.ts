@@ -8,10 +8,14 @@ import type {
   Agent,
   AgentAttachment,
   AgentOption,
+  AgentSessionHistory,
   AttachmentLoader,
   ChannelIdentity,
   IncomingMessage,
 } from "./types.js";
+
+/** 结果头部只展示简短任务描述，完整回复仍由历史结果提供。 */
+const taskDescriptionLimit = 160;
 
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
 export function createRelayService(options: {
@@ -52,6 +56,14 @@ export function createRelayService(options: {
       let controlQuery: (() => Promise<void>) | undefined;
       const reply = options.state.accept(message, (channel) => {
         const task = options.state.activeTask();
+        /** 所选会话与全局执行任务分开；尚无会话的定时任务不能匹配空选择。 */
+        const sessionTask =
+          task?.channelId === channel.id &&
+          task.cwd === channel.cwd &&
+          task.sessionId === channel.sessionId &&
+          (!task.cron || channel.sessionId !== null)
+            ? task
+            : undefined;
         if (message.content.type === "permissions" || message.content.type === "model")
           return options.state.chooseOption(channel.id, message.content);
         if (
@@ -122,7 +134,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/cwd <path> — Set directory; start a new session\n/status — Status and update check\n/last — Last result\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/cwd <path> — Set directory; start a new session\n/status — Status and update check\n/last — Last finished result in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.state.handleCron(channel.id, message.content.args);
             case "model":
@@ -187,9 +199,14 @@ export function createRelayService(options: {
                 const upgradeHint = update?.available
                   ? `\n\nSend /update to ask ${options.agent.name} to upgrade Tellrun.`
                   : "";
+                /** Session 始终对应 /list 的选中项，其他会话任务单独标明归属。 */
+                const taskLabel = task && !sessionTask ? "Other task" : "Task";
+                const taskStatus = task
+                  ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}`
+                  : "idle";
                 options.state.reply(
                   snapshot.id,
-                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}${options.agent.unavailableReason ? `\n${options.agent.unavailableReason}` : ""}\nDirectory: ${snapshot.cwd}${task && task.cwd !== snapshot.cwd ? `\nTask directory: ${task.cwd}` : ""}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\nTask model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\nTask permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${task ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}` : "idle"}${task?.interactions.length ? `\nPending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
+                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}${options.agent.unavailableReason ? `\n${options.agent.unavailableReason}` : ""}\nDirectory: ${snapshot.cwd}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\n${taskLabel} model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\n${taskLabel} permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${sessionTask ? taskStatus : "idle"}${task && !sessionTask ? `\nOther task: ${taskStatus}\nOther task session: ${task.sessionId ?? "Not started"}\nOther task directory: ${task.cwd}${task.channelId !== snapshot.id ? "\nOther task is in another chat." : ""}` : ""}${task?.interactions.length ? `\n${taskLabel} pending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
                 );
               };
               return;
@@ -280,13 +297,44 @@ export function createRelayService(options: {
               options.state.cancelTask(task.id);
               return `Interrupt requested for task #${task.id}. You can send another message when it ends.`;
             case "last": {
-              const last = options.state.lastTask(channel.id);
-              if (!last) return "No tasks yet.";
-              options.state.reply(
-                channel.id,
-                `Task #${last.id}${last.cron ? ` · Cron #${last.cron.id}` : ""} ${statuses[last.status]}\n\n${last.result ?? "No result yet."}`,
-                { markdown: true },
-              );
+              if (message.content.args) return "Use /last without arguments.";
+              if (!channel.sessionId)
+                return `No session selected yet.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : " Choose one with /list or create one with /new."}`;
+              /** 慢查询固定命令接收时的会话，切换后迟到的回复仍标注原会话。 */
+              const snapshot = { ...channel, sessionId: channel.sessionId };
+              controlQuery = async () => {
+                let history: AgentSessionHistory;
+                try {
+                  history = await options.agent.readLastResult(
+                    snapshot.cwd,
+                    snapshot.sessionId,
+                    modelLoading.signal,
+                  );
+                } catch {
+                  if (!stopping)
+                    options.state.reply(
+                      snapshot.id,
+                      `Session: ${snapshot.sessionId}\nDirectory: ${snapshot.cwd}\n${options.agent.unavailableReason ?? "Cannot load session history. Try /last again or choose a session from /list."}`,
+                    );
+                  return;
+                }
+                if (stopping) return;
+                const context = `Session: ${history.session.id}\nName: ${history.session.label}\nDirectory: ${snapshot.cwd}`;
+                const { last } = history;
+                if (!last) {
+                  options.state.reply(
+                    snapshot.id,
+                    `${context}\n\nNo finished results in this session.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : history.running ? "\nA turn is still running in this session. Check /status or the local Codex session." : ""}`,
+                  );
+                  return;
+                }
+                const description = [...last.prompt.replace(/\s+/gu, " ").trim()];
+                options.state.reply(
+                  snapshot.id,
+                  `${context}\nTask: ${description.slice(0, taskDescriptionLimit).join("") || "(No task description)"}${description.length > taskDescriptionLimit ? "…" : ""}\nTurn: ${last.id} ${statuses[last.status]}\n\n${last.text}`,
+                  { markdown: true },
+                );
+              };
               return;
             }
             default:

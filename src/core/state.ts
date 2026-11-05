@@ -525,14 +525,6 @@ export function createState(options: {
         if (reply) reply.messageId = messageId;
       });
     },
-    /** 最近结果按聊天隔离，供 /last 再次查看。 */
-    lastTask(channelId: number) {
-      return structuredClone(
-        state.tasks.findLast(
-          (task) => task.channelId === channelId && !activeTaskStatuses.has(task.status),
-        ) ?? state.tasks.findLast((task) => task.channelId === channelId),
-      );
-    },
     createTask,
     /** 尚未派发时合并首条输入；执行中的补充输入与入站去重标识一起保存。 */
     appendTaskInput(id: number, text: string, attachments: Attachment[] = []) {
@@ -902,7 +894,7 @@ export function createState(options: {
         }
       }
     },
-    /** 发送成功或永久拒绝后移出队列；/last 只保留每个聊天的最近结果。 */
+    /** 发送成功或永久拒绝后移出队列；原生历史由 Agent 查询，不依赖出站记录。 */
     removeReply(
       id: number,
       delivery?: {
