@@ -187,7 +187,7 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 5. 创建或恢复 Codex thread，保存 threadId 后发送 turn/start；取得 turnId 后持久化保存，用于事件关联、中断和重启恢复。
 
-6. item/agentMessage/delta 按 itemId 累积回复文本，只消费当前 threadId 和 turnId；item/completed 的完整文本覆盖累积内容。按 Codex 原生 userMessage 完成事件划分输出，边界之前的条目及其迟到更新保留原分段，边界之后新建的条目进入新分段；同一分段内的过程说明、最终回复和文件变更按首次出现顺序汇总。补充 RPC 的成功响应不切段，重复输入事件不移动边界，连续输入之间没有输出时合并。实时事件与恢复历史使用同一规则。首段立即格式化，后续增量每秒合并一次，通过 onText 将带稳定分段标识的完整预览放入内存，不等待 Telegram API；文件差异采用最新事件内容并复用未变化的格式化结果。结束时取消预览定时器，各分段分别更新其预览，尚未显示或超长的内容顺序发送；完整结果保存到终态，异常原因附在最后一个分段。`/last` 独立读取所选会话的原生轮次历史。
+6. item/agentMessage/delta 与 item/plan/delta 按 itemId 累积正文，只消费当前 threadId 和 turnId；item/completed 的完整文本覆盖累积内容，计划以最终 plan.text 为准。实时输出和 `/last` 共用正文提取规则，审查结论读取 exitedReviewMode.review，进入审查的提示与推理条目不作为结果。按 Codex 原生 userMessage 完成事件划分输出，边界之前的条目及其迟到更新保留原分段，边界之后新建的条目进入新分段；同一分段内的过程说明、计划、审查结论、最终回复和文件变更按首次出现顺序汇总。补充 RPC 的成功响应不切段，重复输入事件不移动边界，连续输入之间没有输出时合并。实时事件与恢复历史使用同一规则。首段立即格式化，后续增量每秒合并一次，通过 onText 将带稳定分段标识的完整预览放入内存，不等待 Telegram API；文件差异采用最新事件内容并复用未变化的格式化结果。结束时取消预览定时器，各分段分别更新其预览，尚未显示或超长的内容顺序发送；完整结果保存到终态，异常原因附在最后一个分段。`/last` 独立读取所选会话的原生轮次历史。[Codex 正文条目](https://learn.chatgpt.com/docs/app-server#items)
 
 7. delivery 独立发送或编辑 Telegram 消息，按失败类别重试。
 
@@ -266,7 +266,7 @@ Croner 只用于解析与计算：使用 `mode: "5-part"`、保存的 `timezone`
 
 Codex 后台会在最后一个订阅者断开且会话无活动 30 分钟后才卸载，因此客户端关闭后仍可能持有空闲会话的写锁。Tellrun 复用该后台连接；恢复前通过 `thread/read` 检查状态，恢复后再次确认空闲，再提交任务。对其他进程仍持有写锁的情况保留原 thread ID 并提示连接问题，不自动创建新会话或重跑任务，不转发原始错误内容。[会话卸载规则](https://learn.chatgpt.com/docs/app-server#unsubscribe-from-a-loaded-thread)
 
-RPC 和待响应请求按每次连接隔离，thread ID 与已确认的 turn ID 随任务状态保存。新任务在 turn/start 响应前暂存事件；重启恢复通过 thread/resume 订阅原会话，不覆盖权限，也不发送 turn/start。随后按 thread/turns/list 分页读取完整轮次，匹配保存的 turn ID，补回离线输出并继续实时跟踪；已结束的轮次直接保存原结果。缓冲增量不重复拼接，仍处理服务端重发的交互与终态。其他会话或轮次的事件不能改变归属。服务退出只关闭自己的连接，run 返回 undefined，核心层保留任务；显式停止任务才发送 turn/interrupt。协议字段由 Codex 0.165.0 的 generate-ts 输出核对，并用 Zod 校验。
+RPC 和待响应请求按每次连接隔离，thread ID 与已确认的 turn ID 随任务状态保存。新任务在 turn/start 响应前暂存事件；重启恢复通过 thread/resume 订阅原会话，不覆盖权限，也不发送 turn/start。随后按 thread/turns/list 分页读取完整轮次，匹配保存的 turn ID，补回离线输出并继续实时跟踪；已结束的轮次直接保存原结果。回复与计划的缓冲增量不重复拼接，重复开始事件不清空快照正文，仍处理服务端重发的交互与终态。其他会话或轮次的事件不能改变归属。服务退出只关闭自己的连接，run 返回 undefined，核心层保留任务；显式停止任务才发送 turn/interrupt。协议字段由 Codex 0.165.0 的 generate-ts 输出核对，并用 Zod 校验。
 
 | 协议工作       | 首版要求                                                                                                           |
 | -------------- | ------------------------------------------------------------------------------------------------------------------ |

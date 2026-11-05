@@ -32,6 +32,23 @@ const turnSchema = z.object({
   error: z.object({ message: z.string() }).nullish(),
 });
 
+/** 实时事件与历史查询共用正文字段，审查结论由 review 承载。 */
+const textItemSchema = z.object({
+  type: z.string(),
+  text: z.string().optional(),
+  review: z.string().optional(),
+});
+
+/** 正文增量类型同时用于实时累积和恢复去重，避免两条路径遗漏。 */
+const textDeltaMethods = new Set(["item/agentMessage/delta", "item/plan/delta"]);
+
+/** 提取面向用户的正文；进入审查的提示和推理条目不作为结果。 */
+function readItemText(item: z.infer<typeof textItemSchema>) {
+  if (item.type === "agentMessage" || item.type === "plan") return item.text;
+  if (item.type === "exitedReviewMode") return item.review;
+  return undefined;
+}
+
 /** 空会话通过占位名称落盘；展示时不能遮住 Codex 原生的消息预览。 */
 const defaultSessionName = "New session";
 
@@ -418,15 +435,14 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             let prompt: string | undefined;
             const output: string[] = [];
             for (const value of turn.items) {
-              const item = z
-                .object({
-                  type: z.string(),
-                  text: z.string().optional(),
+              const item = textItemSchema
+                .extend({
                   status: z.string().optional(),
                   changes: fileChangesSchema.optional(),
                   content: z.unknown().optional(),
                 })
                 .parse(value);
+              const text = readItemText(item);
               if (item.type === "userMessage" && prompt === undefined) {
                 const content = z
                   .array(z.object({ type: z.string(), text: z.string().optional() }))
@@ -436,7 +452,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   .map((part) => part.text ?? "")
                   .join("\n");
                 if (!prompt.trim() && content.length) prompt = "(Attachment input)";
-              } else if (item.type === "agentMessage" && item.text) output.push(item.text);
+              } else if (text) output.push(text);
               else if (item.type === "fileChange")
                 output.push(
                   `File changes${item.status ? ` (${item.status})` : ""}${item.changes?.length ? `\n\n${formatFileChanges(item.changes)}` : ""}`,
@@ -859,7 +875,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               if (!messages.has(event.itemId)) messages.set(event.itemId, "File changes");
               publishPreview();
             }
-          } else if (message.method === "item/agentMessage/delta") {
+          } else if (textDeltaMethods.has(message.method ?? "")) {
             const event = z
               .object({
                 threadId: z.string(),
@@ -876,10 +892,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               .object({
                 threadId: z.string(),
                 turnId: z.string(),
-                item: z.object({
-                  type: z.string(),
+                item: textItemSchema.extend({
                   id: z.string(),
-                  text: z.string().optional(),
                   status: z.string().optional(),
                   changes: fileChangesSchema.optional(),
                   delivery: z.string().nullish(),
@@ -913,8 +927,13 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               );
               publishPreview();
             }
-            if (event.item.type === "agentMessage" && event.item.text !== undefined) {
-              messages.set(event.item.id, event.item.text);
+            const text = readItemText(event.item);
+            /** 完整正文覆盖增量；重复开始事件不能清空已恢复的正文或移动分段。 */
+            if (
+              text !== undefined &&
+              (message.method === "item/completed" || !messages.has(event.item.id))
+            ) {
+              messages.set(event.item.id, text);
               publishPreview();
             }
             if (
@@ -1136,7 +1155,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   params: { threadId: sessionId, turnId: turn.id, item },
                 });
               for (const message of earlyMessages)
-                if (message.method !== "item/agentMessage/delta") onMessage(message);
+                if (!textDeltaMethods.has(message.method ?? "")) onMessage(message);
               earlyMessages.length = 0;
               earlyMessageSize = 0;
               if (turn.status !== "inProgress")
