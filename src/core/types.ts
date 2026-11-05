@@ -59,7 +59,7 @@ export interface AgentMessage {
 /** 只有运行时确认结束才算完成；连接丢失单独记为 interrupted。 */
 export interface AgentResult {
   status: "completed" | "failed" | "cancelled" | "interrupted";
-  /** 完整结果供 /last 查看，消息投递优先保留 Agent 提供的分段。 */
+  /** 完整结果用于终态保存，消息投递优先保留 Agent 提供的分段。 */
   text: string;
   messages?: AgentMessage[];
   /** 运行时明确返回的产物路径，与文字结果一起持久化并发送。 */
@@ -96,6 +96,13 @@ export interface AgentOption {
   label: string;
 }
 
+/** 原生会话的最近终态结果；空会话和仅有执行中轮次时 last 为空。 */
+export interface AgentSessionHistory {
+  session: AgentOption;
+  running: boolean;
+  last: (Pick<AgentResult, "status" | "text"> & { id: string; prompt: string }) | null;
+}
+
 /** 推理选项与默认值由 Agent 返回，不能假设所有模型支持相同档位。 */
 export interface AgentModel extends AgentOption {
   reasoningEfforts: AgentOption[];
@@ -130,6 +137,8 @@ export interface Agent {
   ): Promise<AgentOption>;
   /** 校验会话属于当前目录且可续聊，不恢复会话或修改配置。 */
   readSession(cwd: string, sessionId: string, signal: AbortSignal): Promise<AgentOption>;
+  /** 只读当前会话历史，跳过执行中轮次，不恢复会话或提交输入。 */
+  readLastResult(cwd: string, sessionId: string, signal: AbortSignal): Promise<AgentSessionHistory>;
   /** 只读取可选模型，不创建会话；独立连接避免影响正在执行的任务。 */
   listModels(cwd: string, signal: AbortSignal): Promise<AgentModel[]>;
   /** 只读查询目录下的有效选择，不创建会话或提交任务。 */

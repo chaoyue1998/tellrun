@@ -62,7 +62,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/cwd`                | Show the current working directory                                                           |
 | `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
 | `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
-| `/last`               | Show the latest finished task's status and result                                            |
+| `/last`               | Show the selected session's latest finished turn and full result                             |
 | `/interrupt`          | Interrupt the current task; send a new message after it ends                                 |
 | `/stop`               | Stop all background terminals in the current Codex session                                   |
 | `/model`              | Show the current selection and choose model and reasoning effort                             |
@@ -77,6 +77,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 Sessions are stored by Codex. Creating or switching sessions preserves your current model and permission settings.
 
 - **View and switch**: `/list` shows up to 10 non-archived sessions whose working directory exactly matches the current directory, ordered by most recently updated. Tap a button to switch; ✓ marks the current session. The list includes sessions created by Tellrun and other Codex clients, excluding subagent sessions.
+- **View results**: `/last` follows the selected session in `/list` and the `Session` shown by `/status`. It reads Codex history, including sessions created by other clients, and shows the session name, ID, directory, task description, and full text of the latest finished turn. A running turn does not hide the previous result. If no turn has finished, the reply says so and points to status when a task is active. Scheduled tasks use separate sessions without changing the selection; `/status` labels tasks running in other sessions separately.
 - **Create a session**: `/new [name]` creates and switches to a new session. The name defaults to `New session` when omitted; empty sessions are saved even before you send a message.
 - **Confirm the change**: after creating or switching sessions, wait for confirmation before sending a task. If you cannot confirm that a session was created, check `/list` before deciding whether to retry.
 - **Control tasks**: `/stop` stops all background terminals in the current session; `/interrupt` interrupts the current task. Once the interruption is confirmed, send a new message to continue in the same session.

@@ -15,6 +15,7 @@ import type {
   AgentModel,
   AgentOption,
   AgentResult,
+  AgentSessionHistory,
 } from "../core/types.js";
 import { createCodexInput } from "./codex-input.js";
 import {
@@ -56,6 +57,22 @@ const sessionSchema = z
       status: thread.status.type,
     };
   });
+
+/** 实时输出与历史结果共用差异格式，避免 /last 丢失文件变更。 */
+function formatFileChanges(changes: z.infer<typeof fileChangesSchema>) {
+  return changes
+    .map((change) => {
+      /** 围栏长于内容中的反引号，保证差异始终按代码展示。 */
+      const fence = "`".repeat(
+        (change.diff.match(/`+/g) ?? []).reduce(
+          (length, marker) => Math.max(length, marker.length + 1),
+          3,
+        ),
+      );
+      return `${fence}diff\n${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}${change.diff.endsWith("\n") ? "" : "\n"}${fence}`;
+    })
+    .join("\n\n");
+}
 
 /** Codex CLI 的四种预设；协议参数只在适配层使用，菜单与执行共用此定义。 */
 const permissionModes = [
@@ -367,6 +384,97 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         throw new Error("Codex session busy or unavailable. Wait until it is idle.");
       return { id: thread.id, label: thread.label };
     },
+    async readLastResult(cwd, sessionId, signal) {
+      return withSessionConnection<AgentSessionHistory>(cwd, signal, async (rpc) => {
+        const { thread } = z
+          .object({ thread: sessionSchema })
+          .parse(await rpc.request("thread/read", { threadId: sessionId }));
+        if (thread.id !== sessionId || thread.cwd !== cwd)
+          throw new Error("Session does not match the current selection.");
+        const session = { id: thread.id, label: thread.label };
+        let running = thread.status === "active";
+        let cursor: string | null = null;
+        do {
+          signal.throwIfAborted();
+          const page = z
+            .object({
+              data: z.array(turnSchema.extend({ items: z.array(z.unknown()) })),
+              nextCursor: z.string().nullable(),
+            })
+            .parse(
+              await rpc.request("thread/turns/list", {
+                threadId: sessionId,
+                limit: 1,
+                sortDirection: "desc",
+                itemsView: "full",
+                ...(cursor ? { cursor } : {}),
+              }),
+            );
+          for (const turn of page.data) {
+            if (turn.status === "inProgress") {
+              running = true;
+              continue;
+            }
+            let prompt: string | undefined;
+            const output: string[] = [];
+            for (const value of turn.items) {
+              const item = z
+                .object({
+                  type: z.string(),
+                  text: z.string().optional(),
+                  status: z.string().optional(),
+                  changes: fileChangesSchema.optional(),
+                  content: z.unknown().optional(),
+                })
+                .parse(value);
+              if (item.type === "userMessage" && prompt === undefined) {
+                const content = z
+                  .array(z.object({ type: z.string(), text: z.string().optional() }))
+                  .parse(item.content);
+                prompt = content
+                  .filter((part) => part.type === "text")
+                  .map((part) => part.text ?? "")
+                  .join("\n");
+                if (!prompt.trim() && content.length) prompt = "(Attachment input)";
+              } else if (item.type === "agentMessage" && item.text) output.push(item.text);
+              else if (item.type === "fileChange")
+                output.push(
+                  `File changes${item.status ? ` (${item.status})` : ""}${item.changes?.length ? `\n\n${formatFileChanges(item.changes)}` : ""}`,
+                );
+              else if (item.type === "imageGeneration" && item.status === "completed")
+                output.push("图片已生成。");
+            }
+            /** 历史终态已确认停止，区别于 Tellrun 断线时的执行状态未确认。 */
+            const status = turn.status === "interrupted" ? "cancelled" : turn.status;
+            const notice =
+              status === "failed"
+                ? "Codex 执行失败。请检查本机会话中的错误详情。"
+                : status === "cancelled"
+                  ? "Codex 会话已中断，已有文件改动未回滚。"
+                  : "";
+            return {
+              session,
+              running,
+              last: {
+                id: turn.id,
+                status,
+                prompt: prompt ?? "",
+                text:
+                  [notice, ...output].filter(Boolean).join("\n\n") ||
+                  "Codex finished with no text output.",
+              },
+            };
+          }
+          cursor = page.nextCursor;
+        } while (cursor);
+        return { session, running, last: null };
+      }).catch(() => {
+        throw new Error(
+          unavailableReason ??
+            "Codex session history unavailable. Try /last again or choose a session from /list.",
+        );
+      });
+    },
     async listModels(cwd, signal) {
       return (await readModelData(cwd, signal)).models;
     },
@@ -460,7 +568,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           return;
         }
         const output = formatOutput();
-        /** 异常放在当前分段之前，/last 中仍放在完整输出之前。 */
+        /** 异常放在当前分段之前，保存终态时放在完整输出之前。 */
         const notice = [
           result.text,
           result.status === "interrupted"
@@ -494,21 +602,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             }
             const changes = fileChanges.get(id);
             if (changes && !formattedChanges.has(changes))
-              formattedChanges.set(
-                changes,
-                changes
-                  .map((change) => {
-                    /** 差异作为代码展示；围栏长于内容中的反引号，避免 Markdown 被误解析。 */
-                    const fence = "`".repeat(
-                      (change.diff.match(/`+/g) ?? []).reduce(
-                        (length, marker) => Math.max(length, marker.length + 1),
-                        3,
-                      ),
-                    );
-                    return `${fence}diff\n${change.kind.type}: ${change.path}${change.kind.move_path ? ` → ${change.kind.move_path}` : ""}\n${change.diff}${change.diff.endsWith("\n") ? "" : "\n"}${fence}`;
-                  })
-                  .join("\n\n"),
-              );
+              formattedChanges.set(changes, formatFileChanges(changes));
             if (!output.length) output.push({ id, text: "" });
             const message = output.at(-1);
             if (message)
