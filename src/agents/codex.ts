@@ -17,6 +17,7 @@ import type {
   AgentResult,
   AgentSessionHistory,
 } from "../core/types.js";
+import { sessionPageSize } from "../core/types.js";
 import { createCodexInput } from "./codex-input.js";
 import {
   type CodexApprovalResponse,
@@ -324,11 +325,10 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
     version: unavailableReason ? "Unavailable" : stdout.trim().replace(/^codex-cli /, ""),
     ...(unavailableReason ? { unavailableReason } : {}),
     permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
-    async listSessions(cwd, signal) {
+    async listSessions(cwd, signal, cursor = null) {
       return withSessionConnection(cwd, signal, async (rpc) => {
-        /** 按最近更新时间收集最多 10 个会话；过滤或去重后不足时再取下一页。 */
+        /** 过滤或去重后补齐一页，并保留下一页游标供用户按需继续读取。 */
         const sessions: AgentOption[] = [];
-        let cursor: string | null = null;
         do {
           const page = z
             .object({ data: z.array(sessionSchema), nextCursor: z.string().nullable() })
@@ -336,7 +336,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               await rpc.request("thread/list", {
                 cwd,
                 cursor,
-                limit: 10 - sessions.length,
+                limit: sessionPageSize - sessions.length,
                 sortKey: "updated_at",
                 modelProviders: [],
                 /** 默认来源会漏掉 app-server 会话；排除自动生成的子 Agent 会话。 */
@@ -347,11 +347,10 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           for (const session of page.data) {
             if (session.cwd === cwd && !sessions.some((item) => item.id === session.id))
               sessions.push({ id: session.id, label: session.label });
-            if (sessions.length === 10) return sessions;
           }
           cursor = page.nextCursor;
-        } while (cursor);
-        return sessions;
+        } while (cursor && sessions.length < sessionPageSize);
+        return { sessions, nextCursor: cursor };
       }).catch(() => {
         throw new Error(unavailableReason ?? "Codex session list unavailable. Try /list again.");
       });

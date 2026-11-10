@@ -36,6 +36,8 @@ export interface IncomingMessage {
     | { type: "command"; name: string; args: string }
     /** 会话切换由按钮触发，与文本命令分开处理。 */
     | { type: "session"; id: string }
+    /** 翻页绑定原菜单与消息，不能被当作会话切换或任务输入。 */
+    | { type: "sessionPage"; id: string; page: number; messageId: number }
     | { type: "text"; text: string; replyToMessageId?: number }
     | { type: "attachments"; text: string; attachments: Attachment[] }
     | { type: "permissions" | "model"; id: string; optionIndex: number; messageId: number }
@@ -96,6 +98,15 @@ export interface AgentOption {
   label: string;
 }
 
+/** 会话列表每页的按钮数量，查询和状态校验共用。 */
+export const sessionPageSize = 10;
+
+/** 游标仅供后续查询使用；空值表示已到末页。 */
+export interface AgentSessionPage {
+  sessions: AgentOption[];
+  nextCursor: string | null;
+}
+
 /** 原生会话的最近终态结果；空会话和仅有执行中轮次时 last 为空。 */
 export interface AgentSessionHistory {
   session: AgentOption;
@@ -123,8 +134,8 @@ export interface Agent {
   unavailableReason?: string;
   /** 第一项为默认模式；模式 ID 由各 Agent 自行解释。 */
   permissionModes: readonly AgentOption[];
-  /** 按最近更新时间列出当前目录最多 10 个会话；名称和历史由 Agent 保存。 */
-  listSessions(cwd: string, signal: AbortSignal): Promise<AgentOption[]>;
+  /** 按最近更新时间读取当前目录的一页会话；不传游标时从首页开始。 */
+  listSessions(cwd: string, signal: AbortSignal, cursor?: string | null): Promise<AgentSessionPage>;
   /** 创建并保存空会话，不启动任务；未指定名称时使用默认名称。 */
   createSession(
     input: {

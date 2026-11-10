@@ -1,5 +1,11 @@
 import type { State } from "./schema.js";
-import type { AgentModel, AgentOption, ChannelIdentity, IncomingMessage } from "./types.js";
+import type {
+  AgentModel,
+  AgentOption,
+  AgentSessionPage,
+  ChannelIdentity,
+  IncomingMessage,
+} from "./types.js";
 
 /** 菜单规则共用业务事务与回复入队；不直接读写文件或调用 IM。 */
 export function createMenus(context: {
@@ -8,13 +14,16 @@ export function createMenus(context: {
   enqueueReply: (
     channelId: number,
     text: string,
-    delivery?: Pick<State["outbox"][number], "messageId" | "permissionMenuId" | "modelMenuId">,
+    delivery?: Pick<
+      State["outbox"][number],
+      "messageId" | "permissionMenuId" | "modelMenuId" | "sessionMenuId"
+    >,
   ) => void;
 }) {
   /** 清理旧按钮；正在原地更新的消息保留，由下一阶段或确认结果替换。 */
   function closeMenu(
     channelId: number,
-    key: "permissionMenu" | "modelMenu",
+    key: "permissionMenu" | "modelMenu" | "sessionMenu",
     keepMessageId?: number,
   ) {
     const state = context.read();
@@ -24,7 +33,10 @@ export function createMenus(context: {
     context.read().outbox = context
       .read()
       .outbox.filter(
-        (reply) => reply.permissionMenuId !== menu.id && reply.modelMenuId !== menu.id,
+        (reply) =>
+          reply.permissionMenuId !== menu.id &&
+          reply.modelMenuId !== menu.id &&
+          reply.sessionMenuId !== menu.id,
       );
     for (const message of menu.messages)
       if (message.messageId !== keepMessageId)
@@ -34,6 +46,95 @@ export function createMenus(context: {
 
   return {
     closeMenu,
+    /** 每次 /list 重新读取首页，旧列表和尚未完成的查询同时失效。 */
+    openSessions(channelId: number) {
+      return context.update(() => {
+        const channel = context.read().channels.find((item) => item.id === channelId);
+        if (!channel) return;
+        closeMenu(channelId, "sessionMenu");
+        channel.sessionMenu = {
+          id: crypto.randomUUID(),
+          expiresAt: Date.now() + 600_000,
+          options: [],
+          messages: [],
+          page: 0,
+          cursors: [null],
+          loading: true,
+        };
+        return { channelId, cwd: channel.cwd, id: channel.sessionMenu.id, page: 0, cursor: null };
+      });
+    },
+    /** 一次只接收相邻页请求；重复点击和伪造的菜单、消息或页码不会触发查询。 */
+    turnSessionPage(
+      channelId: number,
+      content: Extract<IncomingMessage["content"], { type: "sessionPage" }>,
+    ) {
+      const channel = context.read().channels.find((item) => item.id === channelId);
+      const menu = channel?.sessionMenu;
+      if (
+        !menu ||
+        menu.id !== content.id ||
+        menu.expiresAt <= Date.now() ||
+        !menu.messages.some((message) => message.messageId === content.messageId)
+      )
+        return "List expired. Open /list again.";
+      if (menu.loading) return "Loading sessions. Please wait.";
+      const cursor = menu.cursors[content.page];
+      if (
+        !Number.isInteger(content.page) ||
+        Math.abs(content.page - menu.page) !== 1 ||
+        cursor === undefined
+      )
+        return "Invalid session page. Open /list again.";
+      return context.update(() => {
+        const current = context.read().channels.find((item) => item.id === channelId);
+        if (!current?.sessionMenu) return;
+        current.sessionMenu.loading = true;
+        return { channelId, cwd: current.cwd, id: menu.id, page: content.page, cursor };
+      });
+    },
+    /** 查询成功后才替换原页；菜单失效时丢弃迟到结果，失败时允许重试当前按钮。 */
+    fillSessions(
+      channelId: number,
+      id: string,
+      page: number,
+      result: AgentSessionPage | undefined,
+      error?: string,
+    ) {
+      const menu = context.read().channels.find((item) => item.id === channelId)?.sessionMenu;
+      if (menu?.id !== id || !menu.loading || menu.expiresAt <= Date.now()) return;
+      context.update(() => {
+        const channel = context.read().channels.find((item) => item.id === channelId);
+        const current = channel?.sessionMenu;
+        if (!current) return;
+        current.loading = false;
+        if (!result) {
+          if (!current.messages.length) closeMenu(channelId, "sessionMenu");
+          context.enqueueReply(channelId, error ?? "Cannot load sessions. Try /list again.");
+          return;
+        }
+        if (page === 0 && !result.sessions.length) {
+          closeMenu(channelId, "sessionMenu");
+          context.enqueueReply(channelId, "No sessions yet. Create one with /new [name].");
+          return;
+        }
+        current.page = page;
+        current.options = result.sessions.map((session) => ({
+          ...session,
+          label: `${session.id === channel.sessionId ? "✓ " : ""}${session.label}`,
+        }));
+        /** 后退后重新沿最新游标向前读取，避免使用已失效的后续页边界。 */
+        current.cursors = current.cursors.slice(0, page + 1);
+        if (result.nextCursor) current.cursors.push(result.nextCursor);
+        const text = `Sessions · Page ${page + 1}\n${result.sessions.length ? "Tap a session to switch." : "No sessions on this page. Go back or refresh with /list."}`;
+        const message = current.messages[0];
+        if (message) message.text = text;
+        context.enqueueReply(channelId, text, {
+          sessionMenuId: id,
+          ...(message ? { messageId: message.messageId } : {}),
+        });
+      });
+    },
     /** 权限直接展示；模型菜单先保存查询意图，由独立循环补齐选项。 */
     openMenu(channelId: number, kind: "permissions" | "model", modes: readonly AgentOption[] = []) {
       context.update(() => {

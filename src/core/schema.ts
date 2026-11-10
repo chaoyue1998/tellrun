@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { sessionPageSize } from "./types.js";
 
 /** 任务规则与状态校验共用的未结束任务状态。 */
 export const activeTaskStatuses = new Set<string>([
@@ -55,6 +56,17 @@ export const stateSchema = z
         userId: z.string(),
         cwd: z.string().min(1),
         sessionId: z.string().nullable(),
+        /** 仅保存当前页选项与已访问页的游标；缺省兼容尚未打开分页的状态。 */
+        sessionMenu: menuSchema
+          .extend({
+            options: z.array(optionSchema).max(sessionPageSize),
+            page: nonnegativeInteger,
+            cursors: z.array(z.string().min(1).nullable()).min(1),
+            loading: z.boolean(),
+          })
+          .refine((menu) => menu.cursors[0] === null && menu.page < menu.cursors.length)
+          .nullable()
+          .optional(),
         /** 出站限流按机器人账号共用；撤回消息后也保留，避免重启绕过等待。 */
         replyRetryAt: nonnegativeInteger.optional(),
         /** 模式标识属于 Agent；空值沿用默认模式。 */
@@ -214,8 +226,9 @@ export const stateSchema = z
         messageId: id.optional(),
         permissionMenuId: z.uuid().optional(),
         modelMenuId: z.uuid().optional(),
-        /** 会话列表随回复保存，发送成功后释放；按钮直接引用完整会话 ID。 */
-        sessions: z.array(optionSchema).max(10).optional(),
+        sessionMenuId: z.uuid().optional(),
+        /** 兼容旧版待发送的会话按钮；新列表使用 sessionMenuId 关联分页菜单。 */
+        sessions: z.array(optionSchema).max(sessionPageSize).optional(),
       }),
     ),
   })

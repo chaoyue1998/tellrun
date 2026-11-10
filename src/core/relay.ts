@@ -9,6 +9,7 @@ import type {
   AgentAttachment,
   AgentOption,
   AgentSessionHistory,
+  AgentSessionPage,
   AttachmentLoader,
   ChannelIdentity,
   IncomingMessage,
@@ -49,6 +50,30 @@ export function createRelayService(options: {
   };
   options.state.recoverTasks();
 
+  /** 列表与翻页共用独立查询；只把仍有效的结果交回菜单事务。 */
+  async function loadSessionPage(query: {
+    channelId: number;
+    id: string;
+    cwd: string;
+    page: number;
+    cursor: string | null;
+  }) {
+    let result: AgentSessionPage | undefined;
+    try {
+      result = await options.agent.listSessions(query.cwd, modelLoading.signal, query.cursor);
+    } catch {
+      /** 失败由菜单保留原页并统一提示；状态写入异常仍交给工作循环处理。 */
+    }
+    if (!stopping)
+      options.state.fillSessions(
+        query.channelId,
+        query.id,
+        query.page,
+        result,
+        options.agent.unavailableReason,
+      );
+  }
+
   return {
     /** 返回前保存消息和必要回复；重复事件直接忽略，不重新执行控制或任务。 */
     async handleMessage(message: IncomingMessage) {
@@ -78,11 +103,18 @@ export function createRelayService(options: {
           (message.content.type === "text" ||
             message.content.type === "attachments" ||
             message.content.type === "session" ||
+            message.content.type === "sessionPage" ||
             (message.content.type === "command" &&
               (["new", "list", "update"].includes(message.content.name) ||
                 (message.content.name === "cwd" && message.content.args))))
         )
           return "Session change in progress. Wait for confirmation, then resend your message.";
+        if (message.content.type === "sessionPage") {
+          const query = options.state.turnSessionPage(channel.id, message.content);
+          if (typeof query === "string" || !query) return query;
+          controlQuery = () => loadSessionPage(query);
+          return "Loading sessions.";
+        }
         /** 新建命令和会话按钮共用切换保护，仅在接口确认后保存选择。 */
         if (
           message.content.type === "session" ||
@@ -134,7 +166,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Show up to 10 recent sessions; tap to switch\n/cwd <path> — Set directory; start a new session\n/status — Status and update check\n/last — Last finished result in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd <path> — Set directory; start a new session\n/status — Status and update check\n/last — Last finished result in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.state.handleCron(channel.id, message.content.args);
             case "model":
@@ -242,34 +274,8 @@ export function createRelayService(options: {
             }
             case "list": {
               if (message.content.args) return "Use /list without arguments.";
-              const snapshot = structuredClone(channel);
-              controlQuery = async () => {
-                let sessions: AgentOption[];
-                try {
-                  sessions = await options.agent.listSessions(snapshot.cwd, modelLoading.signal);
-                } catch {
-                  if (!stopping)
-                    options.state.reply(
-                      snapshot.id,
-                      options.agent.unavailableReason ?? "Cannot load sessions. Try /list again.",
-                    );
-                  return;
-                }
-                if (!stopping)
-                  options.state.reply(
-                    snapshot.id,
-                    sessions.length
-                      ? "Tap a session to switch."
-                      : "No sessions yet. Create one with /new [name].",
-                    {
-                      /** 当前会话标记与名称一起作为按钮文本。 */
-                      sessions: sessions.map((session) => ({
-                        ...session,
-                        label: `${session.id === snapshot.sessionId ? "✓ " : ""}${session.label}`,
-                      })),
-                    },
-                  );
-              };
+              const query = options.state.openSessions(channel.id);
+              if (query) controlQuery = () => loadSessionPage(query);
               return;
             }
             case "stop": {
