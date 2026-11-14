@@ -7,6 +7,7 @@ import type { Config } from "../config.js";
 import { AttachmentError } from "../core/attachments.js";
 import type { CoreState } from "../core/state.js";
 import type { MessageHandler } from "../core/types.js";
+import { listPageSize } from "../core/types.js";
 import {
   createTelegramAttachmentLoader,
   sendTelegramAttachment,
@@ -17,7 +18,7 @@ import {
 const commands = [
   { command: "new", description: "Create a new session with an optional name" },
   { command: "list", description: "Browse sessions, 10 per page, with switch buttons" },
-  { command: "cwd", description: "Show or change the working directory" },
+  { command: "cwd", description: "Browse project directories or set a working directory" },
   { command: "status", description: "Show status and check for updates" },
   { command: "last", description: "Show the last finished result in the selected session" },
   { command: "interrupt", description: "Interrupt the current task" },
@@ -217,13 +218,13 @@ export function createTelegramConnection(
   /** 先保存选择，再关闭客户端等待提示；答复回调失败不能撤销或重发已保存的决定。 */
   bot.on("callback_query:data", async (ctx) => {
     const match = ctx.callbackQuery.data.match(/^i:([0-9a-f-]{36}):(a(\d+)|q(\d+)_(\d+))$/);
-    const selection = ctx.callbackQuery.data.match(/^([pm]):([0-9a-f-]{36}):(\d+)$/);
+    const selection = ctx.callbackQuery.data.match(/^([pmc]):([0-9a-f-]{36}):(\d+)$/);
     /** 会话按钮作为独立事件交给核心层校验和切换。 */
     const session = ctx.callbackQuery.data.match(/^s:(\S+)$/u);
-    const sessionPage = ctx.callbackQuery.data.match(/^l:([0-9a-f-]{36}):(\d+)$/);
+    const listPage = ctx.callbackQuery.data.match(/^([ld]):([0-9a-f-]{36}):(\d+)$/);
     let reply = "Button expired.";
     if (
-      (match?.[1] || selection?.[2] || session?.[1] || sessionPage?.[1]) &&
+      (match?.[1] || selection?.[2] || session?.[1] || listPage?.[2]) &&
       ctx.chat &&
       ctx.callbackQuery.message
     ) {
@@ -236,18 +237,19 @@ export function createTelegramConnection(
             userId: String(ctx.from.id),
           },
           eventId: String(ctx.update.update_id),
-          content: sessionPage?.[1]
+          content: listPage?.[2]
             ? {
-                type: "sessionPage",
-                id: sessionPage[1],
-                page: Number(sessionPage[2]),
+                type: listPage[1] === "d" ? "cwdPage" : "sessionPage",
+                id: listPage[2],
+                page: Number(listPage[3]),
                 messageId: ctx.callbackQuery.message.message_id,
               }
             : session?.[1]
               ? { type: "session", id: session[1] }
               : selection?.[2]
                 ? {
-                    type: selection[1] === "p" ? "permissions" : "model",
+                    type:
+                      selection[1] === "p" ? "permissions" : selection[1] === "c" ? "cwd" : "model",
                     id: selection[2],
                     optionIndex: Number(selection[3]),
                     messageId: ctx.callbackQuery.message.message_id,
@@ -557,25 +559,39 @@ export function createTelegramConnection(
                       callback_data: `s:${session.id}`,
                     },
                   ]);
-                /** 翻页按钮只携带菜单 ID 和页码，长游标留在核心状态中。 */
-                const sessionMenu = reply.sessionMenu;
-                if (reply.promptEnd && sessionMenu && sessionMenu.expiresAt > Date.now()) {
-                  const keyboard = sessionMenu.options.map((session, index) => [
+                /** 会话与目录复用分页按钮；长路径和游标留在核心状态中。 */
+                const listMenu = reply.sessionMenu ?? reply.cwdMenu;
+                if (reply.promptEnd && listMenu && listMenu.expiresAt > Date.now()) {
+                  const keyboard = (
+                    reply.cwdMenu
+                      ? listMenu.options.slice(
+                          listMenu.page * listPageSize,
+                          (listMenu.page + 1) * listPageSize,
+                        )
+                      : listMenu.options
+                  ).map((option, index) => [
                     {
-                      text: `${index + 1}. ${[...session.label].slice(0, 50).join("")}`,
-                      callback_data: `s:${session.id}`,
+                      /** 长目录优先保留末尾的项目名称，实际选择仍使用完整路径。 */
+                      text: `${index + 1}. ${reply.cwdMenu && [...option.label].length > 50 ? `${option.label.startsWith("✓ ") ? "✓ " : ""}…${[...option.id].slice(-46).join("")}` : [...option.label].slice(0, 50).join("")}`,
+                      callback_data: reply.cwdMenu
+                        ? `c:${listMenu.id}:${listMenu.page * listPageSize + index}`
+                        : `s:${option.id}`,
                     },
                   ]);
                   const navigation = [];
-                  if (sessionMenu.page > 0)
+                  if (listMenu.page > 0)
                     navigation.push({
                       text: "‹ Previous",
-                      callback_data: `l:${sessionMenu.id}:${sessionMenu.page - 1}`,
+                      callback_data: `${reply.cwdMenu ? "d" : "l"}:${listMenu.id}:${listMenu.page - 1}`,
                     });
-                  if (sessionMenu.page + 1 < sessionMenu.cursors.length)
+                  if (
+                    reply.sessionMenu
+                      ? listMenu.page + 1 < reply.sessionMenu.cursors.length
+                      : (listMenu.page + 1) * listPageSize < listMenu.options.length
+                  )
                     navigation.push({
                       text: "Next ›",
-                      callback_data: `l:${sessionMenu.id}:${sessionMenu.page + 1}`,
+                      callback_data: `${reply.cwdMenu ? "d" : "l"}:${listMenu.id}:${listMenu.page + 1}`,
                     });
                   if (navigation.length) keyboard.push(navigation);
                   markup.reply_markup.inline_keyboard = keyboard;
@@ -622,7 +638,8 @@ export function createTelegramConnection(
                   reply.messageId &&
                     !reply.modelMenuId &&
                     !reply.permissionMenuId &&
-                    !reply.sessionMenuId
+                    !reply.sessionMenuId &&
+                    !reply.cwdMenuId
                     ? undefined
                     : {
                         messageId,
@@ -639,6 +656,9 @@ export function createTelegramConnection(
                           : {}),
                         ...(reply.promptEnd && reply.sessionMenuId
                           ? { sessionMenuId: reply.sessionMenuId }
+                          : {}),
+                        ...(reply.promptEnd && reply.cwdMenuId
+                          ? { cwdMenuId: reply.cwdMenuId }
                           : {}),
                       },
                 );

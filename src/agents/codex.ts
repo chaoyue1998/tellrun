@@ -17,7 +17,7 @@ import type {
   AgentResult,
   AgentSessionHistory,
 } from "../core/types.js";
-import { sessionPageSize } from "../core/types.js";
+import { listPageSize } from "../core/types.js";
 import { createCodexInput } from "./codex-input.js";
 import {
   type CodexApprovalResponse,
@@ -336,7 +336,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               await rpc.request("thread/list", {
                 cwd,
                 cursor,
-                limit: sessionPageSize - sessions.length,
+                limit: listPageSize - sessions.length,
                 sortKey: "updated_at",
                 modelProviders: [],
                 /** 默认来源会漏掉 app-server 会话；排除自动生成的子 Agent 会话。 */
@@ -349,10 +349,40 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
               sessions.push({ id: session.id, label: session.label });
           }
           cursor = page.nextCursor;
-        } while (cursor && sessions.length < sessionPageSize);
+        } while (cursor && sessions.length < listPageSize);
         return { sessions, nextCursor: cursor };
       }).catch(() => {
         throw new Error(unavailableReason ?? "Codex session list unavailable. Try /list again.");
+      });
+    },
+    async listDirectories(cwd, signal) {
+      return withSessionConnection(cwd, signal, async (rpc) => {
+        /** Set 保留最近出现的顺序；不传 cwd 过滤，目录来源与 /list 保持一致。 */
+        const directories = new Set<string>();
+        let cursor: string | null = null;
+        do {
+          const page = z
+            .object({
+              data: z.array(z.object({ cwd: z.string() })),
+              nextCursor: z.string().nullable(),
+            })
+            .parse(
+              await rpc.request("thread/list", {
+                cursor,
+                limit: 100,
+                sortKey: "updated_at",
+                modelProviders: [],
+                sourceKinds: ["cli", "vscode", "exec", "appServer", "unknown"],
+                archived: false,
+              }),
+            );
+          for (const session of page.data)
+            if (isAbsolute(session.cwd)) directories.add(session.cwd);
+          cursor = page.nextCursor;
+        } while (cursor);
+        return [...directories];
+      }).catch(() => {
+        throw new Error(unavailableReason ?? "Codex directory list unavailable. Try /cwd again.");
       });
     },
     async createSession(input, signal) {

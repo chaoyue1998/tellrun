@@ -105,6 +105,7 @@ export function createState(options: {
       | "permissionMenuId"
       | "modelMenuId"
       | "sessionMenuId"
+      | "cwdMenuId"
       | "sessions"
       | "markdown"
       | "priority"
@@ -168,6 +169,7 @@ export function createState(options: {
         ...(delivery.permissionMenuId ||
         delivery.modelMenuId ||
         delivery.sessionMenuId ||
+        delivery.cwdMenuId ||
         delivery.sessions?.length ||
         (delivery.interactionId && !delivery.messageId)
           ? { promptEnd: index === parts.length - 1 }
@@ -368,9 +370,15 @@ export function createState(options: {
           (item) => item.channelId === existing.id && item.eventId === message.eventId,
         )
       )
-        return ["interaction", "permissions", "model", "session", "sessionPage"].includes(
-          message.content.type,
-        )
+        return [
+          "interaction",
+          "permissions",
+          "model",
+          "session",
+          "sessionPage",
+          "cwd",
+          "cwdPage",
+        ].includes(message.content.type)
           ? "Already handled."
           : undefined;
       return update(() => {
@@ -397,9 +405,15 @@ export function createState(options: {
         });
         const reply = handle(channel);
         if (
-          !["interaction", "permissions", "model", "session", "sessionPage"].includes(
-            message.content.type,
-          )
+          ![
+            "interaction",
+            "permissions",
+            "model",
+            "session",
+            "sessionPage",
+            "cwd",
+            "cwdPage",
+          ].includes(message.content.type)
         )
           enqueueReply(channel.id, reply);
         return reply;
@@ -442,6 +456,7 @@ export function createState(options: {
           closeMenu(channelId, "permissionMenu");
           closeMenu(channelId, "modelMenu");
           closeMenu(channelId, "sessionMenu");
+          closeMenu(channelId, "cwdMenu");
           if (cwd !== channel.cwd) {
             channel.permissionMode = null;
             channel.model = null;
@@ -790,7 +805,8 @@ export function createState(options: {
     recoverTasks() {
       if (
         state.channels.some(
-          (channel) => channel.permissionMenu || channel.modelMenu || channel.sessionMenu,
+          (channel) =>
+            channel.permissionMenu || channel.modelMenu || channel.sessionMenu || channel.cwdMenu,
         )
       )
         update(() => {
@@ -798,6 +814,7 @@ export function createState(options: {
             closeMenu(channel.id, "permissionMenu");
             closeMenu(channel.id, "modelMenu");
             closeMenu(channel.id, "sessionMenu");
+            closeMenu(channel.id, "cwdMenu");
           }
         });
       for (const task of state.tasks.filter(
@@ -860,6 +877,8 @@ export function createState(options: {
           update(() => closeMenu(channel.id, "modelMenu"));
         if (channel.sessionMenu && channel.sessionMenu.expiresAt <= Date.now())
           update(() => closeMenu(channel.id, "sessionMenu"));
+        if (channel.cwdMenu && channel.cwdMenu.expiresAt <= Date.now())
+          update(() => closeMenu(channel.id, "cwdMenu"));
       }
       for (const reply of state.outbox) {
         if (Boolean(reply.priority) !== (kind === "priority")) continue;
@@ -908,6 +927,7 @@ export function createState(options: {
             modelMenu: channel.modelMenu?.id === reply.modelMenuId ? channel.modelMenu : undefined,
             sessionMenu:
               channel.sessionMenu?.id === reply.sessionMenuId ? channel.sessionMenu : undefined,
+            cwdMenu: channel.cwdMenu?.id === reply.cwdMenuId ? channel.cwdMenu : undefined,
           });
         }
       }
@@ -923,6 +943,7 @@ export function createState(options: {
         permissionMenuId?: string;
         modelMenuId?: string;
         sessionMenuId?: string;
+        cwdMenuId?: string;
       },
     ) {
       update(() => {
@@ -931,19 +952,27 @@ export function createState(options: {
         delivering.delete(id);
         state.outbox = state.outbox.filter((reply) => reply.id !== id);
         if (
-          (delivery?.permissionMenuId || delivery?.modelMenuId || delivery?.sessionMenuId) &&
+          (delivery?.permissionMenuId ||
+            delivery?.modelMenuId ||
+            delivery?.sessionMenuId ||
+            delivery?.cwdMenuId) &&
           channelId !== undefined
         ) {
           const channel = state.channels.find((item) => item.id === channelId);
-          const menu = delivery.sessionMenuId
-            ? channel?.sessionMenu
-            : delivery.modelMenuId
-              ? channel?.modelMenu
-              : channel?.permissionMenu;
+          const menu = delivery.cwdMenuId
+            ? channel?.cwdMenu
+            : delivery.sessionMenuId
+              ? channel?.sessionMenu
+              : delivery.modelMenuId
+                ? channel?.modelMenu
+                : channel?.permissionMenu;
           if (
             menu &&
             menu.id ===
-              (delivery.sessionMenuId ?? delivery.modelMenuId ?? delivery.permissionMenuId) &&
+              (delivery.cwdMenuId ??
+                delivery.sessionMenuId ??
+                delivery.modelMenuId ??
+                delivery.permissionMenuId) &&
             menu.expiresAt > Date.now()
           ) {
             if (!menu.messages.some((message) => message.messageId === delivery.messageId))

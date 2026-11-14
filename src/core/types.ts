@@ -37,7 +37,9 @@ export interface IncomingMessage {
     /** 会话切换由按钮触发，与文本命令分开处理。 */
     | { type: "session"; id: string }
     /** 翻页绑定原菜单与消息，不能被当作会话切换或任务输入。 */
-    | { type: "sessionPage"; id: string; page: number; messageId: number }
+    | { type: "sessionPage" | "cwdPage"; id: string; page: number; messageId: number }
+    /** 目录路径保存在菜单中，按钮只携带索引，避免长路径超过回调长度限制。 */
+    | { type: "cwd"; id: string; optionIndex: number; messageId: number }
     | { type: "text"; text: string; replyToMessageId?: number }
     | { type: "attachments"; text: string; attachments: Attachment[] }
     | { type: "permissions" | "model"; id: string; optionIndex: number; messageId: number }
@@ -98,8 +100,8 @@ export interface AgentOption {
   label: string;
 }
 
-/** 会话列表每页的按钮数量，查询和状态校验共用。 */
-export const sessionPageSize = 10;
+/** 会话与目录列表每页的按钮数量，查询、状态校验和展示共用。 */
+export const listPageSize = 10;
 
 /** 游标仅供后续查询使用；空值表示已到末页。 */
 export interface AgentSessionPage {
@@ -136,6 +138,8 @@ export interface Agent {
   permissionModes: readonly AgentOption[];
   /** 按最近更新时间读取当前目录的一页会话；不传游标时从首页开始。 */
   listSessions(cwd: string, signal: AbortSignal, cursor?: string | null): Promise<AgentSessionPage>;
+  /** 按最近使用顺序返回历史会话的目录，跨会话与分页去重。 */
+  listDirectories(cwd: string, signal: AbortSignal): Promise<string[]>;
   /** 创建并保存空会话，不启动任务；未指定名称时使用默认名称。 */
   createSession(
     input: {

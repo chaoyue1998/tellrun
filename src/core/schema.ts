@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { sessionPageSize } from "./types.js";
+import { listPageSize } from "./types.js";
 
 /** 任务规则与状态校验共用的未结束任务状态。 */
 export const activeTaskStatuses = new Set<string>([
@@ -44,6 +44,12 @@ const menuSchema = z.strictObject({
   messages: z.array(z.strictObject({ messageId: id, text: z.string() })),
 });
 
+/** 会话与目录共用分页状态；会话保存游标，目录保存去重后的选项快照。 */
+const listMenuSchema = menuSchema.extend({
+  page: nonnegativeInteger,
+  loading: z.boolean(),
+});
+
 /** 仅接受当前完整状态结构，字段缺失、额外字段或格式无效时拒绝启动。 */
 export const stateSchema = z
   .strictObject({
@@ -57,14 +63,17 @@ export const stateSchema = z
         cwd: z.string().min(1),
         sessionId: z.string().nullable(),
         /** 仅保存当前页选项与已访问页的游标；缺省兼容尚未打开分页的状态。 */
-        sessionMenu: menuSchema
+        sessionMenu: listMenuSchema
           .extend({
-            options: z.array(optionSchema).max(sessionPageSize),
-            page: nonnegativeInteger,
+            options: z.array(optionSchema).max(listPageSize),
             cursors: z.array(z.string().min(1).nullable()).min(1),
-            loading: z.boolean(),
           })
           .refine((menu) => menu.cursors[0] === null && menu.page < menu.cursors.length)
+          .nullable()
+          .optional(),
+        /** 缺省兼容旧状态；目录仅在菜单有效期内保留，不作为长期历史缓存。 */
+        cwdMenu: listMenuSchema
+          .refine((menu) => menu.page < Math.max(1, Math.ceil(menu.options.length / listPageSize)))
           .nullable()
           .optional(),
         /** 出站限流按机器人账号共用；撤回消息后也保留，避免重启绕过等待。 */
@@ -227,8 +236,9 @@ export const stateSchema = z
         permissionMenuId: z.uuid().optional(),
         modelMenuId: z.uuid().optional(),
         sessionMenuId: z.uuid().optional(),
+        cwdMenuId: z.uuid().optional(),
         /** 兼容旧版待发送的会话按钮；新列表使用 sessionMenuId 关联分页菜单。 */
-        sessions: z.array(optionSchema).max(sessionPageSize).optional(),
+        sessions: z.array(optionSchema).max(listPageSize).optional(),
       }),
     ),
   })

@@ -14,6 +14,7 @@ import type {
   ChannelIdentity,
   IncomingMessage,
 } from "./types.js";
+import { listPageSize } from "./types.js";
 
 /** 结果头部只展示简短任务描述，完整回复仍由历史结果提供。 */
 const taskDescriptionLimit = 160;
@@ -51,13 +52,27 @@ export function createRelayService(options: {
   options.state.recoverTasks();
 
   /** 列表与翻页共用独立查询；只把仍有效的结果交回菜单事务。 */
-  async function loadSessionPage(query: {
+  async function loadListPage(query: {
     channelId: number;
+    kind: "session" | "cwd";
     id: string;
     cwd: string;
     page: number;
     cursor: string | null;
   }) {
+    if (query.kind === "cwd") {
+      const directories = await options.agent
+        .listDirectories(query.cwd, modelLoading.signal)
+        .catch(() => undefined);
+      if (!stopping)
+        options.state.fillDirectories(
+          query.channelId,
+          query.id,
+          directories,
+          options.agent.unavailableReason,
+        );
+      return;
+    }
     let result: AgentSessionPage | undefined;
     try {
       result = await options.agent.listSessions(query.cwd, modelLoading.signal, query.cursor);
@@ -104,16 +119,65 @@ export function createRelayService(options: {
             message.content.type === "attachments" ||
             message.content.type === "session" ||
             message.content.type === "sessionPage" ||
+            message.content.type === "cwd" ||
+            message.content.type === "cwdPage" ||
             (message.content.type === "command" &&
-              (["new", "list", "update"].includes(message.content.name) ||
-                (message.content.name === "cwd" && message.content.args))))
+              ["new", "list", "cwd", "update"].includes(message.content.name)))
         )
           return "Session change in progress. Wait for confirmation, then resend your message.";
-        if (message.content.type === "sessionPage") {
-          const query = options.state.turnSessionPage(channel.id, message.content);
+        if (message.content.type === "sessionPage" || message.content.type === "cwdPage") {
+          const query = options.state.turnListPage(channel.id, message.content);
           if (typeof query === "string" || !query) return query;
-          controlQuery = () => loadSessionPage(query);
-          return "Loading sessions.";
+          controlQuery = () => loadListPage(query);
+          return "Loading list.";
+        }
+        /** 手动路径和菜单选择共用校验；目录按钮只能选择当前消息这一页保存的路径。 */
+        if (
+          message.content.type === "cwd" ||
+          (message.content.type === "command" &&
+            message.content.name === "cwd" &&
+            message.content.args)
+        ) {
+          if (task) return "Wait for the task to finish, or use /interrupt first.";
+          const { content } = message;
+          if (content.type === "cwd") {
+            const menu = channel.cwdMenu;
+            if (
+              !menu ||
+              menu.id !== content.id ||
+              menu.loading ||
+              menu.expiresAt <= Date.now() ||
+              !menu.messages.some((item) => item.messageId === content.messageId)
+            )
+              return "List expired. Open /cwd again.";
+            if (
+              !Number.isInteger(content.optionIndex) ||
+              Math.floor(content.optionIndex / listPageSize) !== menu.page
+            )
+              return "Invalid directory option. Open /cwd again.";
+          }
+          let cwd =
+            content.type === "cwd"
+              ? channel.cwdMenu?.options[content.optionIndex]?.id
+              : content.args;
+          if (!cwd) return "Invalid directory option. Open /cwd again.";
+          if (!isAbsolute(cwd)) return "Use an absolute path: /cwd /path/to/project.";
+          try {
+            cwd = realpathSync(cwd);
+            if (!statSync(cwd).isDirectory()) return "Path is not a directory.";
+          } catch {
+            return "Cannot access directory. Check the path and permissions.";
+          }
+          if (cwd !== channel.cwd || content.type === "cwd")
+            options.state.setSession(
+              channel.id,
+              cwd,
+              cwd === channel.cwd ? channel.sessionId : null,
+              content.type === "cwd" ? `Directory: ${cwd}\nSend a task to Codex.` : undefined,
+            );
+          return content.type === "cwd"
+            ? "Directory saved."
+            : `Directory: ${cwd}\nSend a task to Codex.`;
         }
         /** 新建命令和会话按钮共用切换保护，仅在接口确认后保存选择。 */
         if (
@@ -166,7 +230,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd <path> — Set directory; start a new session\n/status — Status and update check\n/last — Last finished result in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/last — Last finished result in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.state.handleCron(channel.id, message.content.args);
             case "model":
@@ -257,25 +321,14 @@ export function createRelayService(options: {
               controlQuery = async () => options.restart?.();
               return "Tellrun restarted. Configuration reloaded; session and task state preserved.";
             case "cwd": {
-              if (!message.content.args)
-                return `Directory: ${channel.cwd}\nUse /cwd /absolute/path to change directory and start a new session.`;
-              if (task) return "Wait for the task to finish, or use /interrupt first.";
-              if (!isAbsolute(message.content.args))
-                return "Use an absolute path: /cwd /path/to/project.";
-              let cwd: string;
-              try {
-                cwd = realpathSync(message.content.args);
-                if (!statSync(cwd).isDirectory()) return "Path is not a directory.";
-              } catch {
-                return "Cannot access directory. Check the path and permissions.";
-              }
-              if (cwd !== channel.cwd) options.state.setSession(channel.id, cwd, null);
-              return `Directory: ${cwd}\nSend a task to Codex.`;
+              const query = options.state.openList(channel.id, "cwd");
+              if (query) controlQuery = () => loadListPage(query);
+              return;
             }
             case "list": {
               if (message.content.args) return "Use /list without arguments.";
-              const query = options.state.openSessions(channel.id);
-              if (query) controlQuery = () => loadSessionPage(query);
+              const query = options.state.openList(channel.id, "session");
+              if (query) controlQuery = () => loadListPage(query);
               return;
             }
             case "stop": {
