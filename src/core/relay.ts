@@ -16,9 +16,6 @@ import type {
 } from "./types.js";
 import { listPageSize } from "./types.js";
 
-/** 结果头部只展示简短任务描述，完整回复仍由历史结果提供。 */
-const taskDescriptionLimit = 160;
-
 /** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
 export function createRelayService(options: {
   state: CoreState;
@@ -230,7 +227,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/last — Last finished result in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
             case "cron":
               return options.state.handleCron(channel.id, message.content.args);
             case "model":
@@ -356,7 +353,14 @@ export function createRelayService(options: {
               options.state.cancelTask(task.id);
               return `Interrupt requested for task #${task.id}. You can send another message when it ends.`;
             case "last": {
-              if (message.content.args) return "Use /last without arguments.";
+              /** 数量只接受正整数；不传时保留最近一条的行为。 */
+              const count = message.content.args ? Number(message.content.args) : 1;
+              if (
+                (message.content.args && !/^\d+$/u.test(message.content.args)) ||
+                !Number.isSafeInteger(count) ||
+                count < 1
+              )
+                return "Use /last [count], where count is a positive integer.";
               if (!channel.sessionId)
                 return `No session selected yet.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : " Choose one with /list or create one with /new."}`;
               /** 慢查询固定命令接收时的会话，切换后迟到的回复仍标注原会话。 */
@@ -368,6 +372,7 @@ export function createRelayService(options: {
                     snapshot.cwd,
                     snapshot.sessionId,
                     modelLoading.signal,
+                    count,
                   );
                 } catch {
                   if (!stopping)
@@ -379,20 +384,20 @@ export function createRelayService(options: {
                 }
                 if (stopping) return;
                 const context = `Session: ${history.session.id}\nName: ${history.session.label}\nDirectory: ${snapshot.cwd}`;
-                const { last } = history;
-                if (!last) {
+                const { results } = history;
+                if (!results.length) {
                   options.state.reply(
                     snapshot.id,
                     `${context}\n\nNo finished results in this session.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : history.running ? "\nA turn is still running in this session. Check /status or the local Codex session." : ""}`,
                   );
                   return;
                 }
-                const description = [...last.prompt.replace(/\s+/gu, " ").trim()];
-                options.state.reply(
-                  snapshot.id,
-                  `${context}\nTask: ${description.slice(0, taskDescriptionLimit).join("") || "(No task description)"}${description.length > taskDescriptionLimit ? "…" : ""}\nTurn: ${last.id} ${statuses[last.status]}\n\n${last.text}`,
-                  { markdown: true },
-                );
+                for (const last of results)
+                  options.state.reply(
+                    snapshot.id,
+                    `${context}\nTurn: ${last.id} ${statuses[last.status]}\n\nQuestion:\n${last.prompt || "(No task description)"}\n\nReply:\n${last.text}`,
+                    { markdown: true },
+                  );
               };
               return;
             }

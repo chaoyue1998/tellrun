@@ -430,7 +430,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         throw new Error("Codex session busy or unavailable. Wait until it is idle.");
       return { id: thread.id, label: thread.label };
     },
-    async readLastResult(cwd, sessionId, signal) {
+    async readLastResult(cwd, sessionId, signal, count) {
       return withSessionConnection<AgentSessionHistory>(cwd, signal, async (rpc) => {
         const { thread } = z
           .object({ thread: sessionSchema })
@@ -438,6 +438,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         if (thread.id !== sessionId || thread.cwd !== cwd)
           throw new Error("Session does not match the current selection.");
         const session = { id: thread.id, label: thread.label };
+        /** 按倒序收集已结束轮次，跨页跳过执行中记录。 */
+        const results: AgentSessionHistory["results"] = [];
         let running = thread.status === "active";
         let cursor: string | null = null;
         do {
@@ -450,7 +452,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
             .parse(
               await rpc.request("thread/turns/list", {
                 threadId: sessionId,
-                limit: 1,
+                limit: Math.min(count - results.length, 100),
                 sortDirection: "desc",
                 itemsView: "full",
                 ...(cursor ? { cursor } : {}),
@@ -472,15 +474,19 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 })
                 .parse(value);
               const text = readItemText(item);
-              if (item.type === "userMessage" && prompt === undefined) {
+              if (item.type === "userMessage") {
                 const content = z
                   .array(z.object({ type: z.string(), text: z.string().optional() }))
                   .parse(item.content);
-                prompt = content
-                  .filter((part) => part.type === "text")
-                  .map((part) => part.text ?? "")
-                  .join("\n");
-                if (!prompt.trim() && content.length) prompt = "(Attachment input)";
+                prompt = [
+                  prompt,
+                  content
+                    .filter((part) => part.type === "text")
+                    .map((part) => part.text ?? "")
+                    .join("\n") || (content.length ? "(Attachment input)" : ""),
+                ]
+                  .filter(Boolean)
+                  .join("\n\n");
               } else if (text) output.push(text);
               else if (item.type === "fileChange")
                 output.push(
@@ -497,22 +503,19 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                 : status === "cancelled"
                   ? "Codex 会话已中断，已有文件改动未回滚。"
                   : "";
-            return {
-              session,
-              running,
-              last: {
-                id: turn.id,
-                status,
-                prompt: prompt ?? "",
-                text:
-                  [notice, ...output].filter(Boolean).join("\n\n") ||
-                  "Codex finished with no text output.",
-              },
-            };
+            results.push({
+              id: turn.id,
+              status,
+              prompt: prompt ?? "",
+              text:
+                [notice, ...output].filter(Boolean).join("\n\n") ||
+                "Codex finished with no text output.",
+            });
+            if (results.length >= count) return { session, running, results };
           }
           cursor = page.nextCursor;
         } while (cursor);
-        return { session, running, last: null };
+        return { session, running, results };
       }).catch(() => {
         throw new Error(
           unavailableReason ??

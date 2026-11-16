@@ -109,11 +109,11 @@ export interface AgentSessionPage {
   nextCursor: string | null;
 }
 
-/** 原生会话的最近终态结果；空会话和仅有执行中轮次时 last 为空。 */
+/** 原生会话的最近终态结果；空会话和仅有执行中轮次时 results 为空。 */
 export interface AgentSessionHistory {
   session: AgentOption;
   running: boolean;
-  last: (Pick<AgentResult, "status" | "text"> & { id: string; prompt: string }) | null;
+  results: (Pick<AgentResult, "status" | "text"> & { id: string; prompt: string })[];
 }
 
 /** 推理选项与默认值由 Agent 返回，不能假设所有模型支持相同档位。 */
@@ -153,7 +153,12 @@ export interface Agent {
   /** 校验会话属于当前目录且可续聊，不恢复会话或修改配置。 */
   readSession(cwd: string, sessionId: string, signal: AbortSignal): Promise<AgentOption>;
   /** 只读当前会话历史，跳过执行中轮次，不恢复会话或提交输入。 */
-  readLastResult(cwd: string, sessionId: string, signal: AbortSignal): Promise<AgentSessionHistory>;
+  readLastResult(
+    cwd: string,
+    sessionId: string,
+    signal: AbortSignal,
+    count: number,
+  ): Promise<AgentSessionHistory>;
   /** 只读取可选模型，不创建会话；独立连接避免影响正在执行的任务。 */
   listModels(cwd: string, signal: AbortSignal): Promise<AgentModel[]>;
   /** 只读查询目录下的有效选择，不创建会话或提交任务。 */

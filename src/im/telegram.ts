@@ -20,7 +20,7 @@ const commands = [
   { command: "list", description: "Browse sessions, 10 per page, with switch buttons" },
   { command: "cwd", description: "Browse project directories or set a working directory" },
   { command: "status", description: "Show status and check for updates" },
-  { command: "last", description: "Show the last finished result in the selected session" },
+  { command: "last", description: "Show recent questions and replies: /last [count]" },
   { command: "interrupt", description: "Interrupt the current task" },
   { command: "stop", description: "Stop all background terminals in the current session" },
   { command: "model", description: "Select model and reasoning effort for future tasks" },
