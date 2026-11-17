@@ -1,8 +1,8 @@
 # Tellrun 架构与技术选型
 
-首版采用 Node.js 常驻服务，使用 grammY 接入 Telegram，使用 Codex app-server 执行任务，以 JSON 文件保存配置、会话、任务和待发送回复。编码任务默认全局串行；状态、审批、补充输入和停止通过独立控制路径处理。
+首版采用 Node.js 常驻服务，使用 grammY 接入 Telegram，使用 Codex app-server 执行任务，以 JSON 文件保存配置、会话、任务和待发送回复。编码任务按会话并发执行，同一会话最多一个未结束任务；状态、审批、补充输入和停止通过独立控制路径处理。
 
-范围与验收见[产品需求文档](prd.md)。本方案面向个人使用，先实现 Telegram + Codex。其他 IM 与 Claude 等 Agent 是后续两个独立的扩展方向。当前已接通会话创建、列表与切换、串行执行、续聊、停止、审批与结构化提问、定时计划、持久化恢复和后台管理命令；通用任务队列、工具进度摘要及 Linux 真实部署验收仍待完成。
+范围与验收见[产品需求文档](prd.md)。本方案面向个人使用，先实现 Telegram + Codex。其他 IM 与 Claude 等 Agent 是后续两个独立的扩展方向。当前已接通会话创建、列表与切换、按会话并发执行、续聊、停止、审批与结构化提问、定时计划、持久化恢复和后台管理命令；通用任务队列、工具进度摘要及 Linux 真实部署验收仍待完成。
 
 当前实现沿用现有技术栈和单进程结构。核心层管理任务、交互、菜单、定时计划与 outbox，并以同一事务提交相关变更；文件存储负责校验快照、原子写入与单实例锁。Telegram 连接器负责更新确认规则，只通过消息接口读取投递状态和保存回执。本地 Codex 后台连接使用 ws，不新增测试文件。
 
@@ -22,7 +22,7 @@ README.md 是项目主页展示，保持简单整洁。
 | Codex 接入     | app-server，本地 WebSocket 双向 JSON-RPC                 | 需要完整的会话、审批、问题和中断交互                 |
 | Codex 进程     | 连接独立 daemon，不可用时通过 bootstrap 启动             | Tellrun 退出不结束任务，重启后沿用会话与轮次 ID      |
 | 数据           | Node.js 文件接口 + JSON                                  | 配置与状态分开保存，使用原子替换                     |
-| 调度           | 文件中的任务记录 + 单个 Worker                           | 队列状态可恢复；控制消息不等待编码任务               |
+| 调度           | 文件中的任务记录 + 按任务隔离的执行循环             | 队列状态可恢复；控制消息不等待编码任务               |
 | 定时计划       | Croner 五段解析 + 独立调度循环 + JSON 持久化              | 使用服务器时区，串行执行，忙碌时合并等待触发        |
 | 消息发送       | 本地 outbox + 进度合并                                   | Telegram 故障不改变编码任务的执行结果                |
 | 部署           | npm 全局安装，Linux systemd 或 macOS launchd 用户服务    | 配置向导完成初始化，由系统管理后台运行与故障重启     |
@@ -36,7 +36,7 @@ flowchart TB
             IN["Telegram 适配"]
             CORE["会话与任务协调"]
             STATE[("state.json")]
-            WORKER["串行任务 Worker"]
+            WORKER["按会话并发的任务 Worker"]
             RPC["Codex 协议适配"]
             OUT["发送队列与进度合并"]
             IN --> CORE
@@ -135,7 +135,7 @@ CLI 与打包入口已接入，可使用 `npm pack` 的本地产物全局安装�
 | src/agents/codex.ts                         | Codex app-server 连接、协议校验、会话创建或恢复、执行与中断  |
 | src/agents/codex-rpc.ts                     | 模型查询与任务连接共用的 RPC 收发、初始化、超时与断线清理    |
 | src/agents/codex-interaction.ts             | 审批与提问请求的校验、交互内容转换和文件变更格式             |
-| src/core/relay.ts                           | 平台无关的命令处理、会话选择和串行任务执行                   |
+| src/core/relay.ts                           | 平台无关的命令处理、会话选择和并发任务执行                   |
 | src/core/state.ts                           | 业务状态与事务；入站去重、任务、审批、恢复和回复队列         |
 | src/core/schema.ts                          | 业务状态结构、引用完整性与单任务约束，供存储边界校验         |
 | src/core/menus.ts                           | 权限、模型与推理选择规则、菜单阶段流转及回复文案             |
@@ -203,15 +203,15 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 /status 的模型信息通过独立连接读取，按模型名称与推理档位展示，如 GPT-6-Sol · xhigh。未手动选择时通过 config/read 读取目录有效配置，缺省值由 model/list 补齐；完整模型目录也用于解析已隐藏模型的展示名称。任务快照的模型或档位不同时分别显示。查询失败时仅回退到已保存的完整选择，否则明确显示无法读取，不使用 Default 占位。查询不恢复会话或启动轮次，关停时取消并丢弃迟到结果。
 
-未指定目录的会话默认使用 Tellrun 服务启动目录，新建聊天时规范化并保存真实路径，所有命令直接使用已保存的路径；systemd 和 launchd 服务的启动目录均为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时不能切换目录、新建或切换会话，目录变化会开始新会话。
+未指定目录的会话默认使用 Tellrun 服务启动目录，新建聊天时规范化并保存真实路径，所有命令直接使用已保存的路径；systemd 和 launchd 服务的启动目录均为用户主目录。`/cwd 绝对路径` 可选，用于切换目录。任务保存提交时的 cwd 和 sessionId；执行前再次检查目录。任务未结束时也可切换目录、新建或切换会话，目录变化会开始新会话。聊天与任务保存提交时的 sessionGeneration，尚未取得原生会话 ID 时按该版本区分空选择，防止往返目录后的迟到回调覆盖新选择；旧状态缺省为 0。
 
 `/cwd` 无参数时通过独立连接查询 `thread/list`，不传 cwd 过滤，按 updated_at 降序每批读取 100 个未归档、非子 Agent 会话，提取绝对路径并跨页去重，总查询时限沿用 45 秒。当前目录置顶并以 ✓ 标记，其余保留最近使用顺序；没有历史记录时仍可选择当前目录。目录快照只保存在有效期 10 分钟的菜单内，每页显示 10 个，翻页不再查询 Codex。`/cwd` 与 `/list` 共用菜单创建、翻页校验、消息更新和 Telegram 按钮生成逻辑；会话保留接口游标，目录按快照切页。目录按钮使用菜单 ID 和全局选项索引，避免长路径超过回调长度限制；核心层检查原消息、有效期与当前页，再与手动路径共用 realpath 和目录校验。切换不同目录时清空会话，选择当前目录保留会话；查询失败或路径无效时保留原选择。重新打开同类列表、会话或目录切换、过期和重启均会清理旧按钮，迟到查询与发送回执不能恢复旧菜单。
 
-`/new [名称]` 通过 `thread/start` 创建非临时会话，再调用 `thread/name/set` 保存名称；省略名称时使用 `New session`。显式命名使空会话落盘，首次发言前即可列出和恢复。会话展示优先使用非空且不为 `New session` 的 `name`，否则使用 Codex 返回的 `preview`；预览为空时保留占位名称，两者都为空时显示 `Untitled session`。此规则同时用于列表和切换确认，兼容已有占位名称，无需修改历史数据。`/list` 按精确 cwd 查询 `thread/list`，按 updated_at 降序每页读取 10 个会话，过滤或去重后不足时继续读取以补齐一页，并返回下一页游标；包含各模型提供方及 CLI、VSCode、exec、app-server、unknown 来源，排除归档和子 Agent 会话。消息显示当前页码、会话按钮和 Previous / Next 翻页按钮，当前会话以 ✓ 标记。分页菜单仅保存当前页和已访问页的游标，通过现有 outbox 原地更新；翻页校验聊天、菜单 ID、原消息、相邻页码和 10 分钟有效期，加载期间拒绝重复请求，失败保留原页。重新打开列表、创建或切换会话、切换目录和重启使旧分页菜单失效，迟到查询不能覆盖新菜单。会话按钮使用完整会话 ID 并转换为独立的会话选择事件。核心层检查当前任务与会话变更状态，再通过 `thread/read` 校验完整 ID、目录以及 idle 或 notLoaded 状态，仅更新当前选择，下一条任务才恢复会话。任务运行中仍可查看和翻页；列表与切换不调用 turn/start 或 turn/interrupt。[Codex 会话接口](https://learn.chatgpt.com/docs/app-server)
+`/new [名称]` 通过 `thread/start` 创建非临时会话，再调用 `thread/name/set` 保存名称；省略名称时使用 `New session`。显式命名使空会话落盘，首次发言前即可列出和恢复。会话展示优先使用非空且不为 `New session` 的 `name`，否则使用 Codex 返回的 `preview`；预览为空时保留占位名称，两者都为空时显示 `Untitled session`。此规则同时用于列表和切换确认，兼容已有占位名称，无需修改历史数据。`/list` 按精确 cwd 查询 `thread/list`，按 updated_at 降序每页读取 10 个会话，过滤或去重后不足时继续读取以补齐一页，并返回下一页游标；包含各模型提供方及 CLI、VSCode、exec、app-server、unknown 来源，排除归档和子 Agent 会话。消息显示当前页码、会话按钮和 Previous / Next 翻页按钮，当前会话以 ✓ 标记。分页菜单仅保存当前页和已访问页的游标，通过现有 outbox 原地更新；翻页校验聊天、菜单 ID、原消息、相邻页码和 10 分钟有效期，加载期间拒绝重复请求，失败保留原页。重新打开列表、创建或切换会话、切换目录和重启使旧分页菜单失效，迟到查询不能覆盖新菜单。会话按钮使用完整会话 ID 并转换为独立的会话选择事件。核心层检查会话变更状态，再通过 `thread/read` 校验完整 ID、目录以及 idle、notLoaded 或 active 状态，仅更新当前选择，下一条任务才恢复会话。任务运行中可查看、翻页和切换；列表与切换不调用 turn/start 或 turn/interrupt。[Codex 会话接口](https://learn.chatgpt.com/docs/app-server)
 
 会话与状态查询在入站去重落盘后立即使用独立连接执行，不相互排队；现有模型查询循环统一接收结果、传播异常并等待退出。新建或切换等待期间暂缓普通任务、目录变更和其他会话命令，避免消息进入旧会话；状态和停止控制仍可处理。成功后会话 ID 与回复原子保存，保留当前模型和权限；失败保留旧会话。单次会话操作总时限为 45 秒，不自动重试；关停时断开连接并丢弃迟到结果，所有查询结束后才关闭存储，不中断 Codex 任务。创建结果不确定时提示先检查 `/list`。
 
-当前全局最多一个未结束任务，由单实例写入与状态校验约束。同一聊天的新文本直接补充到当前任务：queued 时合并首条输入；dispatching 时持久化保存；running 时通过独立输入循环调用 turn/steer，每 50 毫秒检查一次。补充输入按接收顺序提交，只等待各条 RPC 确认，不等待当前任务结束，也不阻塞入站控制命令。不同聊天和正在停止的任务不能追加输入。独立任务队列留到后续；未来开启并行时，必须增加按可写工作区的互斥。
+同一原生会话最多一个未结束任务，由单实例写入与状态校验约束。不同会话立即并发执行，包括相同目录下的不同会话。执行层按任务 ID 管理 Promise 与附件取消信号，Codex 适配层按任务 ID 管理独立连接、输入与交互入口。所选会话的新文本只补充到该会话的任务：queued 时合并首条输入；dispatching 时持久化保存；running 时通过独立输入循环调用 turn/steer，每 50 毫秒检查一次。补充输入按接收顺序提交，只等待各条 RPC 确认，不等待当前任务结束，也不阻塞入站控制命令。不同聊天和正在停止的任务不能追加输入。所选会话没有任务时立即创建新任务，不等待其他会话；目录不作为并发锁。独立任务队列留到后续。
 
 图片和文件使用同一输入流程。Telegram 连接器只提取最大尺寸照片或 document 的文件 ID、原始名称、声明大小和随机附件 ID，与 caption 一起持久化；不在入站处理中下载。附件说明不作为审批或结构化问题的答案。queued 阶段合并附件与文字，preparing 或 dispatching 阶段的新消息保存到 inputs，running 阶段按接收顺序准备并提交补充输入。
 
@@ -250,7 +250,7 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 `/cron` 的命令处理与计划变更复用入站事务和去重标识。业务状态包含 `crons` 和单调递增的 `nextCronId`，新状态由核心层初始化为空数组和 1。每个计划保存聊天归属、表达式、服务器时区、任务描述、目录、模型与权限选择、启用状态、`nextRunAt` 和可空的 `pendingAt`。任务保存可空的 `cron: { id, scheduledAt }` 来源快照；允许对应计划已经删除，以便现有执行仍可恢复。
 
-Croner 只用于解析与计算：使用 `mode: "5-part"`、保存的 `timezone` 和 `nextRun()`，不注册执行回调。独立调度循环每秒检查一次；没有到期或可领取的等待项时不写状态。到期时将 `nextRunAt` 推进到当前时间之后，忙碌时仅在 `pendingAt` 为空时记录首次等待时间，不累积每次触发。空闲后按等待时间和 ID 选择计划，将清空等待项、创建任务及发送提示合并为一次状态写入，保持全局最多一个未结束任务。[Croner 基础用法](https://croner.56k.guru/usage/basics/)、[Croner 配置](https://croner.56k.guru/usage/configuration/)
+Croner 只用于解析与计算：使用 `mode: "5-part"`、保存的 `timezone` 和 `nextRun()`，不注册执行回调。独立调度循环每秒检查一次；没有到期或可领取的等待项时不写状态。到期时将 `nextRunAt` 推进到当前时间之后，忙碌时仅在 `pendingAt` 为空时记录首次等待时间，不累积每次触发。空闲后按等待时间和 ID 选择计划，将清空等待项、创建任务及发送提示合并为一次状态写入，定时计划继续仅在没有活动任务时串行领取，手动任务不受已启动定时任务阻塞。[Croner 基础用法](https://croner.56k.guru/usage/basics/)、[Croner 配置](https://croner.56k.guru/usage/configuration/)
 
 定时任务复用执行 Worker、审批和 outbox，每次新建 Codex 会话；`recordSession` 只更新该执行快照，不改写聊天会话。创建时保存模型和权限选择，空模型项保持沿用 Codex 配置的语义。最终结果标注 Cron ID；删除计划后结果仍能投递。
 
@@ -339,9 +339,9 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 普通路径为 queued → dispatching → running → completed / failed，带附件时在 queued 与 dispatching 之间增加 preparing。/status 在 preparing 阶段显示正在下载附件；/interrupt 可直接取消尚未派发的任务。等待交互时任务仍保存为 running，由关联交互的 kind、blocking 和状态推导等待语义，/status 展示待审批或待回答。存在阻塞交互时暂停输入提示，只有阻塞审批暂停预览；选择题通过独立消息等待用户选择，无论是否标记为阻塞，Codex 已产生的后续输出都继续显示，等待回答和提交答案不拦住预览。Codex 自身是否等待答案仍遵循原生协议。终态记录不可被迟到事件覆盖。
 
-`/stop` 固定命令收到时的目标会话：当前聊天存在活动任务时使用任务的 cwd 和 sessionId，否则使用当前选择的会话。通过独立连接调用 `thread/backgroundTerminals/clean`，只清理后台终端，不调用 thread/resume 或 turn/interrupt；无会话时明确提示，RPC 失败不报告成功。`/interrupt` 先保存任务的 cancelling 状态并作废待处理按钮，再通过 `turn/interrupt` 中断活动 turn；收到实际终态后更新界面，确认中断记为 cancelled，下一条消息沿用当前会话开始新轮次。空闲时仅提示没有运行中的任务。5 秒内无法确认中断时，关闭本次连接并记录 interrupted，提示核对本机状态；保留新输入入口，后续仍通过 thread/read 检查会话是否空闲。两种控制均不清空定时等待触发。[后台终端清理](https://learn.chatgpt.com/docs/app-server#clean-background-terminals)、[中断轮次](https://learn.chatgpt.com/docs/app-server#interrupt-a-turn)
+`/stop` 固定命令收到时选中会话的 cwd 和 sessionId。通过独立连接调用 `thread/backgroundTerminals/clean`，只清理后台终端，不调用 thread/resume 或 turn/interrupt；无会话时明确提示，RPC 失败不报告成功。`/interrupt` 只操作当前选中会话的任务，先保存其 cancelling 状态并作废该任务的待处理按钮，再通过 `turn/interrupt` 中断活动 turn；收到实际终态后更新界面，确认中断记为 cancelled，下一条消息沿用当前会话开始新轮次。空闲时仅提示没有运行中的任务。5 秒内无法确认中断时，关闭本次连接并记录 interrupted，提示核对本机状态；保留新输入入口，后续仍通过 thread/read 检查会话是否空闲。两种控制均不清空定时等待触发。[后台终端清理](https://learn.chatgpt.com/docs/app-server#clean-background-terminals)、[中断轮次](https://learn.chatgpt.com/docs/app-server#interrupt-a-turn)
 
-正常关停先停止入站轮询，断开 Agent 连接后释放状态锁，Codex 后台与任务继续运行。重启后 queued 记录保留；已有 thread ID 与 turn ID 的任务重新连接并恢复跟踪，cancelling 继续提交原轮次的中断请求。尚未确认轮次 ID 的 dispatching、running 和 cancelling 进入 interrupted，提示核对本机状态，不猜测或重跑。旧交互失效，服务端重新发出的请求生成新按钮；在途补充输入标记提交不确定，不自动重发，尚未发送的输入待恢复连接后继续发送。
+正常关停先停止入站轮询，断开 Agent 连接后释放状态锁，Codex 后台与任务继续运行。重启后 queued 记录保留；所有已有 thread ID 与 turn ID 的任务分别重新连接并恢复跟踪，cancelling 继续提交原轮次的中断请求。尚未确认轮次 ID 的 dispatching、running 和 cancelling 进入 interrupted，提示核对本机状态，不猜测或重跑。旧交互失效，服务端重新发出的请求生成新按钮；在途补充输入标记提交不确定，不自动重发，尚未发送的输入待恢复连接后继续发送。
 
 恢复上下文与活动任务使用保存的 Agent 会话和轮次 ID；原来的 RPC 等待对象不能跨进程恢复，客户端重新订阅与读取快照。无法确认原轮次时提示本机检查，不创建替代轮次。
 
@@ -355,7 +355,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 delivery 通过 claimReply 从 outbox 领取已持久化的回复，控制回复、普通文字与附件各有一个串行发送循环，按回复 ID 保留在途关联。审批、菜单和命令回复不等待普通结果、预览或上传完成，各通道遵守同一账号的限流。同一回复的分段保存前段依赖，同一消息的编辑也按入队顺序执行。普通结果按队列顺序发送，正文完成后才上传附件，多张附件保持顺序。即使发送期间交互关闭，也保留关联直到迟到回执触发按钮清理。入站、Codex 事件读取与输入提示独立运行。
 
-实时预览使用 sendRichMessage 创建普通富文本消息，再通过 editMessageText 原地更新，最多每秒一次，无变化时不请求。该方式保留输入入口，避免 Telegram 原生生成草稿在部分客户端限制发送消息和命令的问题；不再维护原生草稿接口、续期或切换逻辑。[Telegram 官方问题记录](https://bugs.telegram.org/c/62189/1)、[富文本消息](https://core.telegram.org/bots/api#sendrichmessage)、[消息编辑](https://core.telegram.org/bots/api#editmessagetext)
+实时预览按任务 ID 分别保存，Telegram 发送缓存同样按任务区分，按最久未发送时间轮流更新，所有任务共用每秒一次的更新频率；同名分段不会跨任务复用回执。预览、结果、交互和附件附带任务与会话标识。实时预览使用 sendRichMessage 创建普通富文本消息，再通过 editMessageText 原地更新，最多每秒一次，无变化时不请求。该方式保留输入入口，避免 Telegram 原生生成草稿在部分客户端限制发送消息和命令的问题；不再维护原生草稿接口、续期或切换逻辑。[Telegram 官方问题记录](https://bugs.telegram.org/c/62189/1)、[富文本消息](https://core.telegram.org/bots/api#sendrichmessage)、[消息编辑](https://core.telegram.org/bots/api#editmessagetext)
 
 预览文本只保留内存中的最新分段快照，首次发送成功后在任务的 previewMessages 中保存 segmentId 与 messageId，重连沿用各自的消息。分段标识来自 Codex 用户消息边界，连接器不根据 Telegram 输入或 agentMessage 数量自行切段。旧版 previewMessageId 由恢复后的第一段沿用。最终结果在 outbox 保存 taskId 与 segmentId：各分段第一条编辑对应预览，超长的剩余部分及附件按序新建；预览发送期间任务结束时，迟到回执只接回匹配分段的第一条，不能覆盖其他分段。预览被删除或无法编辑时，对应分段的最终结果另发新消息；未修改错误视为已送达。首次发送已成功但回执丢失仍可能出现重复消息，不据此重跑任务。
 
@@ -400,7 +400,7 @@ Codex 适配器在前台直接继承当前进程环境，保留用户临时 expo
 | macOS 服务定义               | `~/.tellrun/tellrun.plist`；启用登录自启时链接到 `~/Library/LaunchAgents/io.github.chaoyue1998.tellrun.plist`          |
 | macOS 服务诊断               | `~/.tellrun/tellrun.log`；`tellrun logs` 显示最近 100 行，`-f` 持续跟随                                                |
 | 日志级别                     | 当前固定为 info                                                                                                        |
-| 队列与交互设置               | 当前串行执行，审批持续等待，问题最多等待 10 分钟；队列上限和工具进度设置仍未实现，不预建配置项                         |
+| 队列与交互设置               | 按会话并发执行，审批持续等待，问题最多等待 10 分钟；队列上限和工具进度设置仍未实现，不预建配置项                         |
 
 `~/.tellrun/` 按当前运行用户的主目录解析为绝对路径；CLI 与后台服务使用同一用户和同一目录，不受执行命令时的 cwd 影响。状态、锁和配置不得写到全局 npm 包目录，避免升级覆盖、权限问题和从不同 cwd 启动产生多份数据。
 

@@ -63,7 +63,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
 | `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
 | `/last [count]`       | Send recent finished turns with full questions and replies (default: 1)                             |
-| `/interrupt`          | Interrupt the current task; send a new message after it ends                                 |
+| `/interrupt`          | Interrupt the task in the selected session                                 |
 | `/stop`               | Stop all background terminals in the current Codex session                                   |
 | `/model`              | Show the current selection and choose model and reasoning effort                             |
 | `/permissions`        | Choose the permission mode for subsequent tasks                                              |
@@ -74,13 +74,14 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 
 ### Session management
 
-Sessions are stored by Codex. Creating or switching sessions preserves your current model and permission settings.
+Sessions are stored by Codex. Creating or switching sessions preserves your current model and permission settings. Use `/new`, `/list`, `/cwd`, and their buttons while tasks run. After switching, sending a message starts a task immediately in the selected session, even in the same directory. Messages in a session with an active task add to that task.
 
-- **Choose a directory**: `/cwd` collects and deduplicates project directories from non-archived Codex sessions, excluding subagents. The current directory appears first with ✓; others follow most recently used order. Browse 10 per page with Previous / Next buttons, then tap to switch. Choosing a different directory starts a new conversation; choosing the current directory keeps the session. Use `/cwd /absolute/path` to enter a new directory. Lists expire after 10 minutes. You can browse while a task is running, but switching is blocked. Missing or inaccessible directories report an error when selected.
+- **Choose a directory**: `/cwd` collects and deduplicates project directories from non-archived Codex sessions, excluding subagents. The current directory appears first with ✓; others follow most recently used order. Browse 10 per page with Previous / Next buttons, then tap to switch. Choosing a different directory starts a new conversation; choosing the current directory keeps the session. Use `/cwd /absolute/path` to enter a new directory. Lists expire after 10 minutes. You can browse, turn pages, and switch while tasks are running. Missing or inaccessible directories report an error when selected.
 - **View and switch**: `/list` shows non-archived sessions whose working directory exactly matches the current directory, ordered by most recently updated, 10 per page. Use Previous / Next to update the same message and view the page number. Tap a session to switch; ✓ marks the current session. The list includes sessions created by Tellrun and other Codex clients, excluding subagent sessions. Lists expire after 10 minutes; use `/list` again to refresh.
 - **Create a session**: `/new [name]` creates and switches to a new session. The name defaults to `New session` when omitted; empty sessions are saved even before you send a message.
 - **Confirm the change**: after creating or switching sessions, wait for confirmation before sending a task. If you cannot confirm that a session was created, check `/list` before deciding whether to retry.
-- **Control tasks**: `/stop` stops all background terminals in the current session; `/interrupt` interrupts the current task. Once the interruption is confirmed, send a new message to continue in the same session.
+- **Control tasks**: `/stop` cleans up background terminals in the selected session; `/interrupt` interrupts its task while other sessions continue. `/status` also lists other active tasks; `/last` reads the selected session.
+- **Concurrent output**: each task has its own progress messages, updated in turn. Results, approvals, and attachments identify their task and session. Switching preserves each running task’s directory, model, permissions, and output destination.
 
 ### Scheduled tasks
 

@@ -62,6 +62,8 @@ export const stateSchema = z
         userId: z.string(),
         cwd: z.string().min(1),
         sessionId: z.string().nullable(),
+        /** 尚未取得原生会话 ID 时，用选择版本隔离切换前后的新任务；缺省兼容旧状态。 */
+        sessionGeneration: nonnegativeInteger.optional(),
         /** 仅保存当前页选项与已访问页的游标；缺省兼容尚未打开分页的状态。 */
         sessionMenu: listMenuSchema
           .extend({
@@ -141,6 +143,8 @@ export const stateSchema = z
         cron: z.strictObject({ id, scheduledAt: nonnegativeInteger }).nullable(),
         cwd: z.string(),
         sessionId: z.string().nullable(),
+        /** 固定提交时的选择版本，防止迟到会话回调覆盖切换后的选择。 */
+        sessionGeneration: nonnegativeInteger.optional(),
         /** 派发前显式保存空值，取得轮次 ID 后用于重启恢复。 */
         runId: z.string().min(1).nullable(),
         /** 旧版整轮预览恢复时由首条输出沿用。 */
@@ -244,6 +248,17 @@ export const stateSchema = z
   })
   .refine((state) => {
     const channels = new Set(state.channels.map((row) => row.id));
+    const active = state.tasks.filter((row) => activeTaskStatuses.has(row.status));
+    /** 原生会话全局唯一占用；未绑定的手动任务按聊天、目录和选择版本区分。 */
+    const sessionKeys = active.map((row) =>
+      JSON.stringify(
+        row.sessionId !== null
+          ? ["session", row.sessionId]
+          : row.cron
+            ? ["cron", row.id]
+            : ["selection", row.channelId, row.cwd, row.sessionGeneration ?? 0],
+      ),
+    );
     return (
       [state.channels, state.tasks, state.outbox, state.crons].every(
         (rows) => new Set(rows.map((row) => row.id)).size === rows.length,
@@ -275,9 +290,9 @@ export const stateSchema = z
         (row) =>
           !row.interactionId || state.interactions.some((item) => item.id === row.interactionId),
       ) &&
-      state.tasks.filter((row) => activeTaskStatuses.has(row.status)).length <= 1
+      new Set(sessionKeys).size === active.length
     );
-  }, "Invalid state IDs, references, or active task count.");
+  }, "Invalid state IDs, references, or duplicate active sessions.");
 
 /** 核心层定义业务状态结构，持久化边界复用同一校验规则。 */
 export type State = z.infer<typeof stateSchema>;

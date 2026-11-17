@@ -12,6 +12,22 @@ import type {
   InteractionAnswer,
 } from "./types.js";
 
+/** 已绑定会话按原生 ID 匹配；空选择按版本匹配，定时任务不占用手动空会话。 */
+function matchesSession(task: State["tasks"][number], channel: State["channels"][number]) {
+  return channel.sessionId !== null
+    ? task.sessionId === channel.sessionId
+    : !task.cron &&
+        task.sessionId === null &&
+        task.channelId === channel.id &&
+        task.cwd === channel.cwd &&
+        (task.sessionGeneration ?? 0) === (channel.sessionGeneration ?? 0);
+}
+
+/** 预览、结果和交互共用来源标识，多个会话交替输出时仍能辨认所属任务。 */
+function taskHeading(task: State["tasks"][number]) {
+  return `Task #${task.id}${task.cron ? ` · Cron #${task.cron.id}` : ""}\nSession: ${task.sessionId ?? "Not started"}\nDirectory: ${task.cwd}`;
+}
+
 /** 管理业务状态及事务；初始快照、保存方式和默认目录由组装入口提供。 */
 export function createState(options: {
   initialState: State | undefined;
@@ -32,7 +48,7 @@ export function createState(options: {
   if (!options.initialState) options.save(state);
   let updating = false;
   /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
-  let draft: { taskId: number; messages: AgentMessage[] } | undefined;
+  const drafts = new Map<number, AgentMessage[]>();
   /** 控制回复、普通文字与附件各有一个在途请求；交互关闭后保留迟到回执的关联。 */
   const delivering = new Map<number, State["outbox"][number]>();
 
@@ -114,6 +130,8 @@ export function createState(options: {
     > & { attachments?: AgentAttachment[] } = {},
   ) {
     if (text === undefined) return;
+    /** 结果分段和附件共用同一来源，每条消息都能独立辨认任务。 */
+    const task = state.tasks.find((item) => item.id === delivery.taskId);
     const parts =
       delivery.messageId && !delivery.taskId
         ? [text]
@@ -157,10 +175,11 @@ export function createState(options: {
         id: ++replyId,
         channelId,
         priority,
-        text:
+        text: `${task ? `${taskHeading(task)}\n\n` : ""}${
           parts.length > 1
             ? `(${index + 1}/${parts.length})\n${delivery.markdown ? "\n" : ""}${part}`
-            : part,
+            : part
+        }`,
         attempts: 0,
         retryAt: Date.now(),
         ...delivery,
@@ -177,19 +196,46 @@ export function createState(options: {
       });
     }
     /** 附件与正文在同一状态事务中落盘，每个附件拥有独立发送回执。 */
-    for (const attachment of attachments)
+    for (const attachment of attachments) {
       state.outbox.push({
         afterId: replyId,
         id: ++replyId,
         channelId,
-        text: "",
+        text: task ? taskHeading(task) : "",
+        ...(task ? { taskId: task.id } : {}),
         attachment,
         attempts: 0,
         retryAt: Date.now(),
       });
+    }
   }
 
-  /** 手动和定时输入共用任务快照，始终只允许一个未结束的编码任务。 */
+  /** 返回各任务的独立快照，限定来源时不能暴露其他账号的活动信息。 */
+  function activeTasks(source?: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+    return state.tasks
+      .filter(
+        (task) =>
+          activeTaskStatuses.has(task.status) &&
+          (!source ||
+            state.channels.some(
+              (channel) =>
+                channel.id === task.channelId &&
+                channel.platform === source.platform &&
+                channel.accountId === source.accountId &&
+                channel.userId === source.userId,
+            )),
+      )
+      .map((task) =>
+        structuredClone({
+          ...task,
+          interactions: state.interactions.filter(
+            (item) => item.taskId === task.id && item.status !== "closed",
+          ),
+        }),
+      );
+  }
+
+  /** 手动任务按会话互斥，不同会话可并发；定时任务始终创建独立会话。 */
   function createTask(
     channel: State["channels"][number],
     prompt: string,
@@ -197,14 +243,15 @@ export function createState(options: {
     cron: State["tasks"][number]["cron"] = null,
   ) {
     return update(() => {
-      if (state.tasks.some((task) => activeTaskStatuses.has(task.status)))
-        throw new Error("A task is already running.");
+      if (!cron && activeTasks().some((task) => matchesSession(task, channel)))
+        throw new Error("A task is already running in this session.");
       const task: State["tasks"][number] = {
         id: state.tasks.reduce((max, item) => Math.max(max, item.id), 0) + 1,
         channelId: channel.id,
         cron,
         cwd: channel.cwd,
         sessionId: channel.sessionId,
+        sessionGeneration: channel.sessionGeneration ?? 0,
         runId: null,
         prompt,
         attachments,
@@ -301,7 +348,7 @@ export function createState(options: {
       for (const [index, message] of messages.entries())
         enqueueReply(
           task.channelId,
-          `${task.cron ? `Cron #${task.cron.id}\n` : ""}${
+          `${
             result.status !== "completed" && index === messages.length - 1
               ? `Task #${id} ${
                   {
@@ -332,7 +379,7 @@ export function createState(options: {
         input.status = "failed";
       }
     });
-    if (draft?.taskId === id) draft = undefined;
+    drafts.delete(id);
   }
 
   /** 先使交互失效，再由核心层请求中断。 */
@@ -430,6 +477,13 @@ export function createState(options: {
           enqueueReply(channelId, text, delivery);
       });
     },
+    /** 运行时通知附带任务来源，查询最新绑定以免使用派发前的空会话。 */
+    replyTask(id: number, text: string) {
+      update(() => {
+        const task = state.tasks.find((item) => item.id === id);
+        if (task) enqueueReply(task.channelId, `${taskHeading(task)}\n\n${text}`);
+      });
+    },
     /** 只回收指定来源已确认的事件；确认规则由连接器提供，不解释事件编号。 */
     confirmUpdates(
       source: Pick<ChannelIdentity, "platform" | "accountId">,
@@ -453,6 +507,8 @@ export function createState(options: {
       update(() => {
         const channel = state.channels.find((channel) => channel.id === channelId);
         if (channel) {
+          if (cwd !== channel.cwd || sessionId !== channel.sessionId)
+            channel.sessionGeneration = (channel.sessionGeneration ?? 0) + 1;
           closeMenu(channelId, "permissionMenu");
           closeMenu(channelId, "modelMenu");
           closeMenu(channelId, "sessionMenu");
@@ -470,67 +526,45 @@ export function createState(options: {
     },
     ...menus,
     ...crons,
-    /** 返回任务快照；连接器查询时限定来源，避免向其他账号显示活动状态。 */
-    activeTask(source?: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-      const task = state.tasks.find(
-        (task) =>
-          activeTaskStatuses.has(task.status) &&
-          (!source ||
-            state.channels.some(
-              (channel) =>
-                channel.id === task.channelId &&
-                channel.platform === source.platform &&
-                channel.accountId === source.accountId &&
-                channel.userId === source.userId,
-            )),
-      );
-      return task
-        ? structuredClone({
-            ...task,
-            interactions: state.interactions.filter(
-              (item) => item.taskId === task.id && item.status !== "closed",
-            ),
-          })
-        : undefined;
+    activeTasks,
+    /** 普通输入和控制命令固定当前选择，不能误操作同一聊天的其他任务。 */
+    sessionTask(channelId: number) {
+      const channel = state.channels.find((item) => item.id === channelId);
+      return channel && activeTasks().find((task) => matchesSession(task, channel));
     },
     /** 内存保留 Agent 分段的最新正文，收到追加输入本身不改变消息边界。 */
     setDraft(id: number, messages: AgentMessage[]) {
       if (state.tasks.some((task) => task.id === id && task.status === "running"))
-        draft = { taskId: id, messages };
+        drafts.set(id, messages);
     },
     /** 仅向当前机器人与授权用户返回执行中的预览，停止后不再刷新。 */
-    pendingDraft(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-      if (!draft?.messages.length) return;
-      /** 选择题独立等待答案，不屏蔽 Codex 已产生的后续输出。 */
-      if (
-        state.interactions.some(
-          (item) =>
-            item.taskId === draft?.taskId &&
-            item.kind === "approval" &&
-            item.blocking &&
-            item.status !== "closed",
+    pendingDrafts(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
+      return activeTasks(source).flatMap((task) => {
+        const messages = drafts.get(task.id);
+        if (task.status !== "running" || !messages?.length) return [];
+        /** 选择题独立等待答案，不屏蔽 Codex 已产生的后续输出。 */
+        if (
+          task.interactions.some(
+            (item) => item.kind === "approval" && item.blocking && item.status !== "closed",
+          )
         )
-      )
-        return;
-      const task = state.tasks.find(
-        (task) => task.id === draft?.taskId && task.status === "running",
-      );
-      const channel = state.channels.find((channel) => channel.id === task?.channelId);
-      if (
-        channel?.platform === source.platform &&
-        channel.accountId === source.accountId &&
-        channel.userId === source.userId
-      )
-        return {
-          ...draft,
-          chatId: channel.chatId,
-          messages: draft.messages.map((message, index) => ({
-            ...message,
-            messageId:
-              task?.previewMessages?.find((preview) => preview.segmentId === message.id)
-                ?.messageId ?? (index === 0 ? task?.previewMessageId : undefined),
-          })),
-        };
+          return [];
+        const channel = state.channels.find((channel) => channel.id === task.channelId);
+        if (!channel) return [];
+        return [
+          {
+            taskId: task.id,
+            chatId: channel.chatId,
+            messages: messages.map((message, index) => ({
+              ...message,
+              text: message.text.trim() ? `${taskHeading(task)}\n\n${message.text}` : "",
+              messageId:
+                task.previewMessages?.find((preview) => preview.segmentId === message.id)
+                  ?.messageId ?? (index === 0 ? task.previewMessageId : undefined),
+            })),
+          },
+        ];
+      });
     },
     /** 回执按 Agent 分段关联；慢发送不能把新输入对应的结果接到旧消息上。 */
     recordPreview(id: number, messageId: number, segmentId?: string) {
@@ -597,18 +631,24 @@ export function createState(options: {
       });
     },
     /** 领取新任务或已保存轮次；恢复只连接后台，不能重发原始输入。 */
-    claimTask(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-      const index = state.tasks.findIndex((task) => activeTaskStatuses.has(task.status));
+    claimTask(
+      source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">,
+      claimedIds: ReadonlySet<number>,
+    ) {
+      const index = state.tasks.findIndex(
+        (task) =>
+          activeTaskStatuses.has(task.status) &&
+          !claimedIds.has(task.id) &&
+          state.channels.some(
+            (channel) =>
+              channel.id === task.channelId &&
+              channel.platform === source.platform &&
+              channel.accountId === source.accountId &&
+              channel.userId === source.userId,
+          ),
+      );
       const task = state.tasks[index];
-      const channel = state.channels.find((channel) => channel.id === task?.channelId);
-      if (
-        !task ||
-        !channel ||
-        channel.platform !== source.platform ||
-        channel.accountId !== source.accountId ||
-        channel.userId !== source.userId
-      )
-        return;
+      if (!task) return;
       return update(() => {
         const claimed = {
           ...task,
@@ -633,16 +673,16 @@ export function createState(options: {
         return true;
       });
     },
-    /** 新建会话后立即保存关联；定时任务只更新执行快照，保留手动聊天的上下文。 */
+    /** 记录任务会话；仅同步仍指向该任务的手动选择，迟到回调不覆盖新选择。 */
     recordSession(id: number, sessionId: string) {
       update(() => {
         const task = state.tasks.find(
           (task) => task.id === id && activeTaskStatuses.has(task.status),
         );
         if (!task) return;
-        task.sessionId = sessionId;
         const channel = state.channels.find((channel) => channel.id === task.channelId);
-        if (channel && !task.cron) channel.sessionId = sessionId;
+        if (channel && !task.cron && matchesSession(task, channel)) channel.sessionId = sessionId;
+        task.sessionId = sessionId;
       });
     },
     /** 轮次 ID 与执行状态一起落盘；迟到通知不能撤销停止请求。 */
@@ -674,14 +714,14 @@ export function createState(options: {
         if (request.kind === "approval") {
           enqueueReply(
             task.channelId,
-            `Task #${taskId} · Approval\n${request.text}\n\nChoose below.`,
+            `${taskHeading(task)}\n\nApproval\n${request.text}\n\nChoose below.`,
             { interactionId: request.id },
           );
         } else {
           for (const [index, question] of request.questions.entries())
             enqueueReply(
               task.channelId,
-              `Task #${taskId} · Question ${index + 1}/${request.questions.length}\n${question.header}\n${question.question}${question.options.map((option, i) => `\n\n${i + 1}. ${option.label}\n${option.description}`).join("")}\n\n${question.allowText ? "Pick an option or reply to this message." : "Pick an option or reply with its number or label."}\nAnswer all questions to submit.`,
+              `${taskHeading(task)}\n\nQuestion ${index + 1}/${request.questions.length}\n${question.header}\n${question.question}${question.options.map((option, i) => `\n\n${i + 1}. ${option.label}\n${option.description}`).join("")}\n\n${question.allowText ? "Pick an option or reply to this message." : "Pick an option or reply with its number or label."}\nAnswer all questions to submit.`,
               { interactionId: request.id, questionIndex: index },
             );
         }

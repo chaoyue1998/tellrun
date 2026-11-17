@@ -16,7 +16,7 @@ import type {
 } from "./types.js";
 import { listPageSize } from "./types.js";
 
-/** 接收消息只保存必要状态；任务执行独立串行运行，控制命令始终可用。 */
+/** 接收消息只保存必要状态；不同会话并发执行，控制命令始终可用。 */
 export function createRelayService(options: {
   state: CoreState;
   agent: Agent;
@@ -26,14 +26,14 @@ export function createRelayService(options: {
   restart: (() => void) | undefined;
 }) {
   let stopping = false;
-  /** 当前任务的附件准备可独立取消，不能阻塞停止指令或拖住服务退出。 */
-  let inputPreparation: AbortController | undefined;
+  /** 每项任务独立准备附件并等待结束，取消时只操作对应任务。 */
+  const runningTasks = new Map<number, { preparation: AbortController; promise: Promise<void> }>();
   /** 菜单和会话控制独立于任务，关停时取消请求并等待退出后再关闭存储。 */
   const modelLoading = new AbortController();
   /** 状态与会话请求立即执行；工作循环统一接收结果并等待退出。 */
   const controlQueries: Promise<void>[] = [];
   /** 会话变更确认前暂缓新任务，避免接口等待期间把消息发往旧会话。 */
-  let changingSession = false;
+  const changingSessions = new Set<number>();
   /** 状态查询与历史结果共用面向用户的状态名称。 */
   const statuses = {
     queued: "Queued",
@@ -86,21 +86,139 @@ export function createRelayService(options: {
       );
   }
 
+  /** 单项执行固定任务快照，输入、交互与附件控制都按任务隔离。 */
+  async function executeTask(
+    task: NonNullable<ReturnType<CoreState["claimTask"]>>,
+    preparing: AbortController,
+  ) {
+    try {
+      if (realpathSync(task.cwd) !== task.cwd || !statSync(task.cwd).isDirectory())
+        throw new Error("Directory changed.");
+    } catch {
+      options.state.finishTask(task.id, {
+        status: "failed",
+        text: "Directory missing, changed, or inaccessible. Task not started. Set /cwd and try again.",
+      });
+      return;
+    }
+    let attachments: AgentAttachment[] = [];
+    if (task.status === "preparing") {
+      try {
+        attachments = await options.prepareAttachments(task.attachments, preparing.signal);
+        if (stopping) return;
+        if (preparing.signal.aborted || !options.state.markDispatching(task.id)) return;
+      } catch (error) {
+        if (stopping) return;
+        options.state.finishTask(task.id, {
+          status: preparing.signal.aborted ? "cancelled" : "failed",
+          text: preparing.signal.aborted
+            ? "Stopped before starting."
+            : error instanceof AttachmentError
+              ? error.message
+              : "Cannot prepare attachments. Resend them to try again.",
+        });
+        return;
+      }
+    }
+    let finished = false;
+    const running = options.agent
+      .run({
+        taskId: task.id,
+        cwd: task.cwd,
+        prompt: task.prompt,
+        attachments,
+        sessionId: task.sessionId,
+        runId: task.runId,
+        permissionMode: task.permissionMode,
+        model: task.model,
+        reasoningEffort: task.reasoningEffort,
+        onSession: (id) => options.state.recordSession(task.id, id),
+        onStarted: (runId) => {
+          options.state.markRunning(task.id, runId);
+          if (
+            options.state.activeTasks().find((item) => item.id === task.id)?.status === "cancelling"
+          )
+            options.agent.interrupt(task.id);
+        },
+        onText: (messages) => options.state.setDraft(task.id, messages),
+        onNotice: (text) => options.state.replyTask(task.id, text),
+        onInteraction: (request) => options.state.addInteraction(task.id, request),
+        onInteractionClosed: (id, reason) => options.state.closeInteraction(id, reason),
+      })
+      .finally(() => {
+        finished = true;
+        preparing.abort();
+      });
+    /** 补充输入独立于入站处理和任务完成等待，慢 RPC 不阻塞 /status 与 /stop。 */
+    const steering = (async () => {
+      while (!finished && !stopping) {
+        const input = options.state.claimTaskInput(task.id);
+        if (!input) {
+          await setTimeout(50);
+          continue;
+        }
+        let error: string | undefined;
+        try {
+          const attachments = await options.prepareAttachments(input.attachments, preparing.signal);
+          if (finished || stopping) return;
+          if (!options.state.markTaskInputSending(task.id, input.index)) continue;
+          await options.agent.steer(task.id, input.text, attachments);
+        } catch (cause) {
+          if (finished || stopping) return;
+          error =
+            cause instanceof AttachmentError ||
+            (cause instanceof Error && cause.message.startsWith("Codex "))
+              ? cause.message
+              : "Submission unconfirmed. Not retried; check the session before resending.";
+        }
+        options.state.finishTaskInput(task.id, input.index, error);
+      }
+    })();
+    /** 交互提交独立于慢速补充 RPC；停止、服务端解决和用户选择之间至多提交一次。 */
+    const answering = (async () => {
+      while (!finished && !stopping) {
+        const interaction = options.state.claimInteraction(task.id);
+        if (interaction) {
+          const submitted = await options.agent.respond(
+            task.id,
+            interaction.id,
+            interaction.answer,
+          );
+          options.state.closeInteraction(
+            interaction.id,
+            submitted
+              ? "Submitted. Waiting for results."
+              : "Request closed or delivery unconfirmed. Check /status.",
+          );
+        }
+        await setTimeout(50);
+      }
+    })();
+    try {
+      const [result] = await Promise.all([running, steering, answering]);
+      if (result) options.state.finishTask(task.id, result);
+    } catch (error) {
+      options.agent.disconnect(task.id);
+      await Promise.allSettled([running, steering, answering]);
+      options.state.finishTask(task.id, {
+        status: "interrupted",
+        text: "Service error; shutting down. Check the directory and local processes before sending a new task.",
+      });
+      throw error;
+    } finally {
+      preparing.abort();
+    }
+  }
+
   return {
     /** 返回前保存消息和必要回复；重复事件直接忽略，不重新执行控制或任务。 */
     async handleMessage(message: IncomingMessage) {
       if (stopping) throw new Error("Service stopping. Message not accepted.");
       let controlQuery: (() => Promise<void>) | undefined;
+      let interruptedTask: number | undefined;
       const reply = options.state.accept(message, (channel) => {
-        const task = options.state.activeTask();
-        /** 所选会话与全局执行任务分开；尚无会话的定时任务不能匹配空选择。 */
-        const sessionTask =
-          task?.channelId === channel.id &&
-          task.cwd === channel.cwd &&
-          task.sessionId === channel.sessionId &&
-          (!task.cron || channel.sessionId !== null)
-            ? task
-            : undefined;
+        const tasks = options.state.activeTasks(message.channel);
+        const task = options.state.sessionTask(channel.id);
         if (message.content.type === "permissions" || message.content.type === "model")
           return options.state.chooseOption(channel.id, message.content);
         if (
@@ -111,7 +229,7 @@ export function createRelayService(options: {
           if (answer !== undefined || message.content.type === "interaction") return answer;
         }
         if (
-          changingSession &&
+          changingSessions.has(channel.id) &&
           (message.content.type === "text" ||
             message.content.type === "attachments" ||
             message.content.type === "session" ||
@@ -135,7 +253,6 @@ export function createRelayService(options: {
             message.content.name === "cwd" &&
             message.content.args)
         ) {
-          if (task) return "Wait for the task to finish, or use /interrupt first.";
           const { content } = message;
           if (content.type === "cwd") {
             const menu = channel.cwdMenu;
@@ -181,11 +298,10 @@ export function createRelayService(options: {
           message.content.type === "session" ||
           (message.content.type === "command" && message.content.name === "new")
         ) {
-          if (task) return "Wait for the task to finish, or use /interrupt first.";
           const { content } = message;
           const snapshot = structuredClone(channel);
           controlQuery = async () => {
-            changingSession = true;
+            changingSessions.add(channel.id);
             let session: AgentOption;
             try {
               session =
@@ -210,7 +326,7 @@ export function createRelayService(options: {
                 );
               return;
             } finally {
-              changingSession = false;
+              changingSessions.delete(channel.id);
             }
             /** 接口成功后才更新绑定；存储错误交给工作循环处理。 */
             if (!stopping)
@@ -227,7 +343,7 @@ export function createRelayService(options: {
           switch (message.content.name) {
             case "start":
             case "help":
-              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task.\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nWait for the task to finish before creating or switching sessions.";
+              return "Tellrun ready.\nSend text, photos, or files to Codex (up to 20 MB per attachment). Add a caption to describe your task. New messages add to the running task in the selected session.\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask Codex to upgrade Tellrun\nCreate or switch sessions at any time. Tasks in different sessions run concurrently.";
             case "cron":
               return options.state.handleCron(channel.id, message.content.args);
             case "model":
@@ -292,21 +408,59 @@ export function createRelayService(options: {
                 const upgradeHint = update?.available
                   ? `\n\nSend /update to ask ${options.agent.name} to upgrade Tellrun.`
                   : "";
-                /** Session 始终对应 /list 的选中项，其他会话任务单独标明归属。 */
-                const taskLabel = task && !sessionTask ? "Other task" : "Task";
-                const taskStatus = task
-                  ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}`
-                  : "idle";
+                /** 当前选择与其他运行任务分别展示，所有信息取自命令接收时的快照。 */
+                const otherTasks = tasks
+                  .filter((item) => item.id !== task?.id)
+                  .map((item) =>
+                    [
+                      `Other task: #${item.id} ${statuses[item.status]}${item.cron ? ` · Cron #${item.cron.id}` : ""}`,
+                      `Other task session: ${item.sessionId ?? "Not started"}`,
+                      `Other task directory: ${item.cwd}`,
+                      item.channelId !== snapshot.id ? "Other task is in another chat." : undefined,
+                      item.interactions.length
+                        ? `Other task pending: ${item.interactions.map((interaction) => (interaction.kind === "approval" ? "Approval" : "Question")).join(", ")}`
+                        : undefined,
+                    ]
+                      .filter((line) => line !== undefined)
+                      .join("\n"),
+                  )
+                  .join("\n\n");
+                /** 权限选择与任务快照沿用同一显示规则。 */
+                const formatPermissions = (mode: string | null) =>
+                  options.agent.permissionModes.find((option) => option.id === mode)?.label ??
+                  mode ??
+                  options.agent.permissionModes[0]?.label ??
+                  "Not set";
                 options.state.reply(
                   snapshot.id,
-                  `Service: connected\nTellrun: ${options.updates.version}${versionSuffix}\n${options.agent.name}: ${options.agent.version}${options.agent.unavailableReason ? `\n${options.agent.unavailableReason}` : ""}\nDirectory: ${snapshot.cwd}\nSession: ${snapshot.sessionId ?? "Not started"}\nModel: ${formatModel(model)}${showTaskModel ? `\n${taskLabel} model: ${formatModel(taskModel)}` : ""}\nPermissions: ${options.agent.permissionModes.find((mode) => mode.id === snapshot.permissionMode)?.label ?? snapshot.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}${task && task.permissionMode !== snapshot.permissionMode ? `\n${taskLabel} permissions: ${options.agent.permissionModes.find((mode) => mode.id === task.permissionMode)?.label ?? task.permissionMode ?? options.agent.permissionModes[0]?.label ?? "Not set"}` : ""}\nTask: ${sessionTask ? taskStatus : "idle"}${task && !sessionTask ? `\nOther task: ${taskStatus}\nOther task session: ${task.sessionId ?? "Not started"}\nOther task directory: ${task.cwd}${task.channelId !== snapshot.id ? "\nOther task is in another chat." : ""}` : ""}${task?.interactions.length ? `\n${taskLabel} pending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}` : ""}${upgradeHint}`,
+                  [
+                    "Service: connected",
+                    `Tellrun: ${options.updates.version}${versionSuffix}`,
+                    `${options.agent.name}: ${options.agent.version}`,
+                    options.agent.unavailableReason,
+                    `Directory: ${snapshot.cwd}`,
+                    `Session: ${snapshot.sessionId ?? "Not started"}`,
+                    `Model: ${formatModel(model)}`,
+                    showTaskModel ? `Task model: ${formatModel(taskModel)}` : undefined,
+                    `Permissions: ${formatPermissions(snapshot.permissionMode)}`,
+                    task && task.permissionMode !== snapshot.permissionMode
+                      ? `Task permissions: ${formatPermissions(task.permissionMode)}`
+                      : undefined,
+                    `Task: ${task ? `#${task.id} ${statuses[task.status]}${task.cron ? ` · Cron #${task.cron.id}` : ""}` : "idle"}`,
+                    task?.interactions.length
+                      ? `Task pending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}`
+                      : undefined,
+                    otherTasks ? `\n${otherTasks}` : undefined,
+                  ]
+                    .filter((line) => line !== undefined)
+                    .join("\n") + upgradeHint,
                 );
               };
               return;
             }
             case "update":
               if (message.content.args) return "Use /update without arguments.";
-              if (task) return "Wait for the current task to finish, then send /update.";
+              if (tasks.length) return "Wait for all tasks to finish, then send /update.";
               /** 复用普通任务的快照、去重、审批和恢复流程，不向执行中的任务追加升级指令。 */
               options.state.createTask(channel, options.updates.upgradePrompt());
               return `Tellrun update queued for ${options.agent.name}.`;
@@ -330,13 +484,17 @@ export function createRelayService(options: {
             }
             case "stop": {
               if (message.content.args) return "Use /stop without arguments.";
-              /** 固定命令收到时的目标；定时任务使用其独立会话，不能误停另一个聊天。 */
-              const { cwd, sessionId } = task?.channelId === channel.id ? task : channel;
+              /** 固定命令收到时的当前选择，不能误停其他会话的后台终端。 */
+              const { cwd, sessionId } = channel;
               if (!sessionId) return "No Codex session available yet.";
               controlQuery = async () => {
                 try {
                   await options.agent.stop(cwd, sessionId, modelLoading.signal);
-                  if (!stopping) options.state.reply(channel.id, "Background terminals stopped.");
+                  if (!stopping)
+                    options.state.reply(
+                      channel.id,
+                      `Session: ${sessionId}\nBackground terminals stopped.`,
+                    );
                 } catch {
                   if (!stopping)
                     options.state.reply(
@@ -349,8 +507,10 @@ export function createRelayService(options: {
             }
             case "interrupt":
               if (message.content.args) return "Use /interrupt without arguments.";
-              if (!task || task.channelId !== channel.id) return "No task running in this chat.";
+              if (!task || task.channelId !== channel.id)
+                return "No task running in the selected session.";
               options.state.cancelTask(task.id);
+              interruptedTask = task.id;
               return `Interrupt requested for task #${task.id}. You can send another message when it ends.`;
             case "last": {
               /** 数量只接受正整数；不传时保留最近一条的行为。 */
@@ -362,7 +522,7 @@ export function createRelayService(options: {
               )
                 return "Use /last [count], where count is a positive integer.";
               if (!channel.sessionId)
-                return `No session selected yet.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : " Choose one with /list or create one with /new."}`;
+                return `No session selected yet.${task ? `\nCurrent task #${task.id}: ${statuses[task.status]}. Use /status to check progress.` : " Choose one with /list or create one with /new."}`;
               /** 慢查询固定命令接收时的会话，后续切换不影响本次查询。 */
               const snapshot = { ...channel, sessionId: channel.sessionId };
               controlQuery = async () => {
@@ -387,7 +547,7 @@ export function createRelayService(options: {
                 if (!results.length) {
                   options.state.reply(
                     snapshot.id,
-                    `#last\n\nNo finished results in this session.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : history.running ? "\nA turn is still running in this session. Check /status or the local Codex session." : ""}`,
+                    `#last\n\nNo finished results in this session.${task ? `\nCurrent task #${task.id}: ${statuses[task.status]}. Use /status to check progress.` : history.running ? "\nA turn is still running in this session. Check /status or the local Codex session." : ""}`,
                   );
                   return;
                 }
@@ -433,10 +593,9 @@ export function createRelayService(options: {
         void query.catch(() => {});
       }
       /** 中断命令的状态落盘后才影响运行时。 */
-      if (message.content.type === "command" && message.content.name === "interrupt") {
-        const active = options.state.activeTask();
-        if (!active || active.status === "cancelling") inputPreparation?.abort();
-        if (active?.status === "cancelling") options.agent.interrupt();
+      if (interruptedTask !== undefined) {
+        runningTasks.get(interruptedTask)?.preparation.abort();
+        options.agent.interrupt(interruptedTask);
       }
       return reply;
     },
@@ -475,139 +634,40 @@ export function createRelayService(options: {
         await setTimeout(1_000);
       }
     },
-    /** 领取任务后再次检查目录；运行结果与最终回复在同一个快照中保存。 */
+    /** 领取后立即启动独立执行，不等待其他会话；退出前收齐所有工作循环。 */
     async run(source: Pick<ChannelIdentity, "platform" | "accountId" | "userId">) {
-      while (!stopping) {
-        const task = options.state.claimTask(source);
-        if (!task) {
-          await setTimeout(250);
-          continue;
-        }
-        try {
-          if (realpathSync(task.cwd) !== task.cwd || !statSync(task.cwd).isDirectory())
-            throw new Error("Directory changed.");
-        } catch {
-          options.state.finishTask(task.id, {
-            status: "failed",
-            text: "Directory missing, changed, or inaccessible. Task not started. Set /cwd and try again.",
-          });
-          continue;
-        }
-        const preparing = new AbortController();
-        inputPreparation = preparing;
-        let attachments: AgentAttachment[] = [];
-        if (task.status === "preparing") {
-          try {
-            attachments = await options.prepareAttachments(task.attachments, preparing.signal);
-            if (stopping) return;
-            if (preparing.signal.aborted || !options.state.markDispatching(task.id)) continue;
-          } catch (error) {
-            if (stopping) return;
-            options.state.finishTask(task.id, {
-              status: preparing.signal.aborted ? "cancelled" : "failed",
-              text: preparing.signal.aborted
-                ? "Stopped before starting."
-                : error instanceof AttachmentError
-                  ? error.message
-                  : "Cannot prepare attachments. Resend them to try again.",
-            });
-            continue;
-          } finally {
-            if (inputPreparation === preparing) inputPreparation = undefined;
-          }
-        }
-        inputPreparation = preparing;
-        let finished = false;
-        const running = options.agent
-          .run({
-            cwd: task.cwd,
-            prompt: task.prompt,
-            attachments,
-            sessionId: task.sessionId,
-            runId: task.runId,
-            permissionMode: task.permissionMode,
-            model: task.model,
-            reasoningEffort: task.reasoningEffort,
-            onSession: (id) => options.state.recordSession(task.id, id),
-            onStarted: (runId) => {
-              options.state.markRunning(task.id, runId);
-              if (options.state.activeTask()?.status === "cancelling") options.agent.interrupt();
-            },
-            onText: (messages) => options.state.setDraft(task.id, messages),
-            onNotice: (text) => options.state.reply(task.channelId, `Task #${task.id}\n${text}`),
-            onInteraction: (request) => options.state.addInteraction(task.id, request),
-            onInteractionClosed: (id, reason) => options.state.closeInteraction(id, reason),
-          })
-          .finally(() => {
-            finished = true;
-            preparing.abort();
-          });
-        /** 补充输入独立于入站处理和任务完成等待，慢 RPC 不阻塞 /status 与 /stop。 */
-        const steering = (async () => {
-          while (!finished && !stopping) {
-            const input = options.state.claimTaskInput(task.id);
-            if (!input) {
-              await setTimeout(50);
-              continue;
-            }
-            let error: string | undefined;
-            try {
-              const attachments = await options.prepareAttachments(
-                input.attachments,
-                preparing.signal,
-              );
-              if (finished || stopping) return;
-              if (!options.state.markTaskInputSending(task.id, input.index)) continue;
-              await options.agent.steer(input.text, attachments);
-            } catch (cause) {
-              if (finished || stopping) return;
-              error =
-                cause instanceof AttachmentError ||
-                (cause instanceof Error && cause.message.startsWith("Codex "))
-                  ? cause.message
-                  : "Submission unconfirmed. Not retried; check the session before resending.";
-            }
-            options.state.finishTaskInput(task.id, input.index, error);
-          }
-        })();
-        /** 交互提交独立于慢速补充 RPC；停止、服务端解决和用户选择之间至多提交一次。 */
-        const answering = (async () => {
-          while (!finished && !stopping) {
-            const interaction = options.state.claimInteraction(task.id);
-            if (interaction) {
-              const submitted = await options.agent.respond(interaction.id, interaction.answer);
-              options.state.closeInteraction(
-                interaction.id,
-                submitted
-                  ? "Submitted. Waiting for results."
-                  : "Request closed or delivery unconfirmed. Check /status.",
-              );
-            }
+      let failure: { error: unknown } | undefined;
+      try {
+        while (!stopping) {
+          if (failure) throw failure.error;
+          const task = options.state.claimTask(source, new Set(runningTasks.keys()));
+          if (!task) {
             await setTimeout(50);
+            continue;
           }
-        })();
-        try {
-          const [result] = await Promise.all([running, steering, answering]);
-          if (result) options.state.finishTask(task.id, result);
-        } catch (error) {
-          options.agent.disconnect();
-          await Promise.allSettled([running, steering, answering]);
-          options.state.finishTask(task.id, {
-            status: "interrupted",
-            text: "Service error; shutting down. Check the directory and local processes before sending a new task.",
-          });
-          throw error;
-        } finally {
-          preparing.abort();
-          if (inputPreparation === preparing) inputPreparation = undefined;
+          const preparation = new AbortController();
+          const promise = executeTask(task, preparation)
+            .catch((error: unknown) => {
+              failure ??= { error };
+            })
+            .finally(() => {
+              preparation.abort();
+              runningTasks.delete(task.id);
+            });
+          runningTasks.set(task.id, { preparation, promise });
         }
+      } finally {
+        for (const task of runningTasks.values()) task.preparation.abort();
+        options.agent.disconnect();
+        await Promise.allSettled([...runningTasks.values()].map((task) => task.promise));
       }
+      if (failure) throw failure.error;
     },
     /** 服务退出只断开客户端；后台任务继续运行，重启后按已保存轮次接回。 */
     stop() {
       stopping = true;
       modelLoading.abort();
-      inputPreparation?.abort();
+      for (const task of runningTasks.values()) task.preparation.abort();
       options.agent.disconnect();
     },
   };

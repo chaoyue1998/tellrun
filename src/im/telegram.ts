@@ -56,13 +56,13 @@ export function createTelegramConnection(
     CoreState,
     | "confirmUpdates"
     | "claimReply"
-    | "pendingDraft"
+    | "pendingDrafts"
     | "recordPreview"
     | "removeReply"
     | "retryReply"
     | "replyRetryAt"
     | "reply"
-    | "activeTask"
+    | "activeTasks"
   >,
   logger: Logger,
 ) {
@@ -388,12 +388,14 @@ export function createTelegramConnection(
         retryAfterAt = Math.max(retryAfterAt, state.replyRetryAt(source));
         /** 普通消息原地更新预览，避免原生生成草稿限制客户端发送命令。 */
         let nextPreviewAt = 0;
-        let sentPreview:
-          | {
-              taskId: number;
-              messages: Map<string | undefined, { text: string; failed?: boolean }>;
-            }
-          | undefined;
+        /** 各任务分别记录已发送正文，按上次发送时间轮流更新，避免互相覆盖或饿死。 */
+        const sentPreviews = new Map<
+          number,
+          {
+            sentAt: number;
+            messages: Map<string | undefined, { text: string; failed?: boolean }>;
+          }
+        >();
         workers.push(
           (async () => {
             /** 只有入站状态保存成功才推进确认位置；重投按已保存的事件标识去重。 */
@@ -437,24 +439,34 @@ export function createTelegramConnection(
                   await setTimeout(100);
                   continue;
                 }
-                const draft = state.pendingDraft(source);
-                if (draft && draft.taskId !== sentPreview?.taskId)
-                  sentPreview = { taskId: draft.taskId, messages: new Map() };
-                /** 只跟随 Agent 给出的输入分段；同一分段的过程输出和结果原地更新。 */
-                const message = draft?.messages.find(
-                  (message) =>
-                    message.text.trim() &&
-                    !sentPreview?.messages.get(message.id)?.failed &&
-                    message.text !== sentPreview?.messages.get(message.id)?.text,
-                );
-                if (
-                  draft &&
-                  message &&
-                  /** 超长输出保留已有预览，后续内容等待终态按顺序完整分段。 */
-                  message.text.length <= 32768 &&
-                  Date.now() >= nextPreviewAt
-                ) {
+                const active = new Set(state.activeTasks(source).map((task) => task.id));
+                for (const id of sentPreviews.keys()) if (!active.has(id)) sentPreviews.delete(id);
+                /** 同一任务内按输入分段顺序发送，不同任务按最久未更新的顺序轮换。 */
+                const pending = state
+                  .pendingDrafts(source)
+                  .map((draft) => ({
+                    draft,
+                    message: draft.messages.find((message) => {
+                      const sent = sentPreviews.get(draft.taskId)?.messages.get(message.id);
+                      return message.text.trim() && !sent?.failed && message.text !== sent?.text;
+                    }),
+                  }))
+                  /** 超长输出保留已有预览，等待终态完整分段，不阻塞其他任务。 */
+                  .filter((item) => item.message && item.message.text.length <= 32768)
+                  .sort(
+                    (a, b) =>
+                      (sentPreviews.get(a.draft.taskId)?.sentAt ?? 0) -
+                      (sentPreviews.get(b.draft.taskId)?.sentAt ?? 0),
+                  )[0];
+                const { draft, message } = pending ?? {};
+                let sentPreview = draft ? sentPreviews.get(draft.taskId) : undefined;
+                if (draft && !sentPreview) {
+                  sentPreview = { sentAt: 0, messages: new Map() };
+                  sentPreviews.set(draft.taskId, sentPreview);
+                }
+                if (draft && message && Date.now() >= nextPreviewAt) {
                   nextPreviewAt = Date.now() + 1000;
+                  if (sentPreview) sentPreview.sentAt = Date.now();
                   try {
                     if (message.messageId)
                       await bot.api.editMessageText(draft.chatId, message.messageId, {
@@ -599,7 +611,12 @@ export function createTelegramConnection(
                 let messageId = reply.messageId;
                 if (reply.attachment)
                   messageId = (
-                    await sendTelegramAttachment(bot.api, reply.chatId, reply.attachment)
+                    await sendTelegramAttachment(
+                      bot.api,
+                      reply.chatId,
+                      reply.attachment,
+                      reply.text,
+                    )
                   ).message_id;
                 else if (messageId) {
                   try {
@@ -682,7 +699,7 @@ export function createTelegramConnection(
                   if (reply.attachment)
                     state.reply(
                       reply.channelId,
-                      `附件发送失败：${reply.attachment.name}\n${
+                      `${reply.text ? `${reply.text}\n\n` : ""}附件发送失败：${reply.attachment.name}\n${
                         error instanceof AttachmentError
                           ? error.message
                           : "Telegram 拒绝接收附件，原文件仍保留在生成位置。"
@@ -715,8 +732,13 @@ export function createTelegramConnection(
             while (!polling.signal.aborted) {
               if (
                 Date.now() >= nextTypingAt &&
-                ["dispatching", "running"].includes(state.activeTask(source)?.status ?? "") &&
-                !state.activeTask(source)?.interactions.some((item) => item.blocking)
+                state
+                  .activeTasks(source)
+                  .some(
+                    (task) =>
+                      ["dispatching", "running"].includes(task.status) &&
+                      !task.interactions.some((item) => item.blocking),
+                  )
               ) {
                 nextTypingAt = Date.now() + 4_000;
                 try {

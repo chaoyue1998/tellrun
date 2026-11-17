@@ -150,7 +150,7 @@ export interface Agent {
     },
     signal: AbortSignal,
   ): Promise<AgentOption>;
-  /** 校验会话属于当前目录且可续聊，不恢复会话或修改配置。 */
+  /** 校验会话属于当前目录且可选择，允许运行中会话；不恢复会话或修改配置。 */
   readSession(cwd: string, sessionId: string, signal: AbortSignal): Promise<AgentOption>;
   /** 只读当前会话历史，跳过执行中轮次，不恢复会话或提交输入。 */
   readLastResult(
@@ -168,6 +168,8 @@ export interface Agent {
     signal: AbortSignal,
   ): Promise<AgentOption & { reasoningEffort: string }>;
   run(input: {
+    /** 本地任务标识，用于隔离并发轮次的输入、交互与中断。 */
+    taskId: number;
     cwd: string;
     prompt: string;
     attachments?: AgentAttachment[];
@@ -190,15 +192,15 @@ export interface Agent {
     onInteractionClosed: (id: string, reason: string) => void;
   }): Promise<AgentResult | undefined>;
   /** 只提交当前连接仍有效的交互；异步问题等待输入确认，不代表操作已经执行。 */
-  respond(id: string, answer: InteractionAnswer): Promise<boolean>;
+  respond(taskId: number, id: string, answer: InteractionAnswer): Promise<boolean>;
   /** 向当前轮次补充输入，只等待接收确认，不等待任务结束。 */
-  steer(prompt: string, attachments?: AgentAttachment[]): Promise<void>;
-  /** 只断开客户端；run 返回 undefined，后台任务及持久状态继续保留。 */
-  disconnect(): void;
+  steer(taskId: number, prompt: string, attachments?: AgentAttachment[]): Promise<void>;
+  /** 只断开指定任务的客户端，省略标识时断开全部；后台任务及持久状态继续保留。 */
+  disconnect(taskId?: number): void;
   /** 清理指定会话的后台终端，不取消 Agent 当前轮次。 */
   stop(cwd: string, sessionId: string, signal: AbortSignal): Promise<void>;
   /** 用户明确中断时才请求取消当前轮次。 */
-  interrupt(): void;
+  interrupt(taskId: number): void;
 }
 
 /** 返回时表示消息标识及回复意图已保存，不等待 Agent 执行或 IM 发送。 */

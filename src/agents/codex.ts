@@ -16,6 +16,7 @@ import type {
   AgentOption,
   AgentResult,
   AgentSessionHistory,
+  InteractionAnswer,
 } from "../core/types.js";
 import { listPageSize } from "../core/types.js";
 import { createCodexInput } from "./codex-input.js";
@@ -25,6 +26,13 @@ import {
   parseCodexInteraction,
 } from "./codex-interaction.js";
 import { type CodexMessage, createCodexRpc } from "./codex-rpc.js";
+
+/** 每个任务独立持有连接控制与输入入口，结束时只回收自身。 */
+interface TaskRuntime {
+  controller: AbortController;
+  steer?: (prompt: string, attachments?: AgentAttachment[]) => Promise<void>;
+  respond?: (id: string, answer: InteractionAnswer) => Promise<boolean>;
+}
 
 /** 由 Codex 0.165.0 的 generate-ts 核对；只校验实际消费的协议字段。 */
 const turnSchema = z.object({
@@ -167,10 +175,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       });
   if (!unavailableReason && !/^codex-cli \S+$/.test(stdout.trim()))
     throw new Error("Unrecognized Codex CLI version.");
-  let active: AbortController | undefined;
-  /** 只绑定当前任务的连接，不能把迟到输入送入下一轮或其他客户端的轮次。 */
-  let steer: Agent["steer"] | undefined;
-  let respond: Agent["respond"] | undefined;
+  /** 用本地任务 ID 路由控制操作，不能把输入送到其他连接。 */
+  const tasks = new Map<number, TaskRuntime>();
 
   /** 任务、会话管理与只读查询共用连接流程，各自使用独立 socket。 */
   async function connectServer(cwd: string, signal: AbortSignal): Promise<WebSocket> {
@@ -426,8 +432,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       });
       if (thread.id !== sessionId || thread.cwd !== cwd)
         throw new Error("Codex session is not in the current directory. Choose one from /list.");
-      if (!["idle", "notLoaded"].includes(thread.status))
-        throw new Error("Codex session busy or unavailable. Wait until it is idle.");
+      if (!["idle", "notLoaded", "active"].includes(thread.status))
+        throw new Error("Codex session unavailable. Choose another session from /list.");
       return { id: thread.id, label: thread.label };
     },
     async readLastResult(cwd, sessionId, signal, count) {
@@ -539,14 +545,15 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       return { id, label: model?.label ?? id, reasoningEffort };
     },
     async run(input) {
-      if (active) throw new Error("Codex is already running a task.");
+      if (tasks.has(input.taskId)) throw new Error("Codex task is already running.");
       const controller = new AbortController();
-      active = controller;
+      const runtime: TaskRuntime = { controller };
+      tasks.set(input.taskId, runtime);
       let socket: WebSocket | undefined;
       try {
         socket = await connectServer(input.cwd, controller.signal);
       } catch {
-        active = undefined;
+        tasks.delete(input.taskId);
         if (controller.signal.aborted)
           return controller.signal.reason === "disconnect"
             ? undefined
@@ -1051,7 +1058,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
       const rpc = createCodexRpc(socket, { onMessage, onFailure: fail, onClose });
 
-      steer = async (prompt, attachments) => {
+      runtime.steer = async (prompt, attachments) => {
         if (!sessionId || !runId || settled || controller.signal.aborted)
           throw new Error("Codex turn is not running. Input not sent; try again later.");
         const response = z.object({ turnId: z.string() }).parse(
@@ -1067,7 +1074,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         }
       };
 
-      respond = async (id, answer) => {
+      runtime.respond = async (id, answer) => {
         const interaction = interactions.get(id);
         if (
           !interaction ||
@@ -1107,10 +1114,10 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         interactions.delete(id);
         clearTimeout(interaction.timer);
         if (interaction.requestId === null) {
-          if (!("answers" in answer) || !steer) return false;
+          if (!("answers" in answer) || !runtime.steer) return false;
           /** 异步答案沿用官方封套，经当前轮次输入通道提交并等待接收确认。 */
           try {
-            await steer(
+            await runtime.steer(
               `<send_user_message_question_reply>\n${JSON.stringify(
                 interaction.request.questions.map((question) => ({
                   questionItemId: question.id,
@@ -1280,23 +1287,22 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           });
         return await completed.promise;
       } finally {
-        steer = undefined;
-        respond = undefined;
         for (const interaction of interactions.values()) clearTimeout(interaction.timer);
         interactions.clear();
         clearTimeout(interruptTimer);
         clearTimeout(errorTimer);
         clearTimeout(previewTimer);
         rpc.close();
-        active = undefined;
+        tasks.delete(input.taskId);
       }
     },
     /** 外部 ID 必须命中本次连接，不能把旧按钮转交给新一轮任务。 */
-    async respond(id, answer) {
-      return respond?.(id, answer) ?? false;
+    async respond(taskId, id, answer) {
+      return tasks.get(taskId)?.respond?.(id, answer) ?? false;
     },
     /** 复用当前连接提交补充消息，由 expectedTurnId 防止误入其他轮次。 */
-    steer(prompt, attachments) {
+    steer(taskId, prompt, attachments) {
+      const steer = tasks.get(taskId)?.steer;
       if (!steer)
         return Promise.reject(
           new Error("Codex has no active turn. Input not sent; resend to continue."),
@@ -1304,8 +1310,9 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       return steer(prompt, attachments);
     },
     /** 服务退出只断开客户端，保留 Codex daemon 和当前任务。 */
-    disconnect() {
-      active?.abort("disconnect");
+    disconnect(taskId) {
+      if (taskId !== undefined) tasks.get(taskId)?.controller.abort("disconnect");
+      else for (const task of tasks.values()) task.controller.abort("disconnect");
     },
     /** 独立控制连接直接清理指定会话的后台终端，不恢复会话或启动轮次。 */
     async stop(cwd, sessionId, signal) {
@@ -1314,8 +1321,8 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       );
     },
     /** 中断当前轮次并等待真实终态，不退出共享后台服务。 */
-    interrupt() {
-      active?.abort();
+    interrupt(taskId) {
+      tasks.get(taskId)?.controller.abort();
     },
   };
 }
