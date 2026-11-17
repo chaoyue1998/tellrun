@@ -66,7 +66,8 @@ const sessionSchema = z
   .object({
     id: z.string().min(1),
     cwd: z.string(),
-    name: z.string().nullable(),
+    /** 新建会话可能省略名称，此时仍使用消息预览作为展示名称。 */
+    name: z.string().nullish(),
     preview: z.string(),
     status: z.object({ type: z.string() }),
   })

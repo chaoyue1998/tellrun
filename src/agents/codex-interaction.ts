@@ -82,12 +82,31 @@ export function parseCodexInteraction(
         reason: z.string().nullish(),
         networkApprovalContext: z.object({ host: z.string(), protocol: z.string() }).nullish(),
         additionalPermissions: z.unknown().optional(),
-        availableDecisions: z.array(z.unknown()),
+        proposedExecpolicyAmendment: z.array(z.string()).nullish(),
+        availableDecisions: z.array(z.unknown()).nullish(),
       })
       .parse(value);
     interaction.text = `${params.kind === "writeStdin" ? "Terminal input" : "Command"}\nDirectory: ${params.cwd ?? cwd}\n${params.command ?? "Command unavailable."}${params.reason ? `\nReason: ${params.reason}` : ""}${params.networkApprovalContext ? `\nNetwork: ${params.networkApprovalContext.protocol}://${params.networkApprovalContext.host}` : ""}${params.additionalPermissions ? `\nPermissions: ${JSON.stringify(params.additionalPermissions, null, 2)}` : ""}`;
-    /** 只展示当前服务明确提供且客户端支持的决定。 */
-    for (const [index, value] of params.availableDecisions.entries()) {
+    /** 缺省时沿用官方客户端的默认决定；显式列表（包括空数组）始终优先。 */
+    const decisions =
+      params.availableDecisions ??
+      (params.networkApprovalContext
+        ? ["accept", "acceptForSession", "cancel"]
+        : [
+            "accept",
+            ...(params.additionalPermissions == null && params.proposedExecpolicyAmendment?.length
+              ? [
+                  {
+                    acceptWithExecpolicyAmendment: {
+                      execpolicy_amendment: params.proposedExecpolicyAmendment,
+                    },
+                  },
+                ]
+              : []),
+            "cancel",
+          ]);
+    /** 仅展示已有响应格式支持的决定，不能把未知选项转换为授权。 */
+    for (const [index, value] of decisions.entries()) {
       const parsed = commandDecisionSchema.safeParse(value);
       if (!parsed.success) continue;
       const decision = parsed.data;
