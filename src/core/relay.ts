@@ -363,7 +363,7 @@ export function createRelayService(options: {
                 return "Use /last [count], where count is a positive integer.";
               if (!channel.sessionId)
                 return `No session selected yet.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : " Choose one with /list or create one with /new."}`;
-              /** 慢查询固定命令接收时的会话，切换后迟到的回复仍标注原会话。 */
+              /** 慢查询固定命令接收时的会话，后续切换不影响本次查询。 */
               const snapshot = { ...channel, sessionId: channel.sessionId };
               controlQuery = async () => {
                 let history: AgentSessionHistory;
@@ -378,25 +378,24 @@ export function createRelayService(options: {
                   if (!stopping)
                     options.state.reply(
                       snapshot.id,
-                      `Session: ${snapshot.sessionId}\nDirectory: ${snapshot.cwd}\n${options.agent.unavailableReason ?? "Cannot load session history. Try /last again or choose a session from /list."}`,
+                      `#last\n\n${options.agent.unavailableReason ?? "Cannot load session history. Try /last again or choose a session from /list."}`,
                     );
                   return;
                 }
                 if (stopping) return;
-                const context = `Session: ${history.session.id}\nName: ${history.session.label}\nDirectory: ${snapshot.cwd}`;
                 const { results } = history;
                 if (!results.length) {
                   options.state.reply(
                     snapshot.id,
-                    `${context}\n\nNo finished results in this session.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : history.running ? "\nA turn is still running in this session. Check /status or the local Codex session." : ""}`,
+                    `#last\n\nNo finished results in this session.${sessionTask ? `\nCurrent task #${sessionTask.id}: ${statuses[sessionTask.status]}. Use /status to check progress.` : history.running ? "\nA turn is still running in this session. Check /status or the local Codex session." : ""}`,
                   );
                   return;
                 }
-                /** 查询倒序取最近记录，发送时按时间正序排列。 */
-                for (const last of results.toReversed())
+                /** 最近记录按时间正序发送，序号从 1 开始且仅用于本次查询。 */
+                for (const [index, last] of results.toReversed().entries())
                   options.state.reply(
                     snapshot.id,
-                    `${context}\nTurn: ${last.id} ${statuses[last.status]}\n\nQuestion:\n${last.prompt || "(No task description)"}\n\nReply:\n${last.text}`,
+                    `#last ${index + 1} · ${statuses[last.status]}\n\n**Question:**\n${last.prompt || "(No task description)"}\n\n**Reply:**\n${last.text}`,
                     { markdown: true },
                   );
               };
