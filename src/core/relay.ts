@@ -395,7 +395,7 @@ export function createRelayService(options: {
                 for (const [index, last] of results.toReversed().entries())
                   options.state.reply(
                     snapshot.id,
-                    `#last ${index + 1} · ${statuses[last.status]}\n\n**Question:**\n${last.prompt || "(No task description)"}\n\n**Reply:**\n${last.text}`,
+                    `**#last ${index + 1}** · ${statuses[last.status]}\n\n**Question:**\n${last.prompt || "(No task description)"}\n\n**Reply:**\n${last.text}`,
                     { markdown: true },
                   );
               };

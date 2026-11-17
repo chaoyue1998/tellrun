@@ -238,7 +238,7 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 启动时校验 JSON 结构、标识唯一性、关联关系与活动任务数量；所有记录只接受当前定义的字段，不为缺失字段补值或转换菜单与审批选项。无效文件直接报错，不覆盖为空状态。每次业务写入时回收多余终态任务和无关联的关闭交互。`/last` 不依赖本地任务保留记录，直接查询所选 Codex 会话的历史。空闲查询不写文件，每次变更保存整份状态。未完成的发送及其关联仍需保留，持续网络故障期间 outbox 可以增长。
 
-`/last`、`/list` 选中项与 `/status` 的 `Session` 共用聊天保存的 sessionId。`/last` 通过独立连接调用 `thread/read` 校验会话 ID 和目录，再以 `thread/turns/list` 的 `sortDirection: desc`、`itemsView: full` 按请求数量分页读取，跳过执行中轮次并返回最近 N 个终态（默认 1 条）；不调用 `thread/resume` 或发起输入。结果头部显示本次查询序号 `#last 1`、`#last 2`，序号后始终附状态，例如 `#last 1 · Completed`；正文以加粗的 Question、Reply 标签区分完整用户输入（含补充输入）和完整回复，保留文件差异，会话信息通过 `/status` 查看。发送前反转查询结果，按时间正序逐轮发送，最新轮次在最后。原生 `interrupted` 终态显示为已停止；无终态时明确提示并说明活动任务，查询失败与空历史分开处理，均以 `#last` 标注，不分配结果序号。请求固定接收时的会话，后续切换不影响本次查询结果。`/status` 将不属于选中会话的活动任务单独标明会话、目录与状态，定时任务不会覆盖当前选择。[Codex 历史查询](https://learn.chatgpt.com/docs/app-server#list-thread-turns)
+`/last`、`/list` 选中项与 `/status` 的 `Session` 共用聊天保存的 sessionId。`/last` 通过独立连接调用 `thread/read` 校验会话 ID 和目录，再以 `thread/turns/list` 的 `sortDirection: desc`、`itemsView: full` 按请求数量分页读取，跳过执行中轮次并返回最近 N 个终态（默认 1 条）；不调用 `thread/resume` 或发起输入。结果头部显示本次查询序号 `#last 1`、`#last 2`，序号使用与 Question、Reply 标签一致的普通字号行内加粗，后附不加粗的状态，例如 `**#last 1** · Completed`；正文以加粗的 Question、Reply 标签区分完整用户输入（含补充输入）和完整回复，保留文件差异，会话信息通过 `/status` 查看。发送前反转查询结果，按时间正序逐轮发送，最新轮次在最后。原生 `interrupted` 终态显示为已停止；无终态时明确提示并说明活动任务，查询失败与空历史分开处理，均以 `#last` 标注，不分配结果序号。请求固定接收时的会话，后续切换不影响本次查询结果。`/status` 将不属于选中会话的活动任务单独标明会话、目录与状态，定时任务不会覆盖当前选择。[Codex 历史查询](https://learn.chatgpt.com/docs/app-server#list-thread-turns)
 
 任务历史、会话名称和完整 Agent 上下文继续由 Codex 管理。Tellrun 只保存每个聊天当前选中的原生 sessionId，不另建会话索引。Tellrun 不另存任务或审批日志，也不重复保存思考过程、流式文本、工具原始输出或 RPC 等待状态；交互详情仅在处理和消息清理期间保留，没有交互时显式保存空数组。
 
