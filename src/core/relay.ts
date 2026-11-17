@@ -377,16 +377,36 @@ export function createRelayService(options: {
                       : undefined;
                   }
                 };
+                /** 按各自目录读取与 /list 一致的会话名称；单项失败不影响其余状态。 */
+                const describeSession = async (
+                  selection: Pick<typeof snapshot, "cwd" | "sessionId">,
+                ) => {
+                  if (!selection.sessionId) return "Not started";
+                  try {
+                    const session = await options.agent.readSession(
+                      selection.cwd,
+                      selection.sessionId,
+                      modelLoading.signal,
+                    );
+                    return session.label;
+                  } catch {
+                    return "Unavailable";
+                  }
+                };
                 const taskDiffers =
                   task &&
                   (task.model !== snapshot.model ||
                     task.reasoningEffort !== snapshot.reasoningEffort ||
                     task.cwd !== snapshot.cwd);
-                const [model, taskModel, update] = await Promise.all([
-                  describe(snapshot),
-                  taskDiffers ? describe(task) : undefined,
-                  options.updates.check(modelLoading.signal),
-                ]);
+                const otherTasks = tasks.filter((item) => item.id !== task?.id);
+                const [model, taskModel, update, sessionName, otherSessionNames] =
+                  await Promise.all([
+                    describe(snapshot),
+                    taskDiffers ? describe(task) : undefined,
+                    options.updates.check(modelLoading.signal),
+                    describeSession(snapshot),
+                    Promise.all(otherTasks.map(describeSession)),
+                  ]);
                 if (stopping) return;
                 /** 同一模型的不同推理档位也需要区分当前选择与执行中的任务。 */
                 const showTaskModel =
@@ -409,12 +429,12 @@ export function createRelayService(options: {
                   ? `\n\nSend /update to ask ${options.agent.name} to upgrade Tellrun.`
                   : "";
                 /** 当前选择与其他运行任务分别展示，所有信息取自命令接收时的快照。 */
-                const otherTasks = tasks
-                  .filter((item) => item.id !== task?.id)
-                  .map((item) =>
+                const otherTaskDetails = otherTasks
+                  .map((item, index) =>
                     [
                       `Other task: #${item.id} ${statuses[item.status]}${item.cron ? ` · Cron #${item.cron.id}` : ""}`,
                       `Other task session: ${item.sessionId ?? "Not started"}`,
+                      `Other task session name: ${otherSessionNames[index]}`,
                       `Other task directory: ${item.cwd}`,
                       item.channelId !== snapshot.id ? "Other task is in another chat." : undefined,
                       item.interactions.length
@@ -440,6 +460,7 @@ export function createRelayService(options: {
                     options.agent.unavailableReason,
                     `Directory: ${snapshot.cwd}`,
                     `Session: ${snapshot.sessionId ?? "Not started"}`,
+                    `Session name: ${sessionName}`,
                     `Model: ${formatModel(model)}`,
                     showTaskModel ? `Task model: ${formatModel(taskModel)}` : undefined,
                     `Permissions: ${formatPermissions(snapshot.permissionMode)}`,
@@ -450,7 +471,7 @@ export function createRelayService(options: {
                     task?.interactions.length
                       ? `Task pending: ${task.interactions.map((item) => `${item.kind === "approval" ? "Approval" : "Question"}${item.blocking ? " (waiting)" : " (task running)"}`).join(", ")}`
                       : undefined,
-                    otherTasks ? `\n${otherTasks}` : undefined,
+                    otherTaskDetails ? `\n${otherTaskDetails}` : undefined,
                   ]
                     .filter((line) => line !== undefined)
                     .join("\n") + upgradeHint,

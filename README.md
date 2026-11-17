@@ -61,7 +61,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/list`               | Browse project sessions, 10 per page, with Previous / Next buttons; tap a session to switch  |
 | `/cwd`                | Show the current directory and browse Codex project directories, 10 per page                 |
 | `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
-| `/status`             | Show version updates, connection, directory, session ID, model, permissions, and task status |
+| `/status`             | Show version updates, connection, directory, session name and ID, model, permissions, and task status |
 | `/last [count]`       | Send recent finished turns with full questions and replies (default: 1)                             |
 | `/interrupt`          | Interrupt the task in the selected session                                 |
 | `/stop`               | Stop all background terminals in the current Codex session                                   |
@@ -80,7 +80,7 @@ Sessions are stored by Codex. Creating or switching sessions preserves your curr
 - **View and switch**: `/list` shows non-archived sessions whose working directory exactly matches the current directory, ordered by most recently updated, 10 per page. Use Previous / Next to update the same message and view the page number. Tap a session to switch; ✓ marks the current session. The list includes sessions created by Tellrun and other Codex clients, excluding subagent sessions. Lists expire after 10 minutes; use `/list` again to refresh.
 - **Create a session**: `/new [name]` creates and switches to a new session. The name defaults to `New session` when omitted; empty sessions are saved even before you send a message.
 - **Confirm the change**: after creating or switching sessions, wait for confirmation before sending a task. If you cannot confirm that a session was created, check `/list` before deciding whether to retry.
-- **Control tasks**: `/stop` cleans up background terminals in the selected session; `/interrupt` interrupts its task while other sessions continue. `/status` also lists other active tasks; `/last` reads the selected session.
+- **Control tasks**: `/stop` cleans up background terminals in the selected session; `/interrupt` interrupts its task while other sessions continue. `/status` also lists other active tasks and their session names, using the same naming rules as `/list`; `/last` reads the selected session.
 - **Concurrent output**: each task has its own progress messages, updated in turn. Results, approvals, and attachments identify their task and session. Switching preserves each running task’s directory, model, permissions, and output destination.
 
 ### Scheduled tasks
