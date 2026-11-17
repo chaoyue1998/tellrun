@@ -392,7 +392,8 @@ export function createRelayService(options: {
                   );
                   return;
                 }
-                for (const last of results)
+                /** 查询倒序取最近记录，发送时按时间正序排列。 */
+                for (const last of results.toReversed())
                   options.state.reply(
                     snapshot.id,
                     `${context}\nTurn: ${last.id} ${statuses[last.status]}\n\nQuestion:\n${last.prompt || "(No task description)"}\n\nReply:\n${last.text}`,
