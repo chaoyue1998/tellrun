@@ -23,6 +23,11 @@ function matchesSession(task: State["tasks"][number], channel: State["channels"]
         (task.sessionGeneration ?? 0) === (channel.sessionGeneration ?? 0);
 }
 
+/** 预览、结果和交互共用来源标识，多个会话交替输出时仍能辨认所属任务。 */
+function taskHeading(task: State["tasks"][number]) {
+  return `Task #${task.id}${task.cron ? ` · Cron #${task.cron.id}` : ""}\nSession: ${task.sessionId ?? "Not started"}\nDirectory: ${task.cwd}`;
+}
+
 /** 管理业务状态及事务；初始快照、保存方式和默认目录由组装入口提供。 */
 export function createState(options: {
   initialState: State | undefined;
@@ -125,6 +130,8 @@ export function createState(options: {
     > & { attachments?: AgentAttachment[] } = {},
   ) {
     if (text === undefined) return;
+    /** 结果分段和附件共用同一来源，每条消息都能独立辨认任务。 */
+    const task = state.tasks.find((item) => item.id === delivery.taskId);
     const parts =
       delivery.messageId && !delivery.taskId
         ? [text]
@@ -168,10 +175,11 @@ export function createState(options: {
         id: ++replyId,
         channelId,
         priority,
-        text:
+        text: `${task ? `${taskHeading(task)}\n\n` : ""}${
           parts.length > 1
             ? `(${index + 1}/${parts.length})\n${delivery.markdown ? "\n" : ""}${part}`
-            : part,
+            : part
+        }`,
         attempts: 0,
         retryAt: Date.now(),
         ...delivery,
@@ -193,7 +201,8 @@ export function createState(options: {
         afterId: replyId,
         id: ++replyId,
         channelId,
-        text: "",
+        text: task ? taskHeading(task) : "",
+        ...(task ? { taskId: task.id } : {}),
         attachment,
         attempts: 0,
         retryAt: Date.now(),
@@ -326,7 +335,7 @@ export function createState(options: {
     });
   }
 
-  /** 终态与最终回复一起保存，迟到事件不能覆盖已完成的结果。 */
+  /** 终态与最终回复一起保存；定时结果标注来源，迟到事件不能覆盖已完成结果。 */
   function finishTask(id: number, result: AgentResult) {
     if (!state.tasks.some((task) => task.id === id && activeTaskStatuses.has(task.status))) return;
     update(() => {
@@ -336,32 +345,36 @@ export function createState(options: {
       for (const interaction of state.interactions.filter((item) => item.taskId === id))
         closeInteraction(interaction.id, "Task ended. Request closed.");
       const messages = result.messages?.length ? result.messages : [{ text: result.text }];
-      /** 异常终态只在最后一条回复中提示一次。 */
-      const statusLabel = {
-        completed: "",
-        failed: "Failed",
-        cancelled: "Stopped",
-        interrupted: "Unconfirmed",
-      }[result.status];
-      for (const [index, message] of messages.entries()) {
-        const last = index === messages.length - 1;
-        const text = last && statusLabel ? `${statusLabel}\n${message.text}` : message.text;
-        enqueueReply(task.channelId, text, {
-          taskId: id,
-          segmentId: message.id,
-          messageId:
-            task.previewMessages?.find((preview) => preview.segmentId === message.id)?.messageId ??
-            (index === 0 ? task.previewMessageId : undefined),
-          markdown: true,
-          priority: false,
-          attachments: last ? (result.attachments ?? []) : [],
-        });
-      }
+      for (const [index, message] of messages.entries())
+        enqueueReply(
+          task.channelId,
+          `${
+            result.status !== "completed" && index === messages.length - 1
+              ? `Task #${id} ${
+                  {
+                    failed: "Failed",
+                    cancelled: "Stopped",
+                    interrupted: "Unconfirmed",
+                  }[result.status]
+                }\n`
+              : ""
+          }${message.text}`,
+          {
+            taskId: id,
+            segmentId: message.id,
+            messageId:
+              task.previewMessages?.find((preview) => preview.segmentId === message.id)
+                ?.messageId ?? (index === 0 ? task.previewMessageId : undefined),
+            markdown: true,
+            priority: false,
+            attachments: index === messages.length - 1 ? (result.attachments ?? []) : [],
+          },
+        );
       for (const [index, input] of task.inputs.entries()) {
         if (!["pending", "preparing", "sending"].includes(input.status)) continue;
         enqueueReply(
           task.channelId,
-          `Follow-up message ${index + 1}: ${input.status === "sending" ? "delivery unconfirmed" : "not sent"}. Task ended; not retried. Check the session before resending.`,
+          `Task #${id}, message ${index + 1}: ${input.status === "sending" ? "delivery unconfirmed" : "not sent"}. Task ended; not retried. Check the session before resending.`,
         );
         input.status = "failed";
       }
@@ -453,7 +466,7 @@ export function createState(options: {
         return reply;
       });
     },
-    /** 将运行时通知或查询结果送回指定聊天，写入失败交给工作循环处理。 */
+    /** 独立只读查询完成后保存回复；写入失败交给工作循环触发关停。 */
     reply(
       channelId: number,
       text: string,
@@ -462,6 +475,13 @@ export function createState(options: {
       update(() => {
         if (state.channels.some((channel) => channel.id === channelId))
           enqueueReply(channelId, text, delivery);
+      });
+    },
+    /** 运行时通知附带任务来源，查询最新绑定以免使用派发前的空会话。 */
+    replyTask(id: number, text: string) {
+      update(() => {
+        const task = state.tasks.find((item) => item.id === id);
+        if (task) enqueueReply(task.channelId, `${taskHeading(task)}\n\n${text}`);
       });
     },
     /** 只回收指定来源已确认的事件；确认规则由连接器提供，不解释事件编号。 */
@@ -537,6 +557,7 @@ export function createState(options: {
             chatId: channel.chatId,
             messages: messages.map((message, index) => ({
               ...message,
+              text: message.text.trim() ? `${taskHeading(task)}\n\n${message.text}` : "",
               messageId:
                 task.previewMessages?.find((preview) => preview.segmentId === message.id)
                   ?.messageId ?? (index === 0 ? task.previewMessageId : undefined),
@@ -606,7 +627,7 @@ export function createState(options: {
         if (!task || !input || !["preparing", "sending"].includes(input.status)) return;
         input.status = error === undefined ? "accepted" : "failed";
         if (error !== undefined)
-          enqueueReply(task.channelId, `Follow-up message ${index + 1}: ${error}`);
+          enqueueReply(task.channelId, `Task #${id}, message ${index + 1}: ${error}`);
       });
     },
     /** 领取新任务或已保存轮次；恢复只连接后台，不能重发原始输入。 */
@@ -691,14 +712,16 @@ export function createState(options: {
           messages: [],
         });
         if (request.kind === "approval") {
-          enqueueReply(task.channelId, `Approval\n${request.text}\n\nChoose below.`, {
-            interactionId: request.id,
-          });
+          enqueueReply(
+            task.channelId,
+            `${taskHeading(task)}\n\nApproval\n${request.text}\n\nChoose below.`,
+            { interactionId: request.id },
+          );
         } else {
           for (const [index, question] of request.questions.entries())
             enqueueReply(
               task.channelId,
-              `Question ${index + 1}/${request.questions.length}\n${question.header}\n${question.question}${question.options.map((option, i) => `\n\n${i + 1}. ${option.label}\n${option.description}`).join("")}\n\n${question.allowText ? "Pick an option or reply to this message." : "Pick an option or reply with its number or label."}\nAnswer all questions to submit.`,
+              `${taskHeading(task)}\n\nQuestion ${index + 1}/${request.questions.length}\n${question.header}\n${question.question}${question.options.map((option, i) => `\n\n${i + 1}. ${option.label}\n${option.description}`).join("")}\n\n${question.allowText ? "Pick an option or reply to this message." : "Pick an option or reply with its number or label."}\nAnswer all questions to submit.`,
               { interactionId: request.id, questionIndex: index },
             );
         }
@@ -858,7 +881,7 @@ export function createState(options: {
               if (current) current.status = "failed";
               enqueueReply(
                 task.channelId,
-                `Follow-up message ${index + 1}: delivery unconfirmed after restart. Not retried; check the session before resending.`,
+                `Task #${task.id}, message ${index + 1}: delivery unconfirmed after restart. Not retried; check the session before resending.`,
               );
             });
           }

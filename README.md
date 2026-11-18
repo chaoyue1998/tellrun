@@ -81,7 +81,7 @@ Sessions are stored by Codex. Creating or switching sessions preserves your curr
 - **Create a session**: `/new [name]` creates and switches to a new session. The name defaults to `New session` when omitted; empty sessions are saved even before you send a message.
 - **Confirm the change**: after creating or switching sessions, wait for confirmation before sending a task. If you cannot confirm that a session was created, check `/list` before deciding whether to retry.
 - **Control tasks**: `/stop` cleans up background terminals in the selected session; `/interrupt` interrupts its task while other sessions continue. `/status` also lists other active tasks and their session names, using the same naming rules as `/list`; `/last` reads the selected session.
-- **Concurrent output**: each task has its own progress messages, updated in turn. Switching preserves each running task’s directory, model, permissions, and output destination.
+- **Concurrent output**: each task has its own progress messages, updated in turn. Results, approvals, and attachments identify their task and session. Switching preserves each running task’s directory, model, permissions, and output destination.
 
 ### Scheduled tasks
 

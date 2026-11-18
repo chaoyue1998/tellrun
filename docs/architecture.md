@@ -252,7 +252,7 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 Croner 只用于解析与计算：使用 `mode: "5-part"`、保存的 `timezone` 和 `nextRun()`，不注册执行回调。独立调度循环每秒检查一次；没有到期或可领取的等待项时不写状态。到期时将 `nextRunAt` 推进到当前时间之后，忙碌时仅在 `pendingAt` 为空时记录首次等待时间，不累积每次触发。空闲后按等待时间和 ID 选择计划，将清空等待项、创建任务及发送提示合并为一次状态写入，定时计划继续仅在没有活动任务时串行领取，手动任务不受已启动定时任务阻塞。[Croner 基础用法](https://croner.56k.guru/usage/basics/)、[Croner 配置](https://croner.56k.guru/usage/configuration/)
 
-定时任务复用执行 Worker、审批和 outbox，每次新建 Codex 会话；`recordSession` 只更新该执行快照，不改写聊天会话。创建时保存模型和权限选择，空模型项保持沿用 Codex 配置的语义。删除计划后，已启动的任务仍可投递结果。
+定时任务复用执行 Worker、审批和 outbox，每次新建 Codex 会话；`recordSession` 只更新该执行快照，不改写聊天会话。创建时保存模型和权限选择，空模型项保持沿用 Codex 配置的语义。最终结果标注 Cron ID；删除计划后结果仍能投递。
 
 启动时先恢复已有执行，再把离线期间到期的 `nextRunAt` 推进到未来，不凭这些过期时间创建任务；已经持久化的 `pendingAt` 保留。重复启用已启用计划不重置等待项。禁用或删除只清空计划等待，不撤销已经创建的执行；当前任务结果不确定时保留状态提示，不自动重放该任务。计划读取与调度始终限定当前机器人和授权用户，避免配置切换后触发旧账号任务。
 
@@ -355,7 +355,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 delivery 通过 claimReply 从 outbox 领取已持久化的回复，控制回复、普通文字与附件各有一个串行发送循环，按回复 ID 保留在途关联。审批、菜单和命令回复不等待普通结果、预览或上传完成，各通道遵守同一账号的限流。同一回复的分段保存前段依赖，同一消息的编辑也按入队顺序执行。普通结果按队列顺序发送，正文完成后才上传附件，多张附件保持顺序。即使发送期间交互关闭，也保留关联直到迟到回执触发按钮清理。入站、Codex 事件读取与输入提示独立运行。
 
-实时预览按任务 ID 分别保存，Telegram 发送缓存同样按任务区分，按最久未发送时间轮流更新，所有任务共用每秒一次的更新频率；同名分段不会跨任务复用回执。实时预览使用 sendRichMessage 创建普通富文本消息，再通过 editMessageText 原地更新，最多每秒一次，无变化时不请求。该方式保留输入入口，避免 Telegram 原生生成草稿在部分客户端限制发送消息和命令的问题；不再维护原生草稿接口、续期或切换逻辑。[Telegram 官方问题记录](https://bugs.telegram.org/c/62189/1)、[富文本消息](https://core.telegram.org/bots/api#sendrichmessage)、[消息编辑](https://core.telegram.org/bots/api#editmessagetext)
+实时预览按任务 ID 分别保存，Telegram 发送缓存同样按任务区分，按最久未发送时间轮流更新，所有任务共用每秒一次的更新频率；同名分段不会跨任务复用回执。预览、结果、交互和附件附带任务与会话标识。实时预览使用 sendRichMessage 创建普通富文本消息，再通过 editMessageText 原地更新，最多每秒一次，无变化时不请求。该方式保留输入入口，避免 Telegram 原生生成草稿在部分客户端限制发送消息和命令的问题；不再维护原生草稿接口、续期或切换逻辑。[Telegram 官方问题记录](https://bugs.telegram.org/c/62189/1)、[富文本消息](https://core.telegram.org/bots/api#sendrichmessage)、[消息编辑](https://core.telegram.org/bots/api#editmessagetext)
 
 预览文本只保留内存中的最新分段快照，首次发送成功后在任务的 previewMessages 中保存 segmentId 与 messageId，重连沿用各自的消息。分段标识来自 Codex 用户消息边界，连接器不根据 Telegram 输入或 agentMessage 数量自行切段。旧版 previewMessageId 由恢复后的第一段沿用。最终结果在 outbox 保存 taskId 与 segmentId：各分段第一条编辑对应预览，超长的剩余部分及附件按序新建；预览发送期间任务结束时，迟到回执只接回匹配分段的第一条，不能覆盖其他分段。预览被删除或无法编辑时，对应分段的最终结果另发新消息；未修改错误视为已送达。首次发送已成功但回执丢失仍可能出现重复消息，不据此重跑任务。
 

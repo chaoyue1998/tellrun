@@ -141,7 +141,7 @@ export function createRelayService(options: {
             options.agent.interrupt(task.id);
         },
         onText: (messages) => options.state.setDraft(task.id, messages),
-        onNotice: (text) => options.state.reply(task.channelId, text),
+        onNotice: (text) => options.state.replyTask(task.id, text),
         onInteraction: (request) => options.state.addInteraction(task.id, request),
         onInteractionClosed: (id, reason) => options.state.closeInteraction(id, reason),
       })
