@@ -611,12 +611,7 @@ export function createTelegramConnection(
                 let messageId = reply.messageId;
                 if (reply.attachment)
                   messageId = (
-                    await sendTelegramAttachment(
-                      bot.api,
-                      reply.chatId,
-                      reply.attachment,
-                      reply.text,
-                    )
+                    await sendTelegramAttachment(bot.api, reply.chatId, reply.attachment)
                   ).message_id;
                 else if (messageId) {
                   try {
@@ -699,7 +694,7 @@ export function createTelegramConnection(
                   if (reply.attachment)
                     state.reply(
                       reply.channelId,
-                      `${reply.text ? `${reply.text}\n\n` : ""}附件发送失败：${reply.attachment.name}\n${
+                      `附件发送失败：${reply.attachment.name}\n${
                         error instanceof AttachmentError
                           ? error.message
                           : "Telegram 拒绝接收附件，原文件仍保留在生成位置。"

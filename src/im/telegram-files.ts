@@ -16,10 +16,7 @@ export async function sendTelegramAttachment(
   api: Pick<Api, "sendPhoto" | "sendDocument">,
   chatId: string,
   attachment: AgentAttachment,
-  caption = "",
 ) {
-  /** 并发任务的附件通过简短说明保留来源，截断到 Telegram 允许的长度。 */
-  const options = { caption: [...caption].slice(0, 1024).join("") };
   const [file] = await Promise.all([
     stat(attachment.path),
     access(attachment.path, constants.R_OK),
@@ -31,13 +28,13 @@ export async function sendTelegramAttachment(
     throw new AttachmentError("附件超过 Telegram 的 50 MB 上传上限。");
   if (attachment.kind === "image" && file.size <= maxPhotoBytes) {
     try {
-      return await api.sendPhoto(chatId, new InputFile(attachment.path, attachment.name), options);
+      return await api.sendPhoto(chatId, new InputFile(attachment.path, attachment.name));
     } catch (error) {
       /** 网络错误和限流由持久化队列重试；仅照片被拒绝时尝试文件上传。 */
       if (!(error instanceof GrammyError && error.error_code === 400)) throw error;
     }
   }
-  return api.sendDocument(chatId, new InputFile(attachment.path, attachment.name), options);
+  return api.sendDocument(chatId, new InputFile(attachment.path, attachment.name));
 }
 
 /** Telegram 每条消息只有一个附件；photo 数组是同一图片的不同尺寸。 */
