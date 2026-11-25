@@ -157,7 +157,7 @@ tellrun uninstall
 | `telegram.token`    | 字符串             | 必填，无默认值                 | 从 BotFather 获取的机器人 Token。                                                          |
 | `telegram.ownerId`  | 正整数或数字字符串 | 必填，无默认值                 | 本人 Telegram 数字用户 ID，用于授权访问，不是 `@用户名`。建议使用数字形式。                |
 | `telegram.proxyUrl` | 字符串             | 可选；省略时继承运行环境的代理 | 支持 `http://` 或 `https://` 代理地址；设为 `""` 时明确直连。                              |
-| `codexPath`         | 字符串             | 可选，默认 `"codex"`           | Codex 命令名或可执行文件路径。命令名按 `PATH` 查找；`tellrun setup` 保存解析后的绝对路径。 |
+| `codexPath`         | 字符串             | 可选，默认 `"codex"`           | Codex 命令名或可执行文件路径。命令名按 `PATH` 查找；`tellrun setup` 保存入口的绝对路径并保留软链接，避免升级后路径失效。 |
 
 配置在进程启动时读取。手动修改后运行 `tellrun restart`。
 

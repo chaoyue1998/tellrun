@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { chmodSync, existsSync, mkdirSync, realpathSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync } from "node:fs";
+import { join, resolve } from "node:path";
 import * as p from "@clack/prompts";
 import { Command, CommanderError } from "commander";
 import which from "which";
@@ -101,7 +101,8 @@ program
         ownerId: answers.ownerId,
         proxyUrl: current?.telegram.proxyUrl,
       },
-      codexPath: realpathSync(executable),
+      /** 保留稳定入口的软链接，避免升级后仍指向已删除的版本目录。 */
+      codexPath: resolve(executable),
     });
     try {
       await createCodexAgent(config.codexPath);

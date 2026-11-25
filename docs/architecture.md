@@ -393,7 +393,7 @@ Codex 适配器在前台直接继承当前进程环境，保留用户临时 expo
 | Telegram Bot Token 与本人 ID | 由 setup 写入配置，保留环境变量覆盖能力；不依赖可修改的 username                                                       |
 | Telegram 代理                | `telegram.proxyUrl` 可选，由用户自行配置；未指定时继承运行环境的代理，setup 保留已有显式配置                           |
 | 工作目录                     | 后续由任务或会话指定，不设置目录白名单                                                                                 |
-| Codex 命令                   | 配置时解析可执行文件的绝对路径；与后台服务使用同一 OS 用户，沿用其认证与配置                                           |
+| Codex 命令                   | 配置时保存入口的绝对路径并保留软链接，避免绑定到升级后可能删除的版本目录；与后台服务使用同一 OS 用户，沿用其认证与配置 |
 | Codex 运行环境               | 前台沿用当前进程环境；systemd／launchd 后台读取用户默认 shell，不保存代理或认证副本；读取失败保留 Telegram 控制入口 |
 | 运行状态                     | `~/.tellrun/state.json`；临时单实例锁为同目录的 `state.json.lock/`                                                     |
 | Linux 服务定义               | `~/.tellrun/tellrun.service`，通过 systemctl --user link 注册；日志保存在 journal                                      |

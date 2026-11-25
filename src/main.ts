@@ -109,20 +109,23 @@ try {
   }
 } catch (error) {
   process.exitCode = 1;
+  const errorCode =
+    error instanceof Error &&
+    "code" in error &&
+    (typeof error.code === "string" || typeof error.code === "number")
+      ? error.code
+      : undefined;
   logger.fatal(
     {
       phase,
       errorType: error instanceof Error ? error.name : "UnknownError",
-      errorCode:
-        error instanceof Error &&
-        "code" in error &&
-        (typeof error.code === "string" || typeof error.code === "number")
-          ? error.code
-          : undefined,
+      errorCode,
     },
-    (phase === "Loading config" || phase === "Loading state") && error instanceof Error
-      ? error.message
-      : "Service failed",
+    phase === "Checking agent" && errorCode === "ENOENT"
+      ? "找不到 Codex 可执行文件。请检查 CODEX_PATH 或 ~/.tellrun/config.json 中的 codexPath，或运行 tellrun setup 重新配置。"
+      : (phase === "Loading config" || phase === "Loading state") && error instanceof Error
+        ? error.message
+        : "Service failed",
   );
 } finally {
   clearReady();

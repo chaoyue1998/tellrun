@@ -157,7 +157,7 @@ Parameters in `~/.tellrun/config.json`:
 | `telegram.token`    | String                             | Required; no default                                       | Bot token obtained from BotFather.                                                                                          |
 | `telegram.ownerId`  | Positive integer or numeric string | Required; no default                                       | Your numeric Telegram user ID for authorized access, not your `@username`. A numeric value is recommended.                  |
 | `telegram.proxyUrl` | String                             | Optional; inherits environment proxy settings when omitted | Supports `http://` or `https://` proxy URLs; set to `""` to connect directly.                                               |
-| `codexPath`         | String                             | Optional; defaults to `"codex"`                            | Codex command name or executable path. Names are resolved through `PATH`; `tellrun setup` saves the resolved absolute path. |
+| `codexPath`         | String                             | Optional; defaults to `"codex"`                            | Codex command name or executable path. Names are resolved through `PATH`; `tellrun setup` saves the absolute entry path, preserving symlinks so upgrades do not invalidate it. |
 
 Configuration is read when the process starts. Run `tellrun restart` after editing the file manually.
 
