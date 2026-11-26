@@ -21,6 +21,7 @@ const commands = [
   { command: "list", description: "Browse sessions, 10 per page, with switch buttons" },
   { command: "cwd", description: "Browse project directories or set a working directory" },
   { command: "status", description: "Show status and check for updates" },
+  { command: "usage", description: "Show quota and usage limits" },
   { command: "last", description: "Show recent questions and replies: /last [count]" },
   { command: "interrupt", description: "Interrupt the current task" },
   { command: "stop", description: "Stop all background terminals in the current session" },

@@ -133,6 +133,28 @@ export interface AgentModelSelection {
   reasoningEffort: string | null;
 }
 
+/** 单个限额窗口的剩余与重置信息；resetsAt 为毫秒时间戳，无重置时间时为 null。 */
+export interface AgentUsageWindow {
+  label: string;
+  remainingPercent: number;
+  usedPercent: number;
+  resetsAt: number | null;
+}
+
+/** 按模型池或配额桶分组的用量快照。 */
+export interface AgentUsageGroup {
+  name: string;
+  windows: AgentUsageWindow[];
+}
+
+/** 面向展示的通用 Agent 配额与用量快照。 */
+export interface AgentUsage {
+  plan?: string;
+  status?: string;
+  groups: AgentUsageGroup[];
+  details?: string[];
+}
+
 /** 允许安全展示给用户的 Agent 业务错误，避免把原始协议或系统错误转发到 IM。 */
 export class AgentError extends Error {
   constructor(message: string) {
@@ -180,6 +202,8 @@ export interface Agent {
     selection: AgentModelSelection,
     signal: AbortSignal,
   ): Promise<AgentOption & { reasoningEffort: string | null }>;
+  /** 只读查询当前账号配额与用量；未实现的 Agent 省略此方法。 */
+  readUsage?: (cwd: string, signal: AbortSignal) => Promise<AgentUsage>;
   run(input: {
     /** 本地任务标识，用于隔离并发轮次的输入、交互与中断。 */
     taskId: number;

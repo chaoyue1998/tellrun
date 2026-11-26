@@ -11,11 +11,65 @@ import type {
   AgentRegistry,
   AgentSessionHistory,
   AgentSessionPage,
+  AgentUsage,
   AttachmentLoader,
   ChannelIdentity,
   IncomingMessage,
 } from "./types.js";
 import { AgentError, listPageSize } from "./types.js";
+
+/** 将配额重置时间戳格式化为相对倒计时与本地时刻。 */
+function formatResetTime(resetsAt: number, now = Date.now()) {
+  const diffMins = Math.max(0, Math.round((resetsAt - now) / 60_000));
+  let relative: string;
+  if (diffMins < 1) relative = "soon";
+  else if (diffMins < 60) relative = `in ${diffMins}m`;
+  else if (diffMins < 1_440) {
+    const hours = Math.floor(diffMins / 60);
+    const mins = diffMins % 60;
+    relative = mins ? `in ${hours}h ${mins}m` : `in ${hours}h`;
+  } else {
+    const days = Math.floor(diffMins / 1_440);
+    const hours = Math.floor((diffMins % 1_440) / 60);
+    relative = hours ? `in ${days}d ${hours}h` : `in ${days}d`;
+  }
+  const timestamp = new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).format(resetsAt);
+  return `resets ${relative} · ${timestamp}`;
+}
+
+/** 将通用 AgentUsage 格式化为适合移动端阅读的文本块。 */
+function formatUsageReport(agentName: string, usage: AgentUsage) {
+  const header = [
+    `Usage · ${agentName}`,
+    usage.plan ? `Plan: ${usage.plan}` : undefined,
+    usage.status ? `Status: ${usage.status}` : undefined,
+  ]
+    .filter((line) => line !== undefined)
+    .join("\n");
+  const groups = usage.groups.map((group) =>
+    [
+      group.name,
+      ...group.windows.map(
+        (window) =>
+          `- ${window.label}: ${window.remainingPercent}% left${window.resetsAt ? ` (${formatResetTime(window.resetsAt)})` : ""}`,
+      ),
+    ].join("\n"),
+  );
+  const details = usage.details?.length ? usage.details.join("\n") : undefined;
+  const sections = [header, ...groups, details].filter((section): section is string =>
+    Boolean(section),
+  );
+  return sections.length > 1 || usage.plan || usage.status
+    ? sections.join("\n\n")
+    : `${header}\nNo usage data reported.`;
+}
 
 /** 接收消息只保存必要状态；不同 Agent 与不同会话并发执行，控制命令始终可用。 */
 export function createRelayService(options: {
@@ -359,7 +413,7 @@ export function createRelayService(options: {
                 .map((item) => item.id)
                 .join(
                   ", ",
-                )})\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask ${currentAgent.name} to upgrade Tellrun\nCreate or switch agents and sessions at any time. Tasks run concurrently.`;
+                )})\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/usage [agent|all] — Check quota and usage limits\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask ${currentAgent.name} to upgrade Tellrun\nCreate or switch agents and sessions at any time. Tasks run concurrently.`;
             case "agent": {
               const target = message.content.args.trim().toLowerCase();
               if (!target) {
@@ -534,6 +588,55 @@ export function createRelayService(options: {
                     .filter((line) => line !== undefined)
                     .join("\n") + upgradeHint,
                 );
+              };
+              return;
+            }
+            case "usage": {
+              const targetArg = message.content.args.trim().toLowerCase();
+              let targets: readonly Agent[];
+              if (!targetArg) {
+                targets = [currentAgent];
+              } else if (targetArg === "all") {
+                targets = options.agents.all();
+              } else {
+                const matched = options.agents
+                  .list()
+                  .find(
+                    (item) =>
+                      item.id.toLowerCase() === targetArg ||
+                      options.agents.get(item.id)?.name.toLowerCase() === targetArg,
+                  );
+                const resolved = matched ? options.agents.get(matched.id) : undefined;
+                if (!resolved) {
+                  return `Unknown or unconfigured agent: ${message.content.args}.\nUse /usage, /usage all, or /usage <${options.agents
+                    .list()
+                    .map((item) => item.id)
+                    .join("|")}>.`;
+                }
+                targets = [resolved];
+              }
+              const snapshot = structuredClone(channel);
+              controlQuery = async () => {
+                const sections = await Promise.all(
+                  targets.map(async (targetAgent) => {
+                    if (!targetAgent.readUsage) {
+                      return `Usage · ${targetAgent.name}\nUsage query is not supported by this agent.`;
+                    }
+                    try {
+                      const usage = await targetAgent.readUsage(snapshot.cwd, modelLoading.signal);
+                      return formatUsageReport(targetAgent.name, usage);
+                    } catch (error) {
+                      return `Usage · ${targetAgent.name}\n${
+                        error instanceof AgentError
+                          ? error.message
+                          : (targetAgent.unavailableReason ??
+                            "Cannot load usage. Try /usage again.")
+                      }`;
+                    }
+                  }),
+                );
+                if (!stopping)
+                  options.state.reply(snapshot.id, sections.join("\n\n──────────\n\n"));
               };
               return;
             }

@@ -65,6 +65,7 @@ tellrun setup
 | `/cwd`                | 查看当前目录，分页选择 Codex 历史项目目录，每页 10 个    |
 | `/cwd /absolute/path` | 切换工作目录并开始新会话                                |
 | `/status`             | 查看版本更新、连接、目录、会话名称与 ID、模型、权限和任务状态 |
+| `/usage [agent\|all]` | 查看当前 Agent、指定 Agent 或全部 Agent 的配额剩余、重置时间与用量统计 |
 | `/last [数量]`        | 查看最近 N 个已结束轮次，逐条发送完整原问题和回复，默认 1 条          |
 | `/interrupt`          | 中断当前选中会话的任务，其他会话继续运行                    |
 | `/stop`               | 停止当前 Codex 会话中的所有后台终端                     |

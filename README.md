@@ -65,6 +65,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/cwd`                | Show the current directory and browse Codex project directories, 10 per page                 |
 | `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
 | `/status`             | Show version updates, connection, directory, session name and ID, model, permissions, and task status |
+| `/usage [agent\|all]` | Show quota limits, reset times, and usage statistics for the active agent, a named agent, or all agents |
 | `/last [count]`       | Send recent finished turns with full questions and replies (default: 1)                             |
 | `/interrupt`          | Interrupt the task in the selected session                                 |
 | `/stop`               | Stop all background terminals in the current Codex session                                   |

@@ -16,6 +16,9 @@ import type {
   AgentOption,
   AgentResult,
   AgentSessionHistory,
+  AgentUsage,
+  AgentUsageGroup,
+  AgentUsageWindow,
   InteractionAnswer,
 } from "../core/types.js";
 import { AgentError, listPageSize } from "../core/types.js";
@@ -85,6 +88,89 @@ const sessionSchema = z
       status: thread.status.type,
     };
   });
+
+/** Codex 限额窗口与账户用量的最小协议校验。 */
+const rateLimitWindowSchema = z.object({
+  usedPercent: z.number(),
+  windowDurationMins: z.number().nullable(),
+  resetsAt: z.number().nullable(),
+});
+
+const rateLimitSnapshotSchema = z.object({
+  limitId: z.string().nullable(),
+  limitName: z.string().nullable(),
+  primary: rateLimitWindowSchema.nullable(),
+  secondary: rateLimitWindowSchema.nullable(),
+  credits: z
+    .object({
+      hasCredits: z.boolean(),
+      unlimited: z.boolean(),
+      balance: z.string().nullable(),
+    })
+    .nullable(),
+  planType: z.string().nullable(),
+  rateLimitReachedType: z.string().nullable().optional(),
+});
+
+const accountRateLimitsSchema = z.object({
+  ordinaryUsageAllowed: z.boolean().nullable().optional(),
+  rateLimits: rateLimitSnapshotSchema,
+  rateLimitsByLimitId: z
+    .record(z.string(), rateLimitSnapshotSchema.optional())
+    .nullable()
+    .optional(),
+  rateLimitResetCredits: z
+    .object({
+      availableCount: z.number(),
+    })
+    .nullable()
+    .optional(),
+});
+
+const accountTokenUsageSchema = z.object({
+  summary: z.object({
+    lifetimeTokens: z.number().nullable(),
+    peakDailyTokens: z.number().nullable(),
+    currentStreakDays: z.number().nullable(),
+  }),
+  dailyUsageBuckets: z
+    .array(z.object({ startDate: z.string(), tokens: z.number() }))
+    .nullable()
+    .optional(),
+});
+
+/** 将分钟数格式化为易读窗口名称，如 5-hour limit / Weekly limit。 */
+function formatWindowLabel(minutes: number | null, fallback: string) {
+  if (!minutes || minutes <= 0) return fallback;
+  if (minutes === 300) return "5-hour limit";
+  if (minutes === 1440) return "Daily limit";
+  if (minutes === 10080) return "Weekly limit";
+  if (minutes % 1440 === 0) return `${minutes / 1440}-day limit`;
+  if (minutes % 60 === 0) return `${minutes / 60}-hour limit`;
+  return `${minutes}-minute limit`;
+}
+
+/** 紧凑格式化 Token 数量，方便手机端阅读。 */
+function formatCompactTokens(tokens: number) {
+  if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(2)}B`;
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(2)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`;
+  return String(Math.round(tokens));
+}
+
+/** 格式化单条 Codex 限额窗口为通用用量结构。 */
+function toUsageWindow(
+  window: z.infer<typeof rateLimitWindowSchema>,
+  fallback: string,
+): AgentUsageWindow {
+  const usedPercent = Math.max(0, Math.min(100, Math.round(window.usedPercent)));
+  return {
+    label: formatWindowLabel(window.windowDurationMins, fallback),
+    usedPercent,
+    remainingPercent: 100 - usedPercent,
+    resetsAt: window.resetsAt && window.resetsAt > 0 ? window.resetsAt * 1_000 : null,
+  };
+}
 
 /** 实时输出与历史结果共用差异格式，避免 /last 丢失文件变更。 */
 function formatFileChanges(changes: z.infer<typeof fileChangesSchema>) {
@@ -512,6 +598,108 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         model?.defaultReasoningEffort;
       if (!id || !reasoningEffort) throw new Error("Codex model settings unavailable.");
       return { id, label: model?.label ?? id, reasoningEffort };
+    },
+    async readUsage(cwd, signal): Promise<AgentUsage> {
+      return withSessionConnection(cwd, signal, async (rpc) => {
+        const [rateResult, tokenResult] = await Promise.allSettled([
+          rpc.request("account/rateLimits/read", { excludeResetCreditDetails: true }),
+          rpc.request("account/usage/read", {}),
+        ]);
+        const rateLimits =
+          rateResult.status === "fulfilled"
+            ? accountRateLimitsSchema.parse(rateResult.value)
+            : undefined;
+        const tokenUsage =
+          tokenResult.status === "fulfilled"
+            ? accountTokenUsageSchema.parse(tokenResult.value)
+            : undefined;
+        if (!rateLimits && !tokenUsage) throw new Error("No usage data available.");
+
+        const groups: AgentUsageGroup[] = [];
+        const details: string[] = [];
+        let plan: string | undefined;
+        let status: string | undefined;
+
+        if (rateLimits) {
+          const snapshots = rateLimits.rateLimitsByLimitId
+            ? Object.values(rateLimits.rateLimitsByLimitId).filter(
+                (item): item is z.infer<typeof rateLimitSnapshotSchema> => item !== undefined,
+              )
+            : [rateLimits.rateLimits];
+          const primarySnapshot = snapshots[0] ?? rateLimits.rateLimits;
+          if (primarySnapshot.planType) {
+            plan =
+              primarySnapshot.planType.charAt(0).toUpperCase() + primarySnapshot.planType.slice(1);
+          }
+          if (rateLimits.ordinaryUsageAllowed === false) {
+            status = "Limit reached";
+          } else if (rateLimits.ordinaryUsageAllowed === true) {
+            status = "Available";
+          }
+
+          for (const snapshot of snapshots) {
+            const windows: AgentUsageWindow[] = [];
+            if (snapshot.primary) windows.push(toUsageWindow(snapshot.primary, "Primary limit"));
+            if (snapshot.secondary)
+              windows.push(toUsageWindow(snapshot.secondary, "Secondary limit"));
+            if (!windows.length) continue;
+            groups.push({
+              name:
+                snapshot.limitName?.trim() ||
+                (snapshot.limitId === "codex" || !snapshot.limitId ? "Codex" : snapshot.limitId),
+              windows,
+            });
+          }
+
+          const credits = primarySnapshot.credits;
+          if (credits?.unlimited) {
+            details.push("Credits: Unlimited");
+          } else if (credits?.hasCredits && credits.balance !== null) {
+            const numeric = Number(credits.balance);
+            const formatted = Number.isFinite(numeric)
+              ? new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(numeric)
+              : credits.balance;
+            details.push(`Credits: ${formatted}`);
+          }
+          if (
+            rateLimits.rateLimitResetCredits &&
+            rateLimits.rateLimitResetCredits.availableCount > 0
+          ) {
+            details.push(
+              `Reset credits: ${rateLimits.rateLimitResetCredits.availableCount} available`,
+            );
+          }
+        }
+
+        if (tokenUsage) {
+          const parts: string[] = [];
+          const todayKey = new Intl.DateTimeFormat("en-CA").format(Date.now());
+          const todayBucket = tokenUsage.dailyUsageBuckets?.find(
+            (bucket) => bucket.startDate === todayKey,
+          );
+          if (todayBucket) parts.push(`Today: ${formatCompactTokens(todayBucket.tokens)} tokens`);
+          if (tokenUsage.summary.lifetimeTokens !== null) {
+            parts.push(
+              `Lifetime: ${formatCompactTokens(tokenUsage.summary.lifetimeTokens)} tokens`,
+            );
+          }
+          if (parts.length) details.push(parts.join(" · "));
+          if (tokenUsage.summary.currentStreakDays && tokenUsage.summary.currentStreakDays > 0) {
+            details.push(`Streak: ${tokenUsage.summary.currentStreakDays} days`);
+          }
+        }
+
+        return {
+          ...(plan ? { plan } : {}),
+          ...(status ? { status } : {}),
+          groups,
+          ...(details.length ? { details } : {}),
+        };
+      }).catch(() => {
+        throw new AgentError(
+          unavailableReason ?? "Codex usage unavailable. Check login and connection, then retry.",
+        );
+      });
     },
     async run(input) {
       if (tasks.has(input.taskId)) throw new Error("Codex task is already running.");

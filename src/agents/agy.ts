@@ -12,6 +12,9 @@ import type {
   AgentOption,
   AgentResult,
   AgentSessionHistory,
+  AgentUsage,
+  AgentUsageGroup,
+  AgentUsageWindow,
   InteractionAnswer,
 } from "../core/types.js";
 import { AgentError, listPageSize } from "../core/types.js";
@@ -74,6 +77,41 @@ const sessionMetaSchema = z.object({
       }),
     )
     .nullish(),
+  _meta: z
+    .object({
+      antigravity: z
+        .object({
+          tier: z.object({ name: z.string().min(1) }).nullish(),
+        })
+        .nullish(),
+    })
+    .nullish(),
+});
+
+/** agy --output-format json --print=/usage 的结构化配额输出。 */
+const agyUsageOutputSchema = z.object({
+  status: z.string(),
+  command: z
+    .object({
+      name: z.string(),
+      data: z.object({
+        groups: z.array(
+          z.object({
+            name: z.string(),
+            buckets: z.array(
+              z.object({
+                id: z.string().optional(),
+                name: z.string(),
+                window: z.string().optional(),
+                remaining_fraction: z.number(),
+                reset_time: z.string().optional(),
+              }),
+            ),
+          }),
+        ),
+      }),
+    })
+    .optional(),
 });
 
 const sessionUpdateSchema = z.object({
@@ -97,6 +135,7 @@ interface ModelCatalog {
   models: AgentModel[];
   availableModels: { modelId: string; name: string }[];
   currentModelId: string | null;
+  tierName: string | null;
   fetchedAt: number;
 }
 
@@ -169,7 +208,41 @@ function parseModelCatalog(meta: z.infer<typeof sessionMetaSchema>): ModelCatalo
     }
   }
 
-  return { models, availableModels, currentModelId, fetchedAt: Date.now() };
+  return {
+    models,
+    availableModels,
+    currentModelId,
+    tierName: meta._meta?.antigravity?.tier?.name ?? null,
+    fetchedAt: Date.now(),
+  };
+}
+
+/** 格式化 agy 配额窗口标签，与 Codex 保持一致的阅读体验。 */
+function formatAgyWindowLabel(window: string | undefined, fallback: string) {
+  if (window === "5h") return "5-hour limit";
+  if (window === "weekly") return "Weekly limit";
+  if (window === "daily") return "Daily limit";
+  return fallback;
+}
+
+/** 解析 agy --print=/usage 输出中的 JSON 负载，忽略前置日志行。 */
+function parseAgyUsageJson(stdout: string) {
+  const trimmed = stdout.trim();
+  if (!trimmed) throw new Error("Empty usage output.");
+  try {
+    return agyUsageOutputSchema.parse(JSON.parse(trimmed));
+  } catch {
+    const lines = trimmed
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (let index = lines.length - 1; index >= 0; index--) {
+      const line = lines[index];
+      if (!line?.startsWith("{")) continue;
+      return agyUsageOutputSchema.parse(JSON.parse(line));
+    }
+    throw new Error("Invalid usage JSON.");
+  }
 }
 
 /** 将用户选择的模型与推理档位映射为 ACP modelId 或配置项。 */
@@ -738,6 +811,57 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
       } catch (error) {
         if (error instanceof AgentError) throw error;
         throw new AgentError("Antigravity model settings unavailable.");
+      }
+    },
+
+    async readUsage(cwd, signal): Promise<AgentUsage> {
+      if (unavailableReason) throw new AgentError(unavailableReason);
+      try {
+        const [{ stdout }, tierName] = await Promise.all([
+          promisify(execFile)(command, ["--output-format", "json", "--print=/usage"], {
+            cwd,
+            env,
+            timeout: 45_000,
+            maxBuffer: 1_048_576,
+            signal,
+          }),
+          cachedCatalog?.tierName
+            ? Promise.resolve(cachedCatalog.tierName)
+            : readModelCatalog(cwd, signal, true)
+                .then((catalog) => catalog.tierName)
+                .catch(() => null),
+        ]);
+        const payload = parseAgyUsageJson(stdout);
+        const rawGroups = payload.command?.data.groups;
+        if (!rawGroups) throw new Error("Missing usage groups.");
+        const groups: AgentUsageGroup[] = rawGroups
+          .map((group) => {
+            const windows: AgentUsageWindow[] = group.buckets.map((bucket) => {
+              const remainingPercent = Math.max(
+                0,
+                Math.min(100, Math.round(bucket.remaining_fraction * 100)),
+              );
+              const parsedReset = bucket.reset_time ? Date.parse(bucket.reset_time) : Number.NaN;
+              return {
+                label: formatAgyWindowLabel(bucket.window, bucket.name),
+                remainingPercent,
+                usedPercent: 100 - remainingPercent,
+                resetsAt: Number.isFinite(parsedReset) && parsedReset > 0 ? parsedReset : null,
+              };
+            });
+            return { name: group.name, windows };
+          })
+          .filter((group) => group.windows.length > 0);
+        return {
+          ...(tierName ? { plan: tierName } : {}),
+          groups,
+        };
+      } catch (error) {
+        if (error instanceof AgentError) throw error;
+        throw new AgentError(
+          unavailableReason ??
+            "Antigravity usage unavailable. Check local agy CLI login and network.",
+        );
       }
     },
 
