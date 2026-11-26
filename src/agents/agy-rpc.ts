@@ -55,7 +55,7 @@ export function createAgyRpc(
     closed = true;
     client.rejectAllPendingRequests(reason);
     try {
-      child.stdin.end();
+      if (!child.stdin.destroyed) child.stdin.end();
     } catch {
       /** 忽略关闭期间的管道异常。 */
     }
@@ -71,7 +71,7 @@ export function createAgyRpc(
 
   /** 写入单条换行分隔的 JSON-RPC 消息。 */
   function write(message: unknown) {
-    if (closed || !child.stdin.writable) {
+    if (closed || !child.stdin.writable || child.stdin.destroyed) {
       throw new Error("Antigravity ACP connection is closed.");
     }
     try {
@@ -82,6 +82,11 @@ export function createAgyRpc(
       close("Antigravity ACP write failed.");
     }
   }
+
+  /** 捕获子进程管道异常（如子进程退出后的 EPIPE），防止未处理 error 事件导致主进程崩溃。 */
+  child.stdin.on("error", () => close("Antigravity ACP write failed."));
+  child.stdout.on("error", () => close("Antigravity ACP read failed."));
+  child.stderr.on("error", () => {});
 
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk: string) => {
