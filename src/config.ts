@@ -110,7 +110,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   }
 
   const firstConfigured = agentTypes.find((type) => Boolean(savedAgents[type]));
-  const proxyUrl = env.TELEGRAM_PROXY_URL?.trim() || savedTelegram.proxyUrl;
+  const proxyUrl =
+    env.TELEGRAM_PROXY_URL !== undefined ? env.TELEGRAM_PROXY_URL.trim() : savedTelegram.proxyUrl;
   const candidate: Record<string, unknown> = {
     ...saved,
     telegram: {

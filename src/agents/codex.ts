@@ -605,14 +605,16 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           rpc.request("account/rateLimits/read", { excludeResetCreditDetails: true }),
           rpc.request("account/usage/read", {}),
         ]);
-        const rateLimits =
+        const parsedRateLimits =
           rateResult.status === "fulfilled"
-            ? accountRateLimitsSchema.parse(rateResult.value)
+            ? accountRateLimitsSchema.safeParse(rateResult.value)
             : undefined;
-        const tokenUsage =
+        const rateLimits = parsedRateLimits?.success ? parsedRateLimits.data : undefined;
+        const parsedTokenUsage =
           tokenResult.status === "fulfilled"
-            ? accountTokenUsageSchema.parse(tokenResult.value)
+            ? accountTokenUsageSchema.safeParse(tokenResult.value)
             : undefined;
+        const tokenUsage = parsedTokenUsage?.success ? parsedTokenUsage.data : undefined;
         if (!rateLimits && !tokenUsage) throw new Error("No usage data available.");
 
         const groups: AgentUsageGroup[] = [];
@@ -621,11 +623,12 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         let status: string | undefined;
 
         if (rateLimits) {
-          const snapshots = rateLimits.rateLimitsByLimitId
+          const byLimitId = rateLimits.rateLimitsByLimitId
             ? Object.values(rateLimits.rateLimitsByLimitId).filter(
                 (item): item is z.infer<typeof rateLimitSnapshotSchema> => item !== undefined,
               )
-            : [rateLimits.rateLimits];
+            : [];
+          const snapshots = byLimitId.length ? byLimitId : [rateLimits.rateLimits];
           const primarySnapshot = snapshots[0] ?? rateLimits.rateLimits;
           if (primarySnapshot.planType) {
             plan =

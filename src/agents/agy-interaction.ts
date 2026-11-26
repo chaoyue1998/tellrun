@@ -7,20 +7,20 @@ const permissionRequestSchema = z.object({
   sessionId: z.string().min(1),
   toolCall: z
     .object({
-      toolCallId: z.string().optional(),
-      name: z.string().optional(),
-      title: z.string().optional(),
-      kind: z.string().optional(),
-      args: z.record(z.string(), z.unknown()).optional(),
+      toolCallId: z.string().nullish(),
+      name: z.string().nullish(),
+      title: z.string().nullish(),
+      kind: z.string().nullish(),
+      args: z.record(z.string(), z.unknown()).nullish(),
       rawInput: z.unknown().optional(),
     })
-    .optional(),
+    .nullish(),
   options: z
     .array(
       z.object({
         optionId: z.string().min(1),
         name: z.string(),
-        kind: z.string().optional(),
+        kind: z.string().nullish(),
       }),
     )
     .min(1),

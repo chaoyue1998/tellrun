@@ -9,12 +9,12 @@ import { z } from "zod";
 
 /** ACP stdio JSON-RPC 2.0 单帧边界校验。 */
 const rpcMessageSchema = z.object({
-  jsonrpc: z.string().optional(),
-  id: z.union([z.number(), z.string()]).optional(),
-  method: z.string().optional(),
+  jsonrpc: z.string().nullish(),
+  id: z.union([z.number(), z.string()]).nullish(),
+  method: z.string().nullish(),
   params: z.unknown().optional(),
   result: z.unknown().optional(),
-  error: z.object({ code: z.number(), message: z.string().optional() }).optional(),
+  error: z.object({ code: z.number(), message: z.string().nullish() }).nullish(),
 });
 
 export type AgyRpcMessage = z.infer<typeof rpcMessageSchema>;
@@ -83,6 +83,11 @@ export function createAgyRpc(
     }
   }
 
+  /** 向服务端返回 JSON-RPC 错误应答。 */
+  function respondError(id: string | number, code: number, message: string) {
+    write({ jsonrpc: "2.0", id, error: { code, message } });
+  }
+
   /** 捕获子进程管道异常（如子进程退出后的 EPIPE），防止未处理 error 事件导致主进程崩溃。 */
   child.stdin.on("error", () => close("Antigravity ACP write failed."));
   child.stdout.on("error", () => close("Antigravity ACP read failed."));
@@ -108,13 +113,25 @@ export function createAgyRpc(
         /** 忽略非 JSON 诊断输出，防止日志行中断正常协议流。 */
         continue;
       }
-      if (parsed.method !== undefined && parsed.id !== undefined) {
-        handlers.onRequest?.(parsed as AgyRpcMessage & { id: string | number; method: string });
-      } else if (parsed.method !== undefined) {
-        handlers.onNotification?.(parsed);
-      } else if (parsed.id !== undefined) {
+      if (parsed.method != null && parsed.id != null) {
+        try {
+          handlers.onRequest?.(parsed as AgyRpcMessage & { id: string | number; method: string });
+        } catch {
+          try {
+            respondError(parsed.id, -32603, "Internal client error.");
+          } catch {
+            /** 连接已断开时忽略错误回复失败。 */
+          }
+        }
+      } else if (parsed.method != null) {
+        try {
+          handlers.onNotification?.(parsed);
+        } catch {
+          /** 防止未捕获的通知异常击穿主进程事件循环。 */
+        }
+      } else if (parsed.id != null) {
         client.receive(
-          parsed.error
+          parsed.error != null
             ? createJSONRPCErrorResponse(
                 parsed.id,
                 parsed.error.code,
@@ -158,9 +175,7 @@ export function createAgyRpc(
     respond(id: string | number, result: unknown) {
       write({ jsonrpc: "2.0", id, result });
     },
-    respondError(id: string | number, code: number, message: string) {
-      write({ jsonrpc: "2.0", id, error: { code, message } });
-    },
+    respondError,
     async initialize() {
       return request("initialize", { protocolVersion: 1, clientCapabilities: {} }, 30_000);
     },

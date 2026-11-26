@@ -328,12 +328,13 @@ export function createState(options: {
           reasoningEffort: channel.reasoningEffort,
         };
         const restored = channel.agentStates[nextAgent];
+        const sameCwd = Boolean(restored && restored.cwd === channel.cwd);
         channel.agent = nextAgent;
         channel.sessionGeneration += 1;
-        channel.sessionId = restored && restored.cwd === channel.cwd ? restored.sessionId : null;
-        channel.permissionMode = restored ? restored.permissionMode : null;
-        channel.model = restored ? restored.model : null;
-        channel.reasoningEffort = restored ? restored.reasoningEffort : null;
+        channel.sessionId = sameCwd ? (restored?.sessionId ?? null) : null;
+        channel.permissionMode = sameCwd ? (restored?.permissionMode ?? null) : null;
+        channel.model = sameCwd ? (restored?.model ?? null) : null;
+        channel.reasoningEffort = sameCwd ? (restored?.reasoningEffort ?? null) : null;
       }
       if (options.reply)
         enqueueReply(
