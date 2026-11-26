@@ -22,7 +22,7 @@ export async function createAgentRegistry(config: Config): Promise<AgentRegistry
         return [type, await createAgent(type, path)] as const;
       } catch (error) {
         if (error instanceof Error && "code" in error && error.code === "ENOENT") {
-          throw Object.assign(error, { agentType: type });
+          throw Object.assign(error, { agentType: type, agentPath: path });
         }
         throw error;
       }

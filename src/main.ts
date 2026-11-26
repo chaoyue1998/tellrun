@@ -133,6 +133,10 @@ try {
     error.agentType in agentDefinitions
       ? (error.agentType as AgentType)
       : undefined;
+  const failedPath =
+    error instanceof Error && "agentPath" in error && typeof error.agentPath === "string"
+      ? error.agentPath
+      : undefined;
   logger.fatal(
     {
       phase,
@@ -140,7 +144,7 @@ try {
       errorCode,
     },
     phase === "Checking agents" && errorCode === "ENOENT"
-      ? `${failedType ? agentDefinitions[failedType].label : "Agent"} executable not found. Check ${failedType ? agentDefinitions[failedType].envVar : "CODEX_PATH / AGY_PATH"} or ~/.tellrun/config.json, or run tellrun setup.`
+      ? `${failedType ? agentDefinitions[failedType].label : "Agent"} executable not found${failedPath ? ` (${failedPath})` : ""}. Check ${failedType ? agentDefinitions[failedType].envVar : "CODEX_PATH / AGY_PATH"} or ~/.tellrun/config.json, or run tellrun setup.`
       : (phase === "Loading config" || phase === "Loading state") && error instanceof Error
         ? error.message
         : "Service failed",
