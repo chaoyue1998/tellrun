@@ -28,7 +28,7 @@ const commands = [
   { command: "permissions", description: "Select the permission mode for future tasks" },
   { command: "cron", description: "List, create, enable, disable, or delete scheduled tasks" },
   { command: "restart", description: "Restart Tellrun and reload configuration" },
-  { command: "update", description: "Ask the active agent to upgrade Tellrun" },
+  { command: "update", description: "Check for and install Tellrun updates" },
   { command: "help", description: "Show available commands" },
   { command: "start", description: "Show usage instructions" },
 ];

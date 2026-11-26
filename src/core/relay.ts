@@ -81,6 +81,8 @@ export function createRelayService(options: {
   restart: (() => void) | undefined;
 }) {
   let stopping = false;
+  /** 程序自升级期间暂缓新任务、定时任务和并发升级，完成后无缝重启加载新版本。 */
+  let updating = false;
   /** 每项任务独立准备附件并等待结束，取消时只操作对应任务及其所属 Agent。 */
   const runningTasks = new Map<
     number,
@@ -290,6 +292,14 @@ export function createRelayService(options: {
           if (answer !== undefined || message.content.type === "interaction") return answer;
         }
         if (
+          updating &&
+          (message.content.type === "text" ||
+            message.content.type === "attachments" ||
+            (message.content.type === "command" &&
+              ["update", "restart"].includes(message.content.name)))
+        )
+          return "Tellrun update in progress. Wait for it to finish, then try again.";
+        if (
           changingSessions.has(channel.id) &&
           (message.content.type === "text" ||
             message.content.type === "attachments" ||
@@ -414,7 +424,7 @@ export function createRelayService(options: {
                 .map((item) => item.id)
                 .join(
                   ", ",
-                )})\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/usage [agent|all] — Check quota and usage limits\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask ${currentAgent.name} to upgrade Tellrun\nCreate or switch agents and sessions at any time. Tasks run concurrently.`;
+                )})\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/usage [agent|all] — Check quota and usage limits\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Check for and install Tellrun updates\nCreate or switch agents and sessions at any time. Tasks run concurrently.`;
             case "agent": {
               const target = message.content.args.trim().toLowerCase();
               if (!target) {
@@ -533,9 +543,7 @@ export function createRelayService(options: {
                   : update.available
                     ? ` (update available: ${update.latest})`
                     : "";
-                const upgradeHint = update?.available
-                  ? `\n\nSend /update to ask ${statusAgent.name} to upgrade Tellrun.`
-                  : "";
+                const upgradeHint = update?.available ? "\n\nSend /update to upgrade Tellrun." : "";
                 /** 当前选择与其他运行任务分别展示，所有信息取自命令接收时的快照。 */
                 const otherTaskDetails = otherTasks
                   .map((item, index) => {
@@ -641,12 +649,63 @@ export function createRelayService(options: {
               };
               return;
             }
-            case "update":
+            case "update": {
               if (message.content.args) return "Use /update without arguments.";
+              if (updating) return "Tellrun update is already in progress.";
               if (tasks.length) return "Wait for all tasks to finish, then send /update.";
-              /** 复用普通任务的快照、去重、审批和恢复流程，不向执行中的任务追加升级指令。 */
-              options.state.createTask(channel, options.updates.upgradePrompt(currentAgent.name));
-              return `Tellrun update queued for ${currentAgent.name}.`;
+              const snapshot = structuredClone(channel);
+              /** 由程序自身检查、安装并校验新版本，再原地重启，不依赖任何 Coding Agent。 */
+              controlQuery = async () => {
+                updating = true;
+                try {
+                  const outcome = await options.updates.upgrade(modelLoading.signal, {
+                    onDownloading: (previous, latest) => {
+                      if (!stopping) {
+                        options.state.reply(
+                          snapshot.id,
+                          `Updating Tellrun (${previous} → ${latest})...`,
+                        );
+                      }
+                    },
+                  });
+                  if (stopping) return;
+                  if (outcome.status === "up-to-date") {
+                    options.state.reply(
+                      snapshot.id,
+                      `Tellrun is already up to date (${outcome.current}).`,
+                    );
+                    return;
+                  }
+                  if (outcome.status === "failed") {
+                    options.state.reply(snapshot.id, outcome.message);
+                    return;
+                  }
+                  if (!options.restart) {
+                    options.state.reply(
+                      snapshot.id,
+                      `Tellrun updated (${outcome.previous} → ${outcome.current}). Restart Tellrun from the terminal to load the new version.`,
+                    );
+                    return;
+                  }
+                  if (options.state.activeTasks().length) {
+                    options.state.reply(
+                      snapshot.id,
+                      `Tellrun updated (${outcome.previous} → ${outcome.current}). Send /restart after active tasks finish.`,
+                    );
+                    return;
+                  }
+                  /** 确认回复落盘后立即触发进程替换，由新版本启动并连上 Telegram 后发出。 */
+                  options.state.reply(
+                    snapshot.id,
+                    `Tellrun updated (${outcome.previous} → ${outcome.current}) and restarted. Session and task state preserved.`,
+                  );
+                  options.restart();
+                } finally {
+                  updating = false;
+                }
+              };
+              return "Checking for Tellrun updates...";
+            }
             case "restart":
               if (message.content.args) return "Use /restart without arguments.";
               if (!options.restart)
@@ -794,7 +853,7 @@ export function createRelayService(options: {
       if (stopping) return;
       options.state.recoverCrons(source);
       while (!stopping) {
-        options.state.tickCrons(source);
+        if (!updating) options.state.tickCrons(source);
         await setTimeout(1_000);
       }
     },

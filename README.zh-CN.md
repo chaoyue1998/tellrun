@@ -72,7 +72,7 @@ tellrun setup
 | `/permissions`        | 选择后续任务的权限模式                                  |
 | `/cron`               | 查看、创建、删除或启停定时任务                          |
 | `/restart`            | 重启 Tellrun 并重新加载配置，保留会话与任务状态         |
-| `/update`             | 将 Tellrun 升级信息交给当前 Agent 执行                  |
+| `/update`             | 自动检查、安装 Tellrun 新版本并重启服务                  |
 | `/help`、`/start`     | 查看使用说明                                            |
 
 ### 会话管理

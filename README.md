@@ -72,7 +72,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/permissions`        | Choose the permission mode for subsequent tasks                                              |
 | `/cron`               | List, create, delete, enable, or disable scheduled tasks                                     |
 | `/restart`            | Restart Tellrun and reload configuration while preserving session and task state             |
-| `/update`             | Ask the active agent to upgrade Tellrun using the installation details                       |
+| `/update`             | Check for and install Tellrun updates automatically, then restart                            |
 | `/help`, `/start`     | Show usage instructions                                                                      |
 
 ### Session management
