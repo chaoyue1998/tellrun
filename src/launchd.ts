@@ -15,7 +15,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { appDirectory, loadConfig } from "./config.js";
+import { appDirectory, configuredAgents, loadConfig } from "./config.js";
 import type { ServiceAction, ServiceOptions } from "./service.js";
 import { acquireLock } from "./storage/lock.js";
 
@@ -144,8 +144,11 @@ export async function manageLaunchdService(action: ServiceAction, options: Servi
     }
 
     const config = loadConfig({});
-    if (!isAbsolute(config.codexPath) || !existsSync(config.codexPath))
-      throw new Error("Background mode needs an absolute Codex path. Run tellrun setup.");
+    const agentEntries = configuredAgents(config);
+    for (const entry of agentEntries) {
+      if (!isAbsolute(entry.path) || !existsSync(entry.path))
+        throw new Error(`Background mode needs an absolute ${entry.type} path. Run tellrun setup.`);
+    }
     const entry = fileURLToPath(new URL("./cli.js", import.meta.url));
     if (!existsSync(entry))
       throw new Error("CLI build missing. Run npm run build, then node dist/cli.js.");
@@ -164,14 +167,16 @@ export async function manageLaunchdService(action: ServiceAction, options: Servi
           EnvironmentVariables: {
             TELLRUN_LAUNCHD: "1",
             PATH: [
-              dirname(process.execPath),
-              dirname(config.codexPath),
-              "/opt/homebrew/bin",
-              "/usr/local/bin",
-              "/usr/bin",
-              "/bin",
-              "/usr/sbin",
-              "/sbin",
+              ...new Set([
+                dirname(process.execPath),
+                ...agentEntries.map((entry) => dirname(entry.path)),
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+              ]),
             ].join(":"),
           },
           RunAtLoad: true,

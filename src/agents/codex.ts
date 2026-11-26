@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { connect } from "node:net";
-import { homedir, userInfo } from "node:os";
-import { basename, delimiter, dirname, isAbsolute, join } from "node:path";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import { JSONRPCErrorException } from "json-rpc-2.0";
 import WebSocket from "ws";
@@ -18,7 +18,7 @@ import type {
   AgentSessionHistory,
   InteractionAnswer,
 } from "../core/types.js";
-import { listPageSize } from "../core/types.js";
+import { AgentError, listPageSize } from "../core/types.js";
 import { createCodexInput } from "./codex-input.js";
 import {
   type CodexApprovalResponse,
@@ -26,6 +26,7 @@ import {
   parseCodexInteraction,
 } from "./codex-interaction.js";
 import { type CodexMessage, createCodexRpc } from "./codex-rpc.js";
+import { loadAgentEnv } from "./env.js";
 
 /** 每个任务独立持有连接控制与输入入口，结束时只回收自身。 */
 interface TaskRuntime {
@@ -131,42 +132,7 @@ const permissionModes = [
 
 /** 连接独立的 Codex 后台服务；Tellrun 退出不结束后台轮次。 */
 export async function createCodexAgent(command = "codex"): Promise<Agent> {
-  /** 前台保留当前终端的临时 export；仅系统服务需要补读用户 shell 配置。 */
-  let env = process.env;
-  /** 环境故障仅禁用 Codex 操作，Telegram 控制入口仍可查询状态和重启。 */
-  let unavailableReason: string | undefined;
-  if (
-    process.platform !== "win32" &&
-    (process.env.NOTIFY_SOCKET || process.env.TELLRUN_LAUNCHD === "1")
-  ) {
-    try {
-      const { stdout } = await promisify(execFile)(
-        userInfo().shell || process.env.SHELL || "/bin/sh",
-        [
-          "-ilc",
-          /** Node 路径按 shell 字面量转义；NUL 分隔启动欢迎文字和环境 JSON。 */
-          `exec '${process.execPath.replaceAll("'", "'\\''")}' -e 'process.stdout.write("\\0" + JSON.stringify(process.env))'`,
-        ],
-        { cwd: homedir(), timeout: 10_000, killSignal: "SIGKILL", maxBuffer: 1_048_576 },
-      );
-      if (!stdout.includes("\0")) throw new Error("Missing shell environment.");
-      env = z
-        .record(z.string(), z.string())
-        .parse(JSON.parse(stdout.slice(stdout.lastIndexOf("\0") + 1)));
-    } catch {
-      /** 不回传可能含凭据的启动输出，也不回退到缺少代理的服务环境。 */
-      unavailableReason =
-        "Codex 不可用：无法读取用户 shell 环境。请检查默认 shell 启动配置是否报错或等待输入，修复后发送 /restart。";
-    }
-  }
-  /** 保留 provider 和工具环境，移除 Tellrun 配置及宿主服务通知标识。 */
-  env = Object.fromEntries(
-    Object.entries(env).filter(
-      ([key]) => !/^(TELEGRAM_|TELLRUN_|CODEX_PATH$|NOTIFY_SOCKET$|INVOCATION_ID$)/.test(key),
-    ),
-  );
-  /** 优先使用用户 PATH 中的 Node；当前运行时仅作为 npm 版 Codex 的后备路径。 */
-  env.PATH = [env.PATH, dirname(process.execPath)].filter(Boolean).join(delimiter);
+  const { env, unavailableReason } = await loadAgentEnv("Codex");
   const { stdout } = unavailableReason
     ? { stdout: "" }
     : await promisify(execFile)(command, ["--version"], {
@@ -415,7 +381,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         });
         return { id: thread.id, label: input.name.trim() || defaultSessionName };
       }).catch(() => {
-        throw new Error(
+        throw new AgentError(
           unavailableReason ??
             "Codex session creation unconfirmed. Current session unchanged. Check /list before retrying /new.",
         );
@@ -427,14 +393,16 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
           .object({ thread: sessionSchema })
           .parse(await rpc.request("thread/read", { threadId: sessionId })),
       ).catch(() => {
-        throw new Error(
+        throw new AgentError(
           unavailableReason ?? "Codex session unavailable. Open /list and choose a session again.",
         );
       });
       if (thread.id !== sessionId || thread.cwd !== cwd)
-        throw new Error("Codex session is not in the current directory. Choose one from /list.");
+        throw new AgentError(
+          "Codex session is not in the current directory. Choose one from /list.",
+        );
       if (!["idle", "notLoaded", "active"].includes(thread.status))
-        throw new Error("Codex session unavailable. Choose another session from /list.");
+        throw new AgentError("Codex session unavailable. Choose another session from /list.");
       return { id: thread.id, label: thread.label };
     },
     async readLastResult(cwd, sessionId, signal, count) {
@@ -712,7 +680,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         } catch (error) {
           /** 只识别已知占用错误，避免把可能含敏感信息的原始错误转发到 IM。 */
           if (error instanceof JSONRPCErrorException && error.data === "codex")
-            throw new Error(
+            throw new AgentError(
               method === "thread/resume" &&
                 error.code === -32600 &&
                 error.message.includes("already has an active writer")
@@ -722,7 +690,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
                   : `Codex ${method} rejected (${error.code}). Check config and sign-in.`,
             );
           if (method === "turn/steer")
-            throw new Error(
+            throw new AgentError(
               "Codex input delivery unconfirmed. Not retried; check the session before resending.",
             );
           throw error;
@@ -1061,7 +1029,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
       runtime.steer = async (prompt, attachments) => {
         if (!sessionId || !runId || settled || controller.signal.aborted)
-          throw new Error("Codex turn is not running. Input not sent; try again later.");
+          throw new AgentError("Codex turn is not running. Input not sent; try again later.");
         const response = z.object({ turnId: z.string() }).parse(
           await request("turn/steer", {
             threadId: sessionId,
@@ -1071,7 +1039,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
         );
         if (response.turnId !== runId) {
           fail("Codex input returned a different turn. Task status unknown.");
-          throw new Error("Codex input turn unconfirmed. Not retried; check the session.");
+          throw new AgentError("Codex input turn unconfirmed. Not retried; check the session.");
         }
       };
 
@@ -1306,7 +1274,7 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       const steer = tasks.get(taskId)?.steer;
       if (!steer)
         return Promise.reject(
-          new Error("Codex has no active turn. Input not sent; resend to continue."),
+          new AgentError("Codex has no active turn. Input not sent; resend to continue."),
         );
       return steer(prompt, attachments);
     },

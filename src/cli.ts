@@ -5,8 +5,17 @@ import * as p from "@clack/prompts";
 import { Command, CommanderError } from "commander";
 import which from "which";
 import { ZodError } from "zod";
-import { createCodexAgent } from "./agents/codex.js";
-import { appDirectory, type Config, configSchema, loadConfig } from "./config.js";
+import { createAgent } from "./agents/index.js";
+import {
+  type AgentType,
+  agentDefinitions,
+  agentTypes,
+  appDirectory,
+  type Config,
+  configSchema,
+  configuredAgents,
+  loadConfig,
+} from "./config.js";
 import { manageService } from "./service.js";
 import { writeJson } from "./storage/json.js";
 import { uninstall } from "./uninstall.js";
@@ -15,12 +24,21 @@ import { tellrunVersion } from "./updates.js";
 /** 全局入口只注册命令；业务入口仅在 run 时动态加载。 */
 const program = new Command()
   .name("tellrun")
-  .description("Chat with Codex via Telegram")
+  .description("Chat with AI coding agents via Telegram")
   .version(tellrunVersion, "-V, --version", "Show version")
   .helpOption("-h, --help", "Show help")
   .addHelpCommand("help [command]", "Show command help")
   .showHelpAfterError()
   .exitOverride();
+
+/** 向导取消时统一中止并保留原配置。 */
+function requireAnswer<T>(value: T): Exclude<T, symbol> {
+  if (p.isCancel(value) || typeof value === "symbol") {
+    p.cancel("Setup cancelled. Config unchanged.");
+    throw new CommanderError(130, "setup.cancelled", "Setup cancelled.");
+  }
+  return value as Exclude<T, symbol>;
+}
 
 program
   .command("setup")
@@ -39,75 +57,140 @@ program
       }
     }
     p.log.info("Config: ~/.tellrun/config.json");
-    const answers = await p.group(
-      {
-        token: () =>
-          p.text({
-            message: current ? "Telegram bot token (blank to keep)" : "Telegram bot token",
-            validate: (value) =>
-              configSchema.shape.telegram.shape.token.safeParse(
-                value?.trim() || current?.telegram.token,
-              ).success
-                ? undefined
-                : "Enter a valid bot token.",
-          }),
-        ownerId: () =>
-          p.text({
-            message: "Your Telegram user ID",
-            initialValue: current ? String(current.telegram.ownerId) : "",
-            validate: (value) =>
-              configSchema.shape.telegram.shape.ownerId.safeParse(value).success
-                ? undefined
-                : "Enter a positive numeric user ID.",
-          }),
-        codexPath: () =>
-          p.text({
-            message: "Codex command or path",
-            initialValue: current?.codexPath ?? process.env.CODEX_PATH ?? "codex",
-            validate: (value) => (value?.trim() ? undefined : "Enter a Codex command or path."),
-          }),
-        launch: () =>
-          ["linux", "darwin"].includes(process.platform)
-            ? p.select({
-                message: "After setup",
-                options: [
-                  {
-                    value: "boot",
-                    label:
-                      process.platform === "darwin"
-                        ? "Start or restart, enable at login"
-                        : "Start or restart, enable at boot",
-                  },
-                  { value: "start", label: "Start or restart" },
-                  { value: "later", label: "Save only" },
-                ],
-              })
-            : Promise.resolve("later"),
-      },
-      {
-        onCancel: () => {
-          p.cancel("Setup cancelled. Config unchanged.");
-          throw new CommanderError(130, "setup.cancelled", "Setup cancelled.");
-        },
-      },
+
+    const token = requireAnswer(
+      await p.text({
+        message: current ? "Telegram bot token (blank to keep)" : "Telegram bot token",
+        validate: (value) =>
+          configSchema.shape.telegram.shape.token.safeParse(
+            value?.trim() || current?.telegram.token,
+          ).success
+            ? undefined
+            : "Enter a valid bot token.",
+      }),
+    );
+    const ownerId = requireAnswer(
+      await p.text({
+        message: "Your Telegram user ID",
+        initialValue: current ? String(current.telegram.ownerId) : "",
+        validate: (value) =>
+          configSchema.shape.telegram.shape.ownerId.safeParse(value).success
+            ? undefined
+            : "Enter a positive numeric user ID.",
+      }),
     );
 
-    /** 命令名按 PATH 查找，指定路径直接检查可执行性。 */
-    const executable = await which(answers.codexPath.trim(), { nothrow: true });
-    if (!executable) throw new Error("Codex not found. Check its path; config unchanged.");
+    /** 首次配置时自动检测已安装的 CLI 并默认勾选，支持同时启用多个 Agent。 */
+    const detected = await Promise.all(
+      agentTypes.map(
+        async (type) =>
+          [type, await which(agentDefinitions[type].defaultCommand, { nothrow: true })] as const,
+      ),
+    );
+    const detectedMap = new Map(detected);
+    const initialEnabled: AgentType[] = current
+      ? configuredAgents(current).map((entry) => entry.type)
+      : (() => {
+          const found = detected.filter(([, path]) => Boolean(path)).map(([type]) => type);
+          return found.length ? found : ["codex"];
+        })();
+
+    const enabledAgents = requireAnswer(
+      await p.multiselect<AgentType>({
+        message: "Enabled coding agent CLIs (space to toggle, enter to confirm)",
+        initialValues: initialEnabled,
+        required: true,
+        options: agentTypes.map((type) => {
+          const foundPath = detectedMap.get(type);
+          return {
+            value: type,
+            label: agentDefinitions[type].label,
+            ...(foundPath ? { hint: foundPath } : {}),
+          };
+        }),
+      }),
+    );
+
+    const agentEntries: Partial<Record<AgentType, { path: string }>> = {};
+    for (const type of enabledAgents) {
+      const definition = agentDefinitions[type];
+      const initialValue =
+        current?.agents[type]?.path ??
+        process.env[definition.envVar]?.trim() ??
+        detectedMap.get(type) ??
+        definition.defaultCommand;
+      const enteredPath = requireAnswer(
+        await p.text({
+          message: `${definition.label} command or path`,
+          initialValue,
+          validate: (value) =>
+            value?.trim() ? undefined : `Enter a ${definition.label} command or path.`,
+        }),
+      );
+      /** 命令名按 PATH 查找，指定路径直接检查可执行性。 */
+      const executable = await which(enteredPath.trim(), { nothrow: true });
+      if (!executable)
+        throw new Error(`${definition.label} not found. Check its path; config unchanged.`);
+      /** 保留稳定入口的软链接，避免升级后仍指向已删除的版本目录。 */
+      agentEntries[type] = { path: resolve(executable) };
+    }
+
+    const defaultAgent: AgentType =
+      enabledAgents.length > 1
+        ? requireAnswer(
+            await p.select<AgentType>({
+              message: "Default coding agent (you can switch anytime with /agent)",
+              initialValue:
+                current && enabledAgents.includes(current.defaultAgent)
+                  ? current.defaultAgent
+                  : (enabledAgents[0] ?? "codex"),
+              options: enabledAgents.map((type) => ({
+                value: type,
+                label: agentDefinitions[type].label,
+              })),
+            }),
+          )
+        : (enabledAgents[0] ?? "codex");
+
+    const launch = ["linux", "darwin"].includes(process.platform)
+      ? requireAnswer(
+          await p.select({
+            message: "After setup",
+            options: [
+              {
+                value: "boot",
+                label:
+                  process.platform === "darwin"
+                    ? "Start or restart, enable at login"
+                    : "Start or restart, enable at boot",
+              },
+              { value: "start", label: "Start or restart" },
+              { value: "later", label: "Save only" },
+            ],
+          }),
+        )
+      : "later";
+
     const config = configSchema.parse({
       telegram: {
-        token: answers.token.trim() || current?.telegram.token,
-        ownerId: answers.ownerId,
+        token: token.trim() || current?.telegram.token,
+        ownerId,
         proxyUrl: current?.telegram.proxyUrl,
       },
-      /** 保留稳定入口的软链接，避免升级后仍指向已删除的版本目录。 */
-      codexPath: resolve(executable),
+      defaultAgent,
+      agents: agentEntries,
     });
-    try {
-      await createCodexAgent(config.codexPath);
-    } catch {
-      throw new Error("Codex check failed. Check its path and permissions; config unchanged.");
+
+    for (const entry of configuredAgents(config)) {
+      const definition = agentDefinitions[entry.type];
+      try {
+        const agent = await createAgent(entry.type, entry.path);
+        agent.disconnect();
+      } catch {
+        throw new Error(
+          `${definition.label} check failed. Check its path and permissions; config unchanged.`,
+        );
+      }
     }
 
     /** 校验完成后在同目录原子替换，取消或失败时不留下半份配置。 */
@@ -115,8 +198,7 @@ program
     chmodSync(appDirectory, 0o700);
     writeJson(join(appDirectory, "config.json"), config);
     p.outro("Config saved. Run tellrun restart to reload.");
-    if (answers.launch !== "later")
-      await manageService("restart", { enable: answers.launch === "boot" });
+    if (launch !== "later") await manageService("restart", { enable: launch === "boot" });
     else
       console.log(
         ["linux", "darwin"].includes(process.platform)

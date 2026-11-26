@@ -77,7 +77,7 @@ export function createUpdateChecker(proxyUrl?: string) {
   return {
     version: tellrunVersion,
     /** 把当前实例信息交给 Agent 核对；只生成任务说明，不在消息服务中执行升级。 */
-    upgradePrompt() {
+    upgradePrompt(agentName = "the coding agent") {
       return [
         "请检查并升级当前运行的 Tellrun，目标是 npm latest 指向的最新正式版本。",
         `当前运行版本：${tellrunVersion}`,
@@ -85,8 +85,7 @@ export function createUpdateChecker(proxyUrl?: string) {
         `运行 Tellrun 的 Node.js：${JSON.stringify(process.execPath)}`,
         "先确认实际安装位置、服务启动方式、最新正式版本及 Node.js 兼容性；没有更新的正式版时只报告检查结果，不降级。",
         "npm 全局安装的升级流程是 tellrun stop、npm install -g tellrun@<核对后的版本>、tellrun restart；使用当前实例对应的 Node.js/npm 和安装前缀。其他安装方式按实际部署处理，保留未提交改动。",
-        "请实际完成升级，沿用当前权限与审批流程。仅升级 Tellrun，保留用户配置、会话和任务状态，不改动无关项目或升级 Codex、Node.js。",
-        "当前任务由独立的 Codex 后台执行，Tellrun 重启后可重新连接；保持 Codex 后台运行。",
+        `请实际完成升级，沿用当前权限与审批流程。仅升级 Tellrun，保留用户配置、会话和任务状态，不改动无关项目或升级 ${agentName}、Node.js。`,
         "停服前准备好安装、重启及失败恢复的完整步骤，并完成所需审批，避免停服后还要通过 Telegram 请求审批。如果无法安排服务恢复，保持服务在线并说明阻碍。",
         "完成后核对安装版本、服务状态与 Telegram 连接，报告升级前后版本和验证结果；失败时说明原因及恢复情况。",
       ].join("\n");

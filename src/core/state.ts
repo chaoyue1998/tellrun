@@ -12,20 +12,21 @@ import type {
   InteractionAnswer,
 } from "./types.js";
 
-/** 已绑定会话按原生 ID 匹配；空选择按版本匹配，定时任务不占用手动空会话。 */
+/** 已绑定会话按 Agent 与原生 ID 匹配；空选择按 Agent 与版本匹配，定时任务不占用手动空会话。 */
 function matchesSession(task: State["tasks"][number], channel: State["channels"][number]) {
+  if (task.agent !== channel.agent) return false;
   return channel.sessionId !== null
     ? task.sessionId === channel.sessionId
     : !task.cron &&
         task.sessionId === null &&
         task.channelId === channel.id &&
         task.cwd === channel.cwd &&
-        (task.sessionGeneration ?? 0) === (channel.sessionGeneration ?? 0);
+        task.sessionGeneration === channel.sessionGeneration;
 }
 
-/** 预览、结果和交互共用来源标识，多个会话交替输出时仍能辨认所属任务。 */
-function taskHeading(task: State["tasks"][number]) {
-  return `Task #${task.id}${task.cron ? ` · Cron #${task.cron.id}` : ""}\nSession: ${task.sessionId ?? "Not started"}\nDirectory: ${task.cwd}`;
+/** 预览、结果和交互共用来源标识，多 Agent 与多会话交替输出时仍能辨认所属任务。 */
+function taskHeading(task: State["tasks"][number], agentLabel: (agentId: string) => string) {
+  return `Task #${task.id} · ${agentLabel(task.agent)}${task.cron ? ` · Cron #${task.cron.id}` : ""}\nSession: ${task.sessionId ?? "Not started"}\nDirectory: ${task.cwd}`;
 }
 
 /** 管理业务状态及事务；初始快照、保存方式和默认目录由组装入口提供。 */
@@ -33,6 +34,12 @@ export function createState(options: {
   initialState: State | undefined;
   save: (state: State) => void;
   cwd: string;
+  /** 新建聊天及兜底切换使用的默认 Agent 标识。 */
+  defaultAgent: string;
+  /** 当前启用的全部 Agent 标识；已移除的 Agent 在启动恢复时切回默认项。 */
+  availableAgents: readonly string[];
+  /** 将 Agent 标识转换为展示名称，用于任务标题和定时计划列表。 */
+  agentLabel: (agentId: string) => string;
 }) {
   let state: State = structuredClone(
     options.initialState ?? {
@@ -46,6 +53,8 @@ export function createState(options: {
     },
   );
   if (!options.initialState) options.save(state);
+  const { defaultAgent, agentLabel } = options;
+  const availableAgents = new Set(options.availableAgents);
   let updating = false;
   /** 流式预览只保留内存中的最新片段，不为每个文本增量写磁盘。 */
   const drafts = new Map<number, AgentMessage[]>();
@@ -99,7 +108,7 @@ export function createState(options: {
     return state.channels.reduce(
       (at, channel) =>
         channel.platform === source.platform && channel.accountId === source.accountId
-          ? Math.max(at, channel.replyRetryAt ?? 0)
+          ? Math.max(at, channel.replyRetryAt)
           : at,
       0,
     );
@@ -113,20 +122,22 @@ export function createState(options: {
       attachments = [],
       priority = true,
       ...delivery
-    }: Pick<
-      State["outbox"][number],
-      | "interactionId"
-      | "questionIndex"
-      | "messageId"
-      | "permissionMenuId"
-      | "modelMenuId"
-      | "sessionMenuId"
-      | "cwdMenuId"
-      | "sessions"
-      | "markdown"
-      | "priority"
-      | "taskId"
-      | "segmentId"
+    }: Partial<
+      Pick<
+        State["outbox"][number],
+        | "interactionId"
+        | "questionIndex"
+        | "messageId"
+        | "permissionMenuId"
+        | "modelMenuId"
+        | "agentMenuId"
+        | "sessionMenuId"
+        | "cwdMenuId"
+        | "markdown"
+        | "priority"
+        | "taskId"
+        | "segmentId"
+      >
     > & { attachments?: AgentAttachment[] } = {},
   ) {
     if (text === undefined) return;
@@ -175,7 +186,7 @@ export function createState(options: {
         id: ++replyId,
         channelId,
         priority,
-        text: `${task ? `${taskHeading(task)}\n\n` : ""}${
+        text: `${task ? `${taskHeading(task, agentLabel)}\n\n` : ""}${
           parts.length > 1
             ? `(${index + 1}/${parts.length})\n${delivery.markdown ? "\n" : ""}${part}`
             : part
@@ -187,9 +198,9 @@ export function createState(options: {
         ...(index && delivery.taskId ? { messageId: undefined } : {}),
         ...(delivery.permissionMenuId ||
         delivery.modelMenuId ||
+        delivery.agentMenuId ||
         delivery.sessionMenuId ||
         delivery.cwdMenuId ||
-        delivery.sessions?.length ||
         (delivery.interactionId && !delivery.messageId)
           ? { promptEnd: index === parts.length - 1 }
           : {}),
@@ -201,7 +212,8 @@ export function createState(options: {
         afterId: replyId,
         id: ++replyId,
         channelId,
-        text: task ? taskHeading(task) : "",
+        priority: false,
+        text: task ? taskHeading(task, agentLabel) : "",
         ...(task ? { taskId: task.id } : {}),
         attachment,
         attempts: 0,
@@ -250,9 +262,11 @@ export function createState(options: {
         channelId: channel.id,
         cron,
         cwd: channel.cwd,
+        agent: channel.agent,
         sessionId: channel.sessionId,
-        sessionGeneration: channel.sessionGeneration ?? 0,
+        sessionGeneration: channel.sessionGeneration,
         runId: null,
+        previewMessages: [],
         prompt,
         attachments,
         permissionMode: channel.permissionMode,
@@ -271,12 +285,14 @@ export function createState(options: {
   const crons = createCrons({
     read: () => state,
     update,
+    agentLabel,
     enqueueReply,
     createTask: (channel, cron, scheduledAt) =>
       createTask(
         {
           ...channel,
           cwd: cron.cwd,
+          agent: cron.agent,
           sessionId: null,
           model: cron.model,
           reasoningEffort: cron.reasoningEffort,
@@ -288,8 +304,65 @@ export function createState(options: {
       ),
   });
 
+  /** 切换聊天使用的 Agent：保存当前 Agent 的会话/模型/权限快照，并按目录恢复目标 Agent 状态。 */
+  function setAgent(
+    channelId: number,
+    nextAgent: string,
+    options: { reply?: string; keepMessageId?: number } = {},
+  ) {
+    update(() => {
+      const channel = state.channels.find((item) => item.id === channelId);
+      if (!channel) return;
+      const previousAgent = channel.agent;
+      closeMenu(channelId, "agentMenu", options.keepMessageId);
+      closeMenu(channelId, "permissionMenu");
+      closeMenu(channelId, "modelMenu");
+      closeMenu(channelId, "sessionMenu");
+      closeMenu(channelId, "cwdMenu");
+      if (previousAgent !== nextAgent) {
+        channel.agentStates[previousAgent] = {
+          cwd: channel.cwd,
+          sessionId: channel.sessionId,
+          permissionMode: channel.permissionMode,
+          model: channel.model,
+          reasoningEffort: channel.reasoningEffort,
+        };
+        const restored = channel.agentStates[nextAgent];
+        channel.agent = nextAgent;
+        channel.sessionGeneration += 1;
+        channel.sessionId = restored && restored.cwd === channel.cwd ? restored.sessionId : null;
+        channel.permissionMode = restored ? restored.permissionMode : null;
+        channel.model = restored ? restored.model : null;
+        channel.reasoningEffort = restored ? restored.reasoningEffort : null;
+      }
+      if (options.reply)
+        enqueueReply(
+          channelId,
+          options.reply,
+          options.keepMessageId !== undefined ? { messageId: options.keepMessageId } : {},
+        );
+    });
+  }
+
   /** 菜单始终读取当前事务快照，避免捕获 update 替换前的状态。 */
-  const { closeMenu, ...menus } = createMenus({ read: () => state, update, enqueueReply });
+  const { closeMenu, ...menus } = createMenus({
+    read: () => state,
+    update,
+    switchAgent: (channelId, agentId, label, keepMessageId) => {
+      const channel = state.channels.find((item) => item.id === channelId);
+      const restored =
+        channel?.agent === agentId
+          ? channel.sessionId
+          : channel?.agentStates[agentId]?.cwd === channel?.cwd
+            ? channel?.agentStates[agentId]?.sessionId
+            : null;
+      setAgent(channelId, agentId, {
+        ...(keepMessageId !== undefined ? { keepMessageId } : {}),
+        reply: `✓ Agent: ${label}\nDirectory: ${channel?.cwd ?? options.cwd}\nSession: ${restored ?? "New session (send a message or use /list)"}`,
+      });
+    },
+    enqueueReply,
+  });
 
   /** 从已保存答案生成选中提示，提交、关闭和迟到回执都保留用户的选择。 */
   function formatInteractionMessage(
@@ -362,9 +435,8 @@ export function createState(options: {
           {
             taskId: id,
             segmentId: message.id,
-            messageId:
-              task.previewMessages?.find((preview) => preview.segmentId === message.id)
-                ?.messageId ?? (index === 0 ? task.previewMessageId : undefined),
+            messageId: task.previewMessages.find((preview) => preview.segmentId === message.id)
+              ?.messageId,
             markdown: true,
             priority: false,
             attachments: index === messages.length - 1 ? (result.attachments ?? []) : [],
@@ -421,6 +493,7 @@ export function createState(options: {
           "interaction",
           "permissions",
           "model",
+          "agent",
           "session",
           "sessionPage",
           "cwd",
@@ -436,7 +509,14 @@ export function createState(options: {
             id: state.channels.reduce((max, item) => Math.max(max, item.id), 0) + 1,
             /** 创建聊天时固定服务启动目录，后续命令直接使用已保存的路径。 */
             cwd: options.cwd,
+            agent: defaultAgent,
+            agentStates: {},
+            agentMenu: null,
             sessionId: null,
+            sessionGeneration: 0,
+            sessionMenu: null,
+            cwdMenu: null,
+            replyRetryAt: 0,
             permissionMode: null,
             permissionMenu: null,
             model: null,
@@ -456,6 +536,7 @@ export function createState(options: {
             "interaction",
             "permissions",
             "model",
+            "agent",
             "session",
             "sessionPage",
             "cwd",
@@ -470,7 +551,7 @@ export function createState(options: {
     reply(
       channelId: number,
       text: string,
-      delivery: Pick<State["outbox"][number], "sessions" | "markdown"> = {},
+      delivery: Pick<State["outbox"][number], "markdown"> = {},
     ) {
       update(() => {
         if (state.channels.some((channel) => channel.id === channelId))
@@ -481,7 +562,7 @@ export function createState(options: {
     replyTask(id: number, text: string) {
       update(() => {
         const task = state.tasks.find((item) => item.id === id);
-        if (task) enqueueReply(task.channelId, `${taskHeading(task)}\n\n${text}`);
+        if (task) enqueueReply(task.channelId, `${taskHeading(task, agentLabel)}\n\n${text}`);
       });
     },
     /** 只回收指定来源已确认的事件；确认规则由连接器提供，不解释事件编号。 */
@@ -502,13 +583,15 @@ export function createState(options: {
           state.inboundUpdates = pending;
         });
     },
+    setAgent,
     /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
     setSession(channelId: number, cwd: string, sessionId: string | null, reply?: string) {
       update(() => {
         const channel = state.channels.find((channel) => channel.id === channelId);
         if (channel) {
           if (cwd !== channel.cwd || sessionId !== channel.sessionId)
-            channel.sessionGeneration = (channel.sessionGeneration ?? 0) + 1;
+            channel.sessionGeneration += 1;
+          closeMenu(channelId, "agentMenu");
           closeMenu(channelId, "permissionMenu");
           closeMenu(channelId, "modelMenu");
           closeMenu(channelId, "sessionMenu");
@@ -542,7 +625,7 @@ export function createState(options: {
       return activeTasks(source).flatMap((task) => {
         const messages = drafts.get(task.id);
         if (task.status !== "running" || !messages?.length) return [];
-        /** 选择题独立等待答案，不屏蔽 Codex 已产生的后续输出。 */
+        /** 选择题独立等待答案，不屏蔽 Agent 已产生的后续输出。 */
         if (
           task.interactions.some(
             (item) => item.kind === "approval" && item.blocking && item.status !== "closed",
@@ -555,12 +638,13 @@ export function createState(options: {
           {
             taskId: task.id,
             chatId: channel.chatId,
-            messages: messages.map((message, index) => ({
+            messages: messages.map((message) => ({
               ...message,
-              text: message.text.trim() ? `${taskHeading(task)}\n\n${message.text}` : "",
-              messageId:
-                task.previewMessages?.find((preview) => preview.segmentId === message.id)
-                  ?.messageId ?? (index === 0 ? task.previewMessageId : undefined),
+              text: message.text.trim()
+                ? `${taskHeading(task, agentLabel)}\n\n${message.text}`
+                : "",
+              messageId: task.previewMessages.find((preview) => preview.segmentId === message.id)
+                ?.messageId,
             })),
           },
         ];
@@ -568,15 +652,11 @@ export function createState(options: {
     },
     /** 回执按 Agent 分段关联；慢发送不能把新输入对应的结果接到旧消息上。 */
     recordPreview(id: number, messageId: number, segmentId?: string) {
+      if (!segmentId) return;
       update(() => {
         const task = state.tasks.find((item) => item.id === id);
-        if (task) {
-          if (segmentId) {
-            task.previewMessages ??= [];
-            if (!task.previewMessages.some((preview) => preview.segmentId === segmentId))
-              task.previewMessages.push({ segmentId, messageId });
-          } else task.previewMessageId = messageId;
-        }
+        if (task && !task.previewMessages.some((preview) => preview.segmentId === segmentId))
+          task.previewMessages.push({ segmentId, messageId });
         const reply = state.outbox.find(
           (item) => item.taskId === id && item.segmentId === segmentId && !item.attachment,
         );
@@ -714,14 +794,14 @@ export function createState(options: {
         if (request.kind === "approval") {
           enqueueReply(
             task.channelId,
-            `${taskHeading(task)}\n\nApproval\n${request.text}\n\nChoose below.`,
+            `${taskHeading(task, agentLabel)}\n\nApproval\n${request.text}\n\nChoose below.`,
             { interactionId: request.id },
           );
         } else {
           for (const [index, question] of request.questions.entries())
             enqueueReply(
               task.channelId,
-              `${taskHeading(task)}\n\nQuestion ${index + 1}/${request.questions.length}\n${question.header}\n${question.question}${question.options.map((option, i) => `\n\n${i + 1}. ${option.label}\n${option.description}`).join("")}\n\n${question.allowText ? "Pick an option or reply to this message." : "Pick an option or reply with its number or label."}\nAnswer all questions to submit.`,
+              `${taskHeading(task, agentLabel)}\n\nQuestion ${index + 1}/${request.questions.length}\n${question.header}\n${question.question}${question.options.map((option, i) => `\n\n${i + 1}. ${option.label}\n${option.description}`).join("")}\n\n${question.allowText ? "Pick an option or reply to this message." : "Pick an option or reply with its number or label."}\nAnswer all questions to submit.`,
               { interactionId: request.id, questionIndex: index },
             );
         }
@@ -843,14 +923,25 @@ export function createState(options: {
     closeInteraction,
     /** 有轮次 ID 的任务重新连接；未确认派发和在途输入不自动重放。 */
     recoverTasks() {
+      /** 通道先前选中的 Agent 若已从配置中移除，切回默认 Agent 并保留旧快照。 */
+      for (const channel of [...state.channels]) {
+        if (!availableAgents.has(channel.agent)) {
+          setAgent(channel.id, defaultAgent);
+        }
+      }
       if (
         state.channels.some(
           (channel) =>
-            channel.permissionMenu || channel.modelMenu || channel.sessionMenu || channel.cwdMenu,
+            channel.agentMenu ||
+            channel.permissionMenu ||
+            channel.modelMenu ||
+            channel.sessionMenu ||
+            channel.cwdMenu,
         )
       )
         update(() => {
           for (const channel of state.channels) {
+            closeMenu(channel.id, "agentMenu");
             closeMenu(channel.id, "permissionMenu");
             closeMenu(channel.id, "modelMenu");
             closeMenu(channel.id, "sessionMenu");
@@ -860,7 +951,7 @@ export function createState(options: {
       for (const task of state.tasks.filter(
         (task) => activeTaskStatuses.has(task.status) && task.status !== "queued",
       )) {
-        /** 下载阶段从未提交给 Codex；主输入和补充输入都可以安全重新准备。 */
+        /** 下载阶段从未提交给 Agent；主输入和补充输入都可以安全重新准备。 */
         if (
           task.status === "preparing" ||
           task.inputs.some((input) => input.status === "preparing")
@@ -906,11 +997,13 @@ export function createState(options: {
         [...delivering.values()].some(
           (reply) =>
             Boolean(reply.attachment) === (kind === "attachment") &&
-            Boolean(reply.priority) === (kind === "priority"),
+            reply.priority === (kind === "priority"),
         )
       )
         return;
       for (const channel of state.channels) {
+        if (channel.agentMenu && channel.agentMenu.expiresAt <= Date.now())
+          update(() => closeMenu(channel.id, "agentMenu"));
         if (channel.permissionMenu && channel.permissionMenu.expiresAt <= Date.now())
           update(() => closeMenu(channel.id, "permissionMenu"));
         if (channel.modelMenu && channel.modelMenu.expiresAt <= Date.now())
@@ -921,7 +1014,7 @@ export function createState(options: {
           update(() => closeMenu(channel.id, "cwdMenu"));
       }
       for (const reply of state.outbox) {
-        if (Boolean(reply.priority) !== (kind === "priority")) continue;
+        if (reply.priority !== (kind === "priority")) continue;
         const interaction = state.interactions.find((item) => item.id === reply.interactionId);
         if (
           reply.interactionId &&
@@ -965,6 +1058,7 @@ export function createState(options: {
                 ? channel.permissionMenu
                 : undefined,
             modelMenu: channel.modelMenu?.id === reply.modelMenuId ? channel.modelMenu : undefined,
+            agentMenu: channel.agentMenu?.id === reply.agentMenuId ? channel.agentMenu : undefined,
             sessionMenu:
               channel.sessionMenu?.id === reply.sessionMenuId ? channel.sessionMenu : undefined,
             cwdMenu: channel.cwdMenu?.id === reply.cwdMenuId ? channel.cwdMenu : undefined,
@@ -982,6 +1076,7 @@ export function createState(options: {
         questionIndex?: number;
         permissionMenuId?: string;
         modelMenuId?: string;
+        agentMenuId?: string;
         sessionMenuId?: string;
         cwdMenuId?: string;
       },
@@ -994,6 +1089,7 @@ export function createState(options: {
         if (
           (delivery?.permissionMenuId ||
             delivery?.modelMenuId ||
+            delivery?.agentMenuId ||
             delivery?.sessionMenuId ||
             delivery?.cwdMenuId) &&
           channelId !== undefined
@@ -1003,14 +1099,17 @@ export function createState(options: {
             ? channel?.cwdMenu
             : delivery.sessionMenuId
               ? channel?.sessionMenu
-              : delivery.modelMenuId
-                ? channel?.modelMenu
-                : channel?.permissionMenu;
+              : delivery.agentMenuId
+                ? channel?.agentMenu
+                : delivery.modelMenuId
+                  ? channel?.modelMenu
+                  : channel?.permissionMenu;
           if (
             menu &&
             menu.id ===
               (delivery.cwdMenuId ??
                 delivery.sessionMenuId ??
+                delivery.agentMenuId ??
                 delivery.modelMenuId ??
                 delivery.permissionMenuId) &&
             menu.expiresAt > Date.now()
@@ -1079,7 +1178,7 @@ export function createState(options: {
             retryAt: Date.now() + seconds * 1000,
           });
         if (channel)
-          channel.replyRetryAt = Math.max(channel.replyRetryAt ?? 0, Date.now() + seconds * 1_000);
+          channel.replyRetryAt = Math.max(channel.replyRetryAt, Date.now() + seconds * 1_000);
       });
     },
   };

@@ -33,7 +33,7 @@ const resultAttachmentSchema = z.strictObject({
   kind: z.enum(["image", "file"]),
 });
 
-/** 审批、权限、模型和推理档位共用展示选项。 */
+/** 审批、权限、模型、Agent 和推理档位共用展示选项。 */
 const optionSchema = z.strictObject({ id: z.string().min(1), label: z.string() });
 
 /** 菜单共用有效期和消息清理记录，模型菜单扩展第二步所需的信息。 */
@@ -50,6 +50,15 @@ const listMenuSchema = menuSchema.extend({
   loading: z.boolean(),
 });
 
+/** 每个 Agent 独立记忆的会话、模型与权限选择，切换回来时按目录恢复。 */
+const agentSelectionSchema = z.strictObject({
+  cwd: z.string().min(1),
+  sessionId: z.string().nullable(),
+  permissionMode: z.string().min(1).nullable(),
+  model: z.string().min(1).nullable(),
+  reasoningEffort: z.string().min(1).nullable(),
+});
+
 /** 仅接受当前完整状态结构，字段缺失、额外字段或格式无效时拒绝启动。 */
 export const stateSchema = z
   .strictObject({
@@ -61,29 +70,32 @@ export const stateSchema = z
         chatId: z.string(),
         userId: z.string(),
         cwd: z.string().min(1),
+        /** 当前聊天激活的 Agent 标识。 */
+        agent: z.string().min(1),
+        /** 切换 Agent 时保存各 Agent 各自的会话与配置快照，便于无损切回。 */
+        agentStates: z.record(z.string().min(1), agentSelectionSchema),
+        agentMenu: menuSchema.nullable(),
         sessionId: z.string().nullable(),
-        /** 尚未取得原生会话 ID 时，用选择版本隔离切换前后的新任务；缺省兼容旧状态。 */
-        sessionGeneration: nonnegativeInteger.optional(),
-        /** 仅保存当前页选项与已访问页的游标；缺省兼容尚未打开分页的状态。 */
+        /** 尚未取得原生会话 ID 时，用选择版本隔离切换前后的新任务。 */
+        sessionGeneration: nonnegativeInteger,
+        /** 仅保存当前页选项与已访问页的游标。 */
         sessionMenu: listMenuSchema
           .extend({
             options: z.array(optionSchema).max(listPageSize),
             cursors: z.array(z.string().min(1).nullable()).min(1),
           })
           .refine((menu) => menu.cursors[0] === null && menu.page < menu.cursors.length)
-          .nullable()
-          .optional(),
-        /** 缺省兼容旧状态；目录仅在菜单有效期内保留，不作为长期历史缓存。 */
+          .nullable(),
+        /** 目录仅在菜单有效期内保留，不作为长期历史缓存。 */
         cwdMenu: listMenuSchema
           .refine((menu) => menu.page < Math.max(1, Math.ceil(menu.options.length / listPageSize)))
-          .nullable()
-          .optional(),
+          .nullable(),
         /** 出站限流按机器人账号共用；撤回消息后也保留，避免重启绕过等待。 */
-        replyRetryAt: nonnegativeInteger.optional(),
-        /** 模式标识属于 Agent；空值沿用默认模式。 */
+        replyRetryAt: nonnegativeInteger,
+        /** 模式标识属于当前 Agent；空值沿用默认模式。 */
         permissionMode: z.string().min(1).nullable(),
         permissionMenu: menuSchema.nullable(),
-        /** 显式空值表示沿用 Codex 的模型配置。 */
+        /** 显式空值表示沿用当前 Agent 的模型配置。 */
         model: z.string().min(1).nullable(),
         reasoningEffort: z.string().min(1).nullable(),
         modelMenu: z
@@ -126,6 +138,8 @@ export const stateSchema = z
         timezone: z.string().min(1),
         prompt: z.string().min(1),
         cwd: z.string().min(1),
+        /** 固定创建计划时选中的 Agent。 */
+        agent: z.string().min(1),
         model: z.string().min(1).nullable(),
         reasoningEffort: z.string().min(1).nullable(),
         permissionMode: z.string().min(1).nullable(),
@@ -142,17 +156,15 @@ export const stateSchema = z
         /** 执行快照独立于计划，删除计划后仍能跟踪已开始的任务。 */
         cron: z.strictObject({ id, scheduledAt: nonnegativeInteger }).nullable(),
         cwd: z.string(),
+        /** 固定任务提交时选中的 Agent；不同 Agent 的任务可并发执行。 */
+        agent: z.string().min(1),
         sessionId: z.string().nullable(),
         /** 固定提交时的选择版本，防止迟到会话回调覆盖切换后的选择。 */
-        sessionGeneration: nonnegativeInteger.optional(),
+        sessionGeneration: nonnegativeInteger,
         /** 派发前显式保存空值，取得轮次 ID 后用于重启恢复。 */
         runId: z.string().min(1).nullable(),
-        /** 旧版整轮预览恢复时由首条输出沿用。 */
-        previewMessageId: id.optional(),
         /** Agent 输出分段与消息一一关联，重启和终态均沿用各自的消息。 */
-        previewMessages: z
-          .array(z.strictObject({ segmentId: z.string().min(1), messageId: id }))
-          .optional(),
+        previewMessages: z.array(z.strictObject({ segmentId: z.string().min(1), messageId: id })),
         prompt: z.string(),
         attachments: attachmentsSchema,
         permissionMode: z.string().min(1).nullable(),
@@ -226,8 +238,8 @@ export const stateSchema = z
         markdown: z.boolean().optional(),
         /** 每张图片独立排队，失败重试不重发已成功的文字或其他图片。 */
         attachment: resultAttachmentSchema.optional(),
-        /** 控制回复可越过普通结果；缺省记录仍按普通回复发送。 */
-        priority: z.boolean().optional(),
+        /** 控制回复优先于普通任务结果投递。 */
+        priority: z.boolean(),
         /** 同一回复的前一段或正文；前项出队后才能发送，重启后仍保持顺序。 */
         afterId: id.optional(),
         attempts: nonnegativeInteger,
@@ -239,24 +251,23 @@ export const stateSchema = z
         messageId: id.optional(),
         permissionMenuId: z.uuid().optional(),
         modelMenuId: z.uuid().optional(),
+        agentMenuId: z.uuid().optional(),
         sessionMenuId: z.uuid().optional(),
         cwdMenuId: z.uuid().optional(),
-        /** 兼容旧版待发送的会话按钮；新列表使用 sessionMenuId 关联分页菜单。 */
-        sessions: z.array(optionSchema).max(listPageSize).optional(),
       }),
     ),
   })
   .refine((state) => {
     const channels = new Set(state.channels.map((row) => row.id));
     const active = state.tasks.filter((row) => activeTaskStatuses.has(row.status));
-    /** 原生会话全局唯一占用；未绑定的手动任务按聊天、目录和选择版本区分。 */
+    /** 原生会话按 Agent 隔离且唯一占用；未绑定的手动任务按 Agent、聊天、目录和版本区分。 */
     const sessionKeys = active.map((row) =>
       JSON.stringify(
         row.sessionId !== null
-          ? ["session", row.sessionId]
+          ? ["session", row.agent, row.sessionId]
           : row.cron
             ? ["cron", row.id]
-            : ["selection", row.channelId, row.cwd, row.sessionGeneration ?? 0],
+            : ["selection", row.agent, row.channelId, row.cwd, row.sessionGeneration],
       ),
     );
     return (

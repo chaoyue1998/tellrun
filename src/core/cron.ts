@@ -34,6 +34,7 @@ function formatTime(timestamp: number | null, timezone: string) {
 export function createCrons(context: {
   read: () => State;
   update: <T>(action: () => T) => T;
+  agentLabel: (agentId: string) => string;
   enqueueReply: (channelId: number, text: string) => void;
   createTask: (
     channel: State["channels"][number],
@@ -103,7 +104,7 @@ export function createCrons(context: {
             ]
               .filter(Boolean)
               .join(" · ");
-            return `#${cron.id} · ${cron.enabled ? "Enabled" : "Disabled"}${activity ? ` · ${activity}` : ""}\n${cron.expression}\nTimezone: ${cron.timezone}\nDirectory: ${cron.cwd}\nTask: ${cron.prompt}\nNext: ${formatTime(cron.nextRunAt, cron.timezone)}`;
+            return `#${cron.id} · ${cron.enabled ? "Enabled" : "Disabled"}${activity ? ` · ${activity}` : ""}\n${cron.expression}\nAgent: ${context.agentLabel(cron.agent)}\nTimezone: ${cron.timezone}\nDirectory: ${cron.cwd}\nTask: ${cron.prompt}\nNext: ${formatTime(cron.nextRunAt, cron.timezone)}`;
           }),
         ].join("\n\n");
       }
@@ -124,6 +125,7 @@ export function createCrons(context: {
             timezone,
             prompt,
             cwd,
+            agent: channel.agent,
             model: channel.model,
             reasoningEffort: channel.reasoningEffort,
             permissionMode: channel.permissionMode,
@@ -131,7 +133,7 @@ export function createCrons(context: {
             nextRunAt,
             pendingAt: null,
           });
-          return `Cron #${id} created (enabled).\n${expression}\nTimezone: ${timezone}\nDirectory: ${cwd}\nTask: ${prompt}\nNext: ${formatTime(nextRunAt, timezone)}`;
+          return `Cron #${id} created (enabled).\n${expression}\nAgent: ${context.agentLabel(channel.agent)}\nTimezone: ${timezone}\nDirectory: ${cwd}\nTask: ${prompt}\nNext: ${formatTime(nextRunAt, timezone)}`;
         });
       }
       const action = input.match(/^(del|enable|disable)\s+([1-9]\d*)$/);

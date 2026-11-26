@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { appDirectory, loadConfig } from "./config.js";
+import { appDirectory, configuredAgents, loadConfig } from "./config.js";
 import type { ServiceAction, ServiceOptions } from "./service.js";
 
 /** 所有后台命令使用同一个用户服务名，服务定义与配置一起保存。 */
@@ -121,10 +121,12 @@ export async function manageSystemdService(action: ServiceAction, options: Servi
     return;
   }
 
-  /** 服务不能依赖当前终端临时提供的凭据或相对 Codex 路径。 */
+  /** 服务不能依赖当前终端临时提供的凭据或相对 Agent 路径。 */
   const config = loadConfig({});
-  if (!isAbsolute(config.codexPath) || !existsSync(config.codexPath)) {
-    throw new Error("Background mode needs an absolute Codex path. Run tellrun setup.");
+  for (const entry of configuredAgents(config)) {
+    if (!isAbsolute(entry.path) || !existsSync(entry.path)) {
+      throw new Error(`Background mode needs an absolute ${entry.type} path. Run tellrun setup.`);
+    }
   }
   const entry = fileURLToPath(new URL("./cli.js", import.meta.url));
   if (!existsSync(entry))

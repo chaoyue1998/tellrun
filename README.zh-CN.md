@@ -2,9 +2,9 @@
   <img src="docs/assets/tellrun-icon.png" alt="Tellrun 图标" width="128" height="128" />
 </p>
 
-# Tellrun — 通过 Telegram 远程使用 OpenAI Codex
+# Tellrun — 通过 Telegram 远程使用 AI 编程 Agent
 
-**Tellrun 是可自行部署的 Telegram 机器人，基于 OpenAI Codex CLI 提供远程 AI 编程、持久化会话和流式回复。**
+**Tellrun 是可自行部署的 Telegram 机器人，支持接入 OpenAI Codex CLI 与 Antigravity CLI (`agy`)，提供远程 AI 编程、持久化会话和流式回复。**
 
 在服务器上运行 Tellrun，即可通过手机或电脑上的 Telegram 提交编码任务、继续对话和查看执行结果，无需一直保持 SSH 终端连接。
 
@@ -30,7 +30,9 @@
 ### 1. 准备环境
 
 - **Node.js ≥ 24.5.0**。
-- **[Codex CLI](https://github.com/openai/codex)**：在运行 Tellrun 的同一系统用户下安装并完成登录，确认可以在终端正常使用。
+- **已安装的编程 Agent CLI**（在运行 Tellrun 的同一系统用户下安装并完成登录，确认可在终端正常使用）：
+  - **[Codex CLI](https://github.com/openai/codex)**（`codex`）
+  - **[Antigravity CLI](https://antigravity.google/)**（`agy`）
 
 ### 2. 安装并配置
 
@@ -57,6 +59,7 @@ tellrun setup
 
 | 命令                  | 作用                                                    |
 | --------------------- | ------------------------------------------------------- |
+| `/agent [名称]`       | 通过按钮或名称切换当前编程 Agent（如 `codex`、`agy`）   |
 | `/new [名称]`         | 创建并切换到新会话，名称可省略                          |
 | `/list`               | 分页显示当前项目会话，每页 10 个，支持上下翻页和点击切换 |
 | `/cwd`                | 查看当前目录，分页选择 Codex 历史项目目录，每页 10 个    |
@@ -157,7 +160,9 @@ tellrun uninstall
 | `telegram.token`    | 字符串             | 必填，无默认值                 | 从 BotFather 获取的机器人 Token。                                                          |
 | `telegram.ownerId`  | 正整数或数字字符串 | 必填，无默认值                 | 本人 Telegram 数字用户 ID，用于授权访问，不是 `@用户名`。建议使用数字形式。                |
 | `telegram.proxyUrl` | 字符串             | 可选；省略时继承运行环境的代理 | 支持 `http://` 或 `https://` 代理地址；设为 `""` 时明确直连。                              |
-| `codexPath`         | 字符串             | 可选，默认 `"codex"`           | Codex 命令名或可执行文件路径。命令名按 `PATH` 查找；`tellrun setup` 保存入口的绝对路径并保留软链接，避免升级后路径失效。 |
+| `defaultAgent`      | `"codex"` \| `"agy"` | 可选，默认为首个已配置 Agent | 默认启用的 Agent，可通过 `TELLRUN_AGENT` 覆盖。                                                                                          |
+| `agents.codex.path` | 字符串               | 可选（至少配置一个 Agent）   | Codex CLI 命令名或可执行文件路径，可通过 `CODEX_PATH` 覆盖。                                                                             |
+| `agents.agy.path`   | 字符串               | 可选（至少配置一个 Agent）   | Antigravity CLI (`agy`) 命令名或可执行文件路径，可通过 `AGY_PATH` 覆盖。可同时配置两者并在 Telegram 内通过 `/agent` 实时切换。 |
 
 配置在进程启动时读取。手动修改后运行 `tellrun restart`。
 

@@ -16,6 +16,7 @@ import {
 
 /** 按会话、任务、配置与计划、维护、帮助排序；菜单与命令识别共用，说明使用英文。 */
 const commands = [
+  { command: "agent", description: "Switch active coding agent" },
   { command: "new", description: "Create a new session with an optional name" },
   { command: "list", description: "Browse sessions, 10 per page, with switch buttons" },
   { command: "cwd", description: "Browse project directories or set a working directory" },
@@ -27,7 +28,7 @@ const commands = [
   { command: "permissions", description: "Select the permission mode for future tasks" },
   { command: "cron", description: "List, create, enable, disable, or delete scheduled tasks" },
   { command: "restart", description: "Restart Tellrun and reload configuration" },
-  { command: "update", description: "Ask Codex to upgrade Tellrun" },
+  { command: "update", description: "Ask the active agent to upgrade Tellrun" },
   { command: "help", description: "Show available commands" },
   { command: "start", description: "Show usage instructions" },
 ];
@@ -218,7 +219,7 @@ export function createTelegramConnection(
   /** 先保存选择，再关闭客户端等待提示；答复回调失败不能撤销或重发已保存的决定。 */
   bot.on("callback_query:data", async (ctx) => {
     const match = ctx.callbackQuery.data.match(/^i:([0-9a-f-]{36}):(a(\d+)|q(\d+)_(\d+))$/);
-    const selection = ctx.callbackQuery.data.match(/^([pmc]):([0-9a-f-]{36}):(\d+)$/);
+    const selection = ctx.callbackQuery.data.match(/^([pmca]):([0-9a-f-]{36}):(\d+)$/);
     /** 会话按钮作为独立事件交给核心层校验和切换。 */
     const session = ctx.callbackQuery.data.match(/^s:(\S+)$/u);
     const listPage = ctx.callbackQuery.data.match(/^([ld]):([0-9a-f-]{36}):(\d+)$/);
@@ -249,7 +250,13 @@ export function createTelegramConnection(
               : selection?.[2]
                 ? {
                     type:
-                      selection[1] === "p" ? "permissions" : selection[1] === "c" ? "cwd" : "model",
+                      selection[1] === "p"
+                        ? "permissions"
+                        : selection[1] === "c"
+                          ? "cwd"
+                          : selection[1] === "a"
+                            ? "agent"
+                            : "model",
                     id: selection[2],
                     optionIndex: Number(selection[3]),
                     messageId: ctx.callbackQuery.message.message_id,
@@ -523,7 +530,7 @@ export function createTelegramConnection(
               }
               try {
                 const interaction = reply.interaction;
-                const menu = reply.permissionMenu ?? reply.modelMenu;
+                const menu = reply.permissionMenu ?? reply.modelMenu ?? reply.agentMenu;
                 /** 发送与原地编辑共用按钮；确认结果和旧交互编辑会移除按钮。 */
                 const markup =
                   reply.promptEnd && menu?.options.length && menu.expiresAt > Date.now()
@@ -532,7 +539,7 @@ export function createTelegramConnection(
                           inline_keyboard: menu.options.map((option, index) => [
                             {
                               text: `${index + 1}. ${[...option.label].slice(0, 50).join("")}`,
-                              callback_data: `${reply.modelMenu ? "m" : "p"}:${menu.id}:${index}`,
+                              callback_data: `${reply.modelMenu ? "m" : reply.agentMenu ? "a" : "p"}:${menu.id}:${index}`,
                             },
                           ]),
                         },
@@ -563,14 +570,6 @@ export function createTelegramConnection(
                           },
                         }
                       : { reply_markup: { inline_keyboard: [] } };
-                /** 列表分段时只在末段显示按钮，完整会话 ID 不受标题截断影响。 */
-                if (reply.promptEnd && reply.sessions?.length)
-                  markup.reply_markup.inline_keyboard = reply.sessions.map((session, index) => [
-                    {
-                      text: `${index + 1}. ${[...session.label].slice(0, 50).join("")}`,
-                      callback_data: `s:${session.id}`,
-                    },
-                  ]);
                 /** 会话与目录复用分页按钮；长路径和游标留在核心状态中。 */
                 const listMenu = reply.sessionMenu ?? reply.cwdMenu;
                 if (reply.promptEnd && listMenu && listMenu.expiresAt > Date.now()) {
@@ -655,6 +654,7 @@ export function createTelegramConnection(
                   reply.messageId &&
                     !reply.modelMenuId &&
                     !reply.permissionMenuId &&
+                    !reply.agentMenuId &&
                     !reply.sessionMenuId &&
                     !reply.cwdMenuId
                     ? undefined
@@ -670,6 +670,9 @@ export function createTelegramConnection(
                           : {}),
                         ...(reply.promptEnd && reply.modelMenuId
                           ? { modelMenuId: reply.modelMenuId }
+                          : {}),
+                        ...(reply.promptEnd && reply.agentMenuId
+                          ? { agentMenuId: reply.agentMenuId }
                           : {}),
                         ...(reply.promptEnd && reply.sessionMenuId
                           ? { sessionMenuId: reply.sessionMenuId }

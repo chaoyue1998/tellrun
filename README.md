@@ -2,9 +2,9 @@
   <img src="docs/assets/tellrun-icon.png" alt="Tellrun icon" width="128" height="128" />
 </p>
 
-# Tellrun — Telegram Bot for OpenAI Codex
+# Tellrun — Telegram Bot for AI Coding Agents
 
-**Tellrun is a self-hosted Telegram bot for remote AI coding with OpenAI Codex CLI, persistent sessions, and streaming replies.**
+**Tellrun is a self-hosted Telegram bot for remote AI coding with OpenAI Codex CLI and Antigravity CLI (`agy`), persistent sessions, and streaming replies.**
 
 Run Tellrun on your server and use Telegram on your phone or desktop to send coding tasks, continue conversations, and read results without keeping an SSH terminal open.
 
@@ -30,7 +30,9 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 ### 1. Prerequisites
 
 - **Node.js ≥ 24.5.0**.
-- **[Codex CLI](https://github.com/openai/codex)**: install and sign in as the same operating system user that will run Tellrun. Confirm that Codex works in your terminal.
+- **A supported coding agent CLI** — install and sign in as the same operating system user that will run Tellrun, and confirm it works in your terminal:
+  - **[Codex CLI](https://github.com/openai/codex)** (`codex`)
+  - **[Antigravity CLI](https://antigravity.google/)** (`agy`)
 
 ### 2. Install and configure
 
@@ -57,6 +59,7 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 
 | Command               | Purpose                                                                                      |
 | --------------------- | -------------------------------------------------------------------------------------------- |
+| `/agent [name]`       | Switch the active coding agent (`codex`, `agy`) using buttons or by name                     |
 | `/new [name]`         | Create and select a session, with an optional name                                           |
 | `/list`               | Browse project sessions, 10 per page, with Previous / Next buttons; tap a session to switch  |
 | `/cwd`                | Show the current directory and browse Codex project directories, 10 per page                 |
@@ -157,7 +160,9 @@ Parameters in `~/.tellrun/config.json`:
 | `telegram.token`    | String                             | Required; no default                                       | Bot token obtained from BotFather.                                                                                          |
 | `telegram.ownerId`  | Positive integer or numeric string | Required; no default                                       | Your numeric Telegram user ID for authorized access, not your `@username`. A numeric value is recommended.                  |
 | `telegram.proxyUrl` | String                             | Optional; inherits environment proxy settings when omitted | Supports `http://` or `https://` proxy URLs; set to `""` to connect directly.                                               |
-| `codexPath`         | String                             | Optional; defaults to `"codex"`                            | Codex command name or executable path. Names are resolved through `PATH`; `tellrun setup` saves the absolute entry path, preserving symlinks so upgrades do not invalidate it. |
+| `defaultAgent`      | `"codex"` \| `"agy"`               | Optional; defaults to the first configured agent           | Default active coding agent. Can be overridden with `TELLRUN_AGENT`.                                                        |
+| `agents.codex.path` | String                             | Optional (at least one agent required)                     | Codex CLI command or executable path. Can be overridden with `CODEX_PATH`.                                                  |
+| `agents.agy.path`   | String                             | Optional (at least one agent required)                     | Antigravity CLI (`agy`) command or executable path. Can be overridden with `AGY_PATH`. Both `codex` and `agy` can be configured together and switched live via `/agent`. |
 
 Configuration is read when the process starts. Run `tellrun restart` after editing the file manually.
 

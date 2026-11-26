@@ -2,8 +2,14 @@ import { execFile } from "node:child_process";
 import { readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { createCodexAgent } from "./agents/codex.js";
-import { appDirectory, loadConfig } from "./config.js";
+import { createAgentRegistry } from "./agents/index.js";
+import {
+  type AgentType,
+  agentDefinitions,
+  appDirectory,
+  configuredAgents,
+  loadConfig,
+} from "./config.js";
 import { createRelayService } from "./core/relay.js";
 import { createState } from "./core/state.js";
 import { createTelegramConnection } from "./im/telegram.js";
@@ -57,17 +63,22 @@ try {
   const config = loadConfig();
   phase = "Loading state";
   store = openStore();
+  if (readyFile) rmSync(readyFile, { force: true });
+  phase = "Checking agents";
+  const agents = await createAgentRegistry(config);
+  for (const agent of agents.all()) {
+    if (agent.unavailableReason) logger.warn({ agent: agent.name }, agent.unavailableReason);
+    else logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
+  }
   /** 文件生命周期留在入口；核心层只接收初始快照、保存能力和默认工作目录。 */
   const state = createState({
     initialState: store.initialState,
     save: store.save,
     cwd: realpathSync(process.cwd()),
+    defaultAgent: config.defaultAgent,
+    availableAgents: configuredAgents(config).map((entry) => entry.type),
+    agentLabel: (id) => agents.get(id)?.name ?? id,
   });
-  if (readyFile) rmSync(readyFile, { force: true });
-  phase = "Checking agent";
-  const agent = await createCodexAgent(config.codexPath);
-  if (agent.unavailableReason) logger.warn({ agent: agent.name }, agent.unavailableReason);
-  else logger.info({ agent: agent.name, version: agent.version }, "Agent CLI ready");
 
   if (!stopping) {
     im = createTelegramConnection(
@@ -81,7 +92,7 @@ try {
     );
     relay = createRelayService({
       state,
-      agent,
+      agents,
       updates: createUpdateChecker(config.telegram.proxyUrl),
       prepareAttachments: im.prepareAttachments,
       restart: process.execve
@@ -115,14 +126,21 @@ try {
     (typeof error.code === "string" || typeof error.code === "number")
       ? error.code
       : undefined;
+  const failedType =
+    error instanceof Error &&
+    "agentType" in error &&
+    typeof error.agentType === "string" &&
+    error.agentType in agentDefinitions
+      ? (error.agentType as AgentType)
+      : undefined;
   logger.fatal(
     {
       phase,
       errorType: error instanceof Error ? error.name : "UnknownError",
       errorCode,
     },
-    phase === "Checking agent" && errorCode === "ENOENT"
-      ? "找不到 Codex 可执行文件。请检查 CODEX_PATH 或 ~/.tellrun/config.json 中的 codexPath，或运行 tellrun setup 重新配置。"
+    phase === "Checking agents" && errorCode === "ENOENT"
+      ? `${failedType ? agentDefinitions[failedType].label : "Agent"} executable not found. Check ${failedType ? agentDefinitions[failedType].envVar : "CODEX_PATH / AGY_PATH"} or ~/.tellrun/config.json, or run tellrun setup.`
       : (phase === "Loading config" || phase === "Loading state") && error instanceof Error
         ? error.message
         : "Service failed",

@@ -42,7 +42,12 @@ export interface IncomingMessage {
     | { type: "cwd"; id: string; optionIndex: number; messageId: number }
     | { type: "text"; text: string; replyToMessageId?: number }
     | { type: "attachments"; text: string; attachments: Attachment[] }
-    | { type: "permissions" | "model"; id: string; optionIndex: number; messageId: number }
+    | {
+        type: "permissions" | "model" | "agent";
+        id: string;
+        optionIndex: number;
+        messageId: number;
+      }
     | {
         type: "interaction";
         id: string;
@@ -128,6 +133,14 @@ export interface AgentModelSelection {
   reasoningEffort: string | null;
 }
 
+/** 允许安全展示给用户的 Agent 业务错误，避免把原始协议或系统错误转发到 IM。 */
+export class AgentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AgentError";
+  }
+}
+
 /** Agent 适配层暴露任务、会话与菜单选项，不向核心层泄露 RPC 类型。 */
 export interface Agent {
   name: string;
@@ -161,12 +174,12 @@ export interface Agent {
   ): Promise<AgentSessionHistory>;
   /** 只读取可选模型，不创建会话；独立连接避免影响正在执行的任务。 */
   listModels(cwd: string, signal: AbortSignal): Promise<AgentModel[]>;
-  /** 只读查询目录下的有效选择，不创建会话或提交任务。 */
+  /** 只读查询目录下的有效选择，不创建会话或提交任务；不支持推理档位的模型返回 null。 */
   describeModel(
     cwd: string,
     selection: AgentModelSelection,
     signal: AbortSignal,
-  ): Promise<AgentOption & { reasoningEffort: string }>;
+  ): Promise<AgentOption & { reasoningEffort: string | null }>;
   run(input: {
     /** 本地任务标识，用于隔离并发轮次的输入、交互与中断。 */
     taskId: number;
@@ -197,10 +210,20 @@ export interface Agent {
   steer(taskId: number, prompt: string, attachments?: AgentAttachment[]): Promise<void>;
   /** 只断开指定任务的客户端，省略标识时断开全部；后台任务及持久状态继续保留。 */
   disconnect(taskId?: number): void;
-  /** 清理指定会话的后台终端，不取消 Agent 当前轮次。 */
-  stop(cwd: string, sessionId: string, signal: AbortSignal): Promise<void>;
+  /** 清理指定会话的后台终端，不取消 Agent 当前轮次；未实现的 Agent 省略此方法。 */
+  stop?: (cwd: string, sessionId: string, signal: AbortSignal) => Promise<void>;
   /** 用户明确中断时才请求取消当前轮次。 */
   interrupt(taskId: number): void;
+}
+
+/** 多 Agent 路由接口；核心层按标识切换和分发任务，不依赖具体适配实现。 */
+export interface AgentRegistry {
+  defaultId: string;
+  list(): readonly AgentOption[];
+  has(id: string): boolean;
+  get(id?: string | null): Agent | undefined;
+  resolve(id?: string | null): Agent;
+  all(): readonly Agent[];
 }
 
 /** 返回时表示消息标识及回复意图已保存，不等待 Agent 执行或 IM 发送。 */

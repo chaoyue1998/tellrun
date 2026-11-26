@@ -12,19 +12,25 @@ import { listPageSize } from "./types.js";
 export function createMenus(context: {
   read: () => Pick<State, "channels" | "outbox">;
   update: <T>(action: () => T) => T;
+  switchAgent: (channelId: number, agentId: string, label: string, keepMessageId?: number) => void;
   enqueueReply: (
     channelId: number,
     text: string,
     delivery?: Pick<
       State["outbox"][number],
-      "messageId" | "permissionMenuId" | "modelMenuId" | "sessionMenuId" | "cwdMenuId"
+      | "messageId"
+      | "permissionMenuId"
+      | "modelMenuId"
+      | "agentMenuId"
+      | "sessionMenuId"
+      | "cwdMenuId"
     >,
   ) => void;
 }) {
   /** 清理旧按钮；正在原地更新的消息保留，由下一阶段或确认结果替换。 */
   function closeMenu(
     channelId: number,
-    key: "permissionMenu" | "modelMenu" | "sessionMenu" | "cwdMenu",
+    key: "permissionMenu" | "modelMenu" | "agentMenu" | "sessionMenu" | "cwdMenu",
     keepMessageId?: number,
   ) {
     const state = context.read();
@@ -37,6 +43,7 @@ export function createMenus(context: {
         (reply) =>
           reply.permissionMenuId !== menu.id &&
           reply.modelMenuId !== menu.id &&
+          reply.agentMenuId !== menu.id &&
           reply.sessionMenuId !== menu.id &&
           reply.cwdMenuId !== menu.id,
       );
@@ -81,7 +88,15 @@ export function createMenus(context: {
         };
         if (kind === "cwd") channel.cwdMenu = menu;
         else channel.sessionMenu = { ...menu, cursors: [null] };
-        return { channelId, kind, cwd: channel.cwd, id: menu.id, page: 0, cursor: null };
+        return {
+          channelId,
+          kind,
+          agent: channel.agent,
+          cwd: channel.cwd,
+          id: menu.id,
+          page: 0,
+          cursor: null,
+        };
       });
     },
     /** 一次只接收相邻页请求；重复点击和伪造的菜单、消息或页码不会触发查询。 */
@@ -125,6 +140,7 @@ export function createMenus(context: {
         return {
           channelId,
           kind: "session" as const,
+          agent: current.agent,
           cwd: current.cwd,
           id: menu.id,
           page: content.page,
@@ -196,27 +212,50 @@ export function createMenus(context: {
         replyListPage(channelId, "cwd");
       });
     },
-    /** 权限直接展示；模型菜单先保存查询意图，由独立循环补齐选项。 */
-    openMenu(channelId: number, kind: "permissions" | "model", modes: readonly AgentOption[] = []) {
+    /** 权限与 Agent 菜单直接展示；模型菜单先保存查询意图，由独立循环补齐选项。 */
+    openMenu(
+      channelId: number,
+      kind: "permissions" | "model" | "agent",
+      options: readonly AgentOption[] = [],
+    ) {
       context.update(() => {
         const channel = context.read().channels.find((item) => item.id === channelId);
         if (!channel) return;
-        const key = kind === "permissions" ? "permissionMenu" : "modelMenu";
+        const key =
+          kind === "permissions" ? "permissionMenu" : kind === "agent" ? "agentMenu" : "modelMenu";
         closeMenu(channelId, key);
+        const menuOptions =
+          kind === "agent"
+            ? options.map(({ id, label }) => ({
+                id,
+                label: `${id === channel.agent ? "✓ " : ""}${label}`,
+              }))
+            : options.map(({ id, label }) => ({ id, label }));
         const menu = {
           id: crypto.randomUUID(),
           expiresAt: Date.now() + 600_000,
-          options: modes.map(({ id, label }) => ({ id, label })),
+          options: menuOptions,
           messages: [],
         };
         if (kind === "model") {
           channel.modelMenu = { ...menu, stage: "loading", options: [] };
           return;
         }
+        if (kind === "agent") {
+          channel.agentMenu = menu;
+          const currentLabel =
+            options.find((option) => option.id === channel.agent)?.label ?? channel.agent;
+          context.enqueueReply(
+            channelId,
+            `Agent\nCurrent: ${currentLabel}\n\n${menuOptions.map((option, index) => `${index + 1}. ${option.label}`).join("\n")}\n\nTap an agent to switch. Active tasks continue in the background.`,
+            { agentMenuId: menu.id },
+          );
+          return;
+        }
         channel.permissionMenu = menu;
         context.enqueueReply(
           channelId,
-          `Permissions\nCurrent selection: ${modes.find((mode) => mode.id === channel.permissionMode)?.label ?? channel.permissionMode ?? modes[0]?.label ?? "Not set"}\n\n${modes.map((mode, index) => `${index + 1}. ${mode.label}`).join("\n")}\n\nApplies to future tasks. The current task keeps its permissions. Modes are subject to local configuration.`,
+          `Permissions\nCurrent selection: ${options.find((mode) => mode.id === channel.permissionMode)?.label ?? channel.permissionMode ?? options[0]?.label ?? "Not set"}\n\n${options.map((mode, index) => `${index + 1}. ${mode.label}`).join("\n")}\n\nApplies to future tasks. The current task keeps its permissions. Modes are subject to local configuration.`,
           { permissionMenuId: menu.id },
         );
       });
@@ -236,6 +275,7 @@ export function createMenus(context: {
       if (channel?.modelMenu)
         return {
           channelId: channel.id,
+          agent: channel.agent,
           cwd: channel.cwd,
           id: channel.modelMenu.id,
           model: channel.model,
@@ -247,7 +287,7 @@ export function createMenus(context: {
       channelId: number,
       id: string,
       models: readonly AgentModel[] | undefined,
-      current: (AgentOption & { reasoningEffort: string }) | undefined,
+      current: (AgentOption & { reasoningEffort: string | null }) | undefined,
     ) {
       const menu = context.read().channels.find((channel) => channel.id === channelId)?.modelMenu;
       if (menu?.id !== id || menu.stage !== "loading" || menu.expiresAt <= Date.now()) return;
@@ -255,11 +295,11 @@ export function createMenus(context: {
         const channel = context.read().channels.find((channel) => channel.id === channelId);
         if (!channel?.modelMenu) return;
         closeMenu(channelId, "modelMenu");
-        /** 有效配置只用于展示；查询失败时仅回退到完整的手动选择。 */
+        /** 有效配置只用于展示；查询失败时仅回退到已保存的手动选择。 */
         const text = current
-          ? `Current: ${current.label} · ${current.reasoningEffort}`
-          : channel.model && channel.reasoningEffort
-            ? `Current: ${models?.find((model) => model.id === channel.model)?.label ?? channel.model} · ${channel.reasoningEffort}`
+          ? `Current: ${current.label}${current.reasoningEffort ? ` · ${current.reasoningEffort}` : ""}`
+          : channel.model
+            ? `Current: ${models?.find((model) => model.id === channel.model)?.label ?? channel.model}${channel.reasoningEffort ? ` · ${channel.reasoningEffort}` : ""}`
             : "Current: Unavailable (try /model again)";
         if (!models?.length) {
           context.enqueueReply(
@@ -279,10 +319,15 @@ export function createMenus(context: {
     /** 校验聊天、原消息、菜单和有效期；选择不改变已提交任务的快照。 */
     chooseOption(
       channelId: number,
-      content: Extract<IncomingMessage["content"], { type: "permissions" | "model" }>,
+      content: Extract<IncomingMessage["content"], { type: "permissions" | "model" | "agent" }>,
     ) {
       const channel = context.read().channels.find((item) => item.id === channelId);
-      const key = content.type === "permissions" ? "permissionMenu" : "modelMenu";
+      const key =
+        content.type === "permissions"
+          ? "permissionMenu"
+          : content.type === "agent"
+            ? "agentMenu"
+            : "modelMenu";
       const menu = channel?.[key];
       if (
         !menu ||
@@ -295,10 +340,17 @@ export function createMenus(context: {
       if (!option)
         return content.type === "permissions"
           ? "Invalid permission option."
-          : "Invalid model option.";
+          : content.type === "agent"
+            ? "Invalid agent option."
+            : "Invalid model option.";
       return context.update(() => {
         const current = context.read().channels.find((item) => item.id === channelId);
         if (!current) return;
+        if (content.type === "agent") {
+          const cleanLabel = option.label.replace(/^✓\s+/u, "");
+          context.switchAgent(channelId, option.id, cleanLabel, content.messageId);
+          return "Agent switched.";
+        }
         if (content.type === "permissions") current.permissionMode = option.id;
         else {
           const model =
@@ -328,12 +380,14 @@ export function createMenus(context: {
             return "Choose reasoning effort.";
           }
           /** 只有选完第二步才一起保存；无推理选项的模型沿用 Agent 配置。 */
+          const chosenLabel =
+            current.modelMenu?.stage === "reasoning" ? current.modelMenu.model.label : option.label;
           current.model =
             current.modelMenu?.stage === "reasoning" ? current.modelMenu.model.id : option.id;
           current.reasoningEffort = current.modelMenu?.stage === "reasoning" ? option.id : null;
           context.enqueueReply(
             channelId,
-            `✓ ${current.modelMenu?.stage === "reasoning" ? current.modelMenu.model.label : option.label} · ${current.reasoningEffort ?? "Default"}`,
+            `✓ ${chosenLabel}${current.reasoningEffort ? ` · ${current.reasoningEffort}` : ""}`,
             { messageId: content.messageId },
           );
           closeMenu(channelId, key, content.messageId);
