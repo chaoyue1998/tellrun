@@ -676,10 +676,12 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
 
         if (tokenUsage) {
           const parts: string[] = [];
-          const todayKey = new Intl.DateTimeFormat("en-CA").format(Date.now());
-          const todayBucket = tokenUsage.dailyUsageBuckets?.find(
-            (bucket) => bucket.startDate === todayKey,
-          );
+          const now = Date.now();
+          const localTodayKey = new Intl.DateTimeFormat("en-CA").format(now);
+          const utcTodayKey = new Date(now).toISOString().slice(0, 10);
+          const todayBucket =
+            tokenUsage.dailyUsageBuckets?.find((bucket) => bucket.startDate === localTodayKey) ??
+            tokenUsage.dailyUsageBuckets?.find((bucket) => bucket.startDate === utcTodayKey);
           if (todayBucket) parts.push(`Today: ${formatCompactTokens(todayBucket.tokens)} tokens`);
           if (tokenUsage.summary.lifetimeTokens !== null) {
             parts.push(

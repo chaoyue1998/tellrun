@@ -23,13 +23,26 @@ import { type AgyApprovalResponse, parseAgyInteraction } from "./agy-interaction
 import { type AgyRpc, type AgyRpcMessage, createAgyRpc } from "./agy-rpc.js";
 import { loadAgentEnv } from "./env.js";
 
-/** Antigravity ACP 支持的执行模式；与 session/new 返回的 availableModes 对应。 */
-const permissionModes = [
+/** Antigravity CLI 官方执行模式（默认 auto，不可用时由服务端回退到 default）。 */
+const fallbackPermissionModes: readonly AgentOption[] = [
+  { id: "auto", label: "Auto" },
   { id: "default", label: "Default (Ask for approval)" },
   { id: "accept-edits", label: "Accept edits" },
-  { id: "auto", label: "Auto" },
   { id: "plan", label: "Plan" },
-] as const;
+];
+
+const knownModeLabels = new Map<string, string>(
+  fallbackPermissionModes.map((mode) => [mode.id, mode.label]),
+);
+
+/** 保留官方模式名称，并为 default 补充明确审批提示，避免与默认启动模式 auto 混淆。 */
+function formatModeLabel(id: string, name: string | null | undefined) {
+  const trimmed = name?.trim();
+  if (id === "default" && (!trimmed || /^default$/i.test(trimmed))) {
+    return "Default (Ask for approval)";
+  }
+  return trimmed || knownModeLabels.get(id) || id;
+}
 
 const defaultSessionName = "New session";
 
@@ -64,6 +77,25 @@ const configSelectOptionSchema = z.object({
 });
 
 const sessionCatalogMetaSchema = z.object({
+  modes: z
+    .object({
+      currentModeId: z.string().min(1).nullish(),
+      availableModes: z
+        .array(
+          z.object({
+            id: z.string().min(1),
+            name: z.string().nullish(),
+          }),
+        )
+        .nullish()
+        .transform((value) =>
+          (value ?? []).map((item) => ({
+            id: item.id,
+            label: formatModeLabel(item.id, item.name),
+          })),
+        ),
+    })
+    .nullish(),
   models: z
     .object({
       availableModels: z
@@ -153,6 +185,7 @@ interface ModelCatalog {
   models: AgentModel[];
   availableModels: { modelId: string; name: string }[];
   currentModelId: string | null;
+  currentThoughtLevel: string | null;
   tierName: string | null;
   fetchedAt: number;
 }
@@ -200,15 +233,24 @@ function extractSelectOptions(raw: unknown): { value: string; name: string }[] {
 /** 从 ACP session/new 或 session/resume 返回的 models 与 configOptions 构建模型目录。 */
 function parseModelCatalog(meta: z.infer<typeof sessionCatalogMetaSchema>): ModelCatalog {
   const availableModels = meta.models?.availableModels ?? [];
-  const currentModelId = meta.models?.currentModelId ?? null;
   const modelOption = meta.configOptions?.find((item) => item.id === "model");
   const thoughtOption = meta.configOptions?.find((item) => item.id === "thought_level");
+  const currentModelId = meta.models?.currentModelId ?? modelOption?.currentValue ?? null;
+  const currentThoughtLevel = thoughtOption?.currentValue ?? null;
   const modelOptions = extractSelectOptions(modelOption?.options);
   const thoughtOptions = extractSelectOptions(thoughtOption?.options);
   const effortLabels = new Map<string, string>(knownEfforts.map((item) => [item.id, item.label]));
   for (const item of thoughtOptions) {
     effortLabels.set(item.value, item.name || item.value);
   }
+
+  /** 判断服务端是否通过扁平 availableModels 区分各模型支持的推理档位。 */
+  const hasAnyFlatEffortVariants = modelOptions.some((base) =>
+    availableModels.some((variant) => {
+      if (!variant.modelId.startsWith(`${base.value}-`)) return false;
+      return knownEffortIds.has(variant.modelId.slice(base.value.length + 1));
+    }),
+  );
 
   const models: AgentModel[] = [];
   if (modelOptions.length) {
@@ -222,17 +264,31 @@ function parseModelCatalog(meta: z.infer<typeof sessionCatalogMetaSchema>): Mode
           matchedEfforts.push({ id: suffix, label: effortLabels.get(suffix) ?? suffix });
         }
       }
+      /** 若服务端仅通过标准 ACP configOptions（不含扁平 models 列表）返回配置，回退使用 thought_level 选项。 */
+      if (!matchedEfforts.length && !hasAnyFlatEffortVariants && thoughtOptions.length) {
+        for (const item of thoughtOptions) {
+          if (!matchedEfforts.some((existing) => existing.id === item.value)) {
+            matchedEfforts.push({ id: item.value, label: item.name || item.value });
+          }
+        }
+      }
       const orderedEfforts = matchedEfforts.sort((a, b) => {
         const ai = knownEfforts.findIndex((item) => item.id === a.id);
         const bi = knownEfforts.findIndex((item) => item.id === b.id);
         return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
       });
-      const currentEffort = currentModelId?.startsWith(`${base.value}-`)
+      const currentEffortFromModel = currentModelId?.startsWith(`${base.value}-`)
         ? currentModelId.slice(base.value.length + 1)
         : undefined;
+      const currentEffort =
+        currentEffortFromModel ??
+        (currentModelId === base.value ? (currentThoughtLevel ?? undefined) : undefined);
       const defaultEffort =
         (currentEffort && orderedEfforts.some((item) => item.id === currentEffort)
           ? currentEffort
+          : undefined) ??
+        (currentThoughtLevel && orderedEfforts.some((item) => item.id === currentThoughtLevel)
+          ? currentThoughtLevel
           : undefined) ??
         (orderedEfforts.some((item) => item.id === "high") ? "high" : undefined) ??
         orderedEfforts[0]?.id ??
@@ -259,6 +315,7 @@ function parseModelCatalog(meta: z.infer<typeof sessionCatalogMetaSchema>): Mode
     models,
     availableModels,
     currentModelId,
+    currentThoughtLevel,
     tierName: meta._meta?.antigravity?.tier?.name ?? null,
     fetchedAt: Date.now(),
   };
@@ -378,6 +435,8 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
   let rpcGeneration = 0;
   const activeIsolatedRpcs = new Set<AgyRpc>();
   let cachedCatalog: ModelCatalog | undefined;
+  let cachedModes: AgentOption[] = [];
+  let cachedDefaultModeId: string | null = null;
   const pendingCatalogs = new Map<string, Promise<ModelCatalog>>();
   const tasks = new Map<number, TaskRuntime>();
   const subscribers = new Map<string, Set<SessionSubscriber>>();
@@ -405,10 +464,26 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
     });
   }
 
-  /** 仅在返回有效模型目录时覆盖缓存，避免空元数据响应清空可用目录或丢失套餐名。 */
+  /** 从 ACP session/new 或 session/resume 元数据合并更新模型与权限模式缓存。 */
   function updateCachedCatalog(
     meta: z.infer<typeof sessionCatalogMetaSchema>,
+    isNewSession = false,
   ): ModelCatalog | undefined {
+    const modeOption = meta.configOptions?.find((item) => item.id === "mode");
+    const reportedModes = meta.modes?.availableModes.length
+      ? meta.modes.availableModes
+      : extractSelectOptions(modeOption?.options).map((item) => ({
+          id: item.value,
+          label: formatModeLabel(item.value, item.name),
+        }));
+    if (reportedModes.length) {
+      cachedModes = reportedModes;
+    }
+    const reportedModeId = meta.modes?.currentModeId ?? modeOption?.currentValue ?? null;
+    if (reportedModeId && (isNewSession || !cachedDefaultModeId)) {
+      cachedDefaultModeId = reportedModeId;
+    }
+
     const parsed = parseModelCatalog(meta);
     const hasModels = parsed.models.length > 0 || parsed.availableModels.length > 0;
     if (hasModels) {
@@ -425,6 +500,24 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
       };
     }
     return cachedCatalog;
+  }
+
+  /** 按官方服务端回报的有效默认模式置顶（未查询前以官方默认 auto 置顶）。 */
+  function resolvePermissionModes(): AgentOption[] {
+    const base = cachedModes.length
+      ? cachedModes.map((mode) => ({ ...mode }))
+      : fallbackPermissionModes.map((mode) => ({ ...mode }));
+    const preferredDefault = cachedDefaultModeId ?? "auto";
+    const index = base.findIndex((mode) => mode.id === preferredDefault);
+    if (index > 0) {
+      const [preferred] = base.splice(index, 1);
+      if (preferred) base.unshift(preferred);
+    }
+    return base;
+  }
+
+  function isSupportedPermissionMode(modeId: string) {
+    return resolvePermissionModes().some((mode) => mode.id === modeId);
   }
 
   function activeTaskSessionIds() {
@@ -661,7 +754,7 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
     }
   }
 
-  /** 将模型与推理档位应用到指定 ACP 会话。 */
+  /** 将模型与推理档位应用到指定 ACP 会话；若服务端移除旧版 session/set_model 则自动降级为 session/set_config_option。 */
   async function applyModelSelection(
     rpc: AgyRpc,
     sessionId: string,
@@ -671,13 +764,36 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
   ) {
     const resolved = resolveModelConfig(selection, catalog);
     if (resolved.modelId) {
-      await controlRequest(
-        rpc,
-        "session/set_model",
-        { sessionId, modelId: resolved.modelId },
-        signal,
-      );
-      return;
+      try {
+        await controlRequest(
+          rpc,
+          "session/set_model",
+          { sessionId, modelId: resolved.modelId },
+          signal,
+        );
+        return;
+      } catch (error) {
+        if (!(error instanceof JSONRPCErrorException && error.code === -32601)) {
+          throw error;
+        }
+        if (selection.model) {
+          await controlRequest(
+            rpc,
+            "session/set_config_option",
+            { sessionId, configId: "model", value: selection.model },
+            signal,
+          );
+        }
+        if (selection.reasoningEffort) {
+          await controlRequest(
+            rpc,
+            "session/set_config_option",
+            { sessionId, configId: "thought_level", value: selection.reasoningEffort },
+            signal,
+          );
+        }
+        return;
+      }
     }
     if (resolved.configModel) {
       await controlRequest(
@@ -722,7 +838,7 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
         try {
           const created = sessionNewSchema.parse(raw);
           const parsed = parseModelCatalog(created);
-          return updateCachedCatalog(created) ?? parsed;
+          return updateCachedCatalog(created, true) ?? parsed;
         } finally {
           if (rawSessionId && rpc.alive) {
             await rpc.request("session/close", { sessionId: rawSessionId }, 10_000).catch(() => {});
@@ -813,7 +929,9 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
     name: "Antigravity",
     version: unavailableReason ? "Unavailable" : versionText,
     ...(unavailableReason ? { unavailableReason } : {}),
-    permissionModes: permissionModes.map(({ id, label }) => ({ id, label })),
+    get permissionModes() {
+      return resolvePermissionModes();
+    },
 
     async listSessions(cwd, signal, cursor = null) {
       try {
@@ -868,20 +986,20 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
     async createSession(input, signal) {
       try {
         const rpc = await ensureRpc(signal);
-        const modeId = input.permissionMode ?? "default";
-        if (!permissionModes.some((mode) => mode.id === modeId)) {
+        const explicitModeId = input.permissionMode ?? undefined;
+        if (explicitModeId && !isSupportedPermissionMode(explicitModeId)) {
           throw new AgentError(
             "Antigravity permission mode unavailable. Choose another mode with /permissions.",
           );
         }
         const created = await createSessionOnRpc(rpc, input.cwd, signal);
-        const catalog = updateCachedCatalog(created);
+        const catalog = updateCachedCatalog(created, true);
         try {
-          if (modeId !== "default") {
+          if (explicitModeId) {
             await controlRequest(
               rpc,
               "session/set_mode",
-              { sessionId: created.sessionId, modeId },
+              { sessionId: created.sessionId, modeId: explicitModeId },
               signal,
             );
           }
@@ -931,16 +1049,24 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
         let lastEventKind: "user" | "agent" | undefined;
         const collectUpdate = (update: z.infer<typeof sessionUpdateSchema>["update"]) => {
           const text = update.content?.type === "text" ? update.content.text : undefined;
-          if (!text) return;
           if (update.sessionUpdate === "user_message_chunk") {
+            /** 纯图片/附件用户输入仍需开启新轮次，防止后续回复合并进上一轮。 */
+            const chunk = text || (update.content ? "(Attachment input)" : "");
+            if (!chunk) return;
             if (lastEventKind === "user" && turns.length) {
               const current = turns.at(-1);
-              if (current) current.prompt += text;
+              if (current) {
+                if (text) {
+                  current.prompt =
+                    current.prompt === "(Attachment input)" ? text : `${current.prompt}${text}`;
+                }
+              }
             } else {
-              turns.push({ prompt: text, output: [] });
+              turns.push({ prompt: chunk, output: [] });
             }
             lastEventKind = "user";
           } else if (update.sessionUpdate === "agent_message_chunk") {
+            if (!text) return;
             if (!turns.length) turns.push({ prompt: "", output: [] });
             const current = turns.at(-1);
             if (current) {
@@ -1066,7 +1192,12 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
         if (!currentId) throw new AgentError("Antigravity model settings unavailable.");
         for (const model of catalog.models) {
           if (currentId === model.id) {
-            return { id: model.id, label: model.label, reasoningEffort: null };
+            const effort =
+              catalog.currentThoughtLevel &&
+              model.reasoningEfforts.some((item) => item.id === catalog.currentThoughtLevel)
+                ? catalog.currentThoughtLevel
+                : null;
+            return { id: model.id, label: model.label, reasoningEffort: effort };
           }
           if (currentId.startsWith(`${model.id}-`)) {
             const effort = currentId.slice(model.id.length + 1);
@@ -1152,8 +1283,8 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
       const runtime: TaskRuntime = { controller, promptDispatched: false };
       tasks.set(input.taskId, runtime);
 
-      const modeId = input.permissionMode ?? "default";
-      if (!permissionModes.some((mode) => mode.id === modeId)) {
+      const explicitModeId = input.permissionMode ?? undefined;
+      if (explicitModeId && !isSupportedPermissionMode(explicitModeId)) {
         tasks.delete(input.taskId);
         return {
           status: "failed",
@@ -1300,7 +1431,7 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
             "Antigravity resumed a different session. Check /list before retrying.",
           );
         }
-        updateCachedCatalog(resumed);
+        updateCachedCatalog(resumed, false);
         trackOpenSession(activeRpc, targetSessionId);
       }
 
@@ -1368,38 +1499,63 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
           const created = await createSessionOnRpc(rpc, input.cwd, controller.signal);
           sessionId = created.sessionId;
           createdInRun = true;
-          updateCachedCatalog(created);
+          updateCachedCatalog(created, true);
         }
         runtime.sessionId = sessionId;
 
-        try {
-          await controlRequest(rpc, "session/set_mode", { sessionId, modeId }, controller.signal);
-        } catch (error) {
-          /** 若服务端已回收旧会话，移除过期缓存后自动补做一次 session/resume 自愈。 */
-          if (
-            input.sessionId &&
-            wasAlreadyOpen &&
-            error instanceof JSONRPCErrorException &&
-            error.data === "agy"
-          ) {
-            openSessions.delete(sessionId);
-            await resumeExistingSession(rpc, sessionId);
-            await controlRequest(rpc, "session/set_mode", { sessionId, modeId }, controller.signal);
-          } else {
+        /** 若复用已打开缓存但服务端已回收旧会话，自动清理缓存并补做一次 session/resume 自愈。 */
+        let verifiedOpen = !wasAlreadyOpen;
+        async function withOpenSessionRetry<T>(operation: () => Promise<T>): Promise<T> {
+          try {
+            const result = await operation();
+            verifiedOpen = true;
+            return result;
+          } catch (error) {
+            if (
+              input.sessionId &&
+              !verifiedOpen &&
+              rpc &&
+              sessionId &&
+              error instanceof JSONRPCErrorException &&
+              error.data === "agy"
+            ) {
+              openSessions.delete(sessionId);
+              await resumeExistingSession(rpc, sessionId);
+              verifiedOpen = true;
+              return await operation();
+            }
             throw error;
           }
         }
 
+        /** 仅在用户通过 /permissions 显式指定权限模式时覆盖；未选时沿用 agy 官方默认模式。 */
+        if (explicitModeId) {
+          const activeRpcForMode = rpc;
+          const activeSessionIdForMode = sessionId;
+          await withOpenSessionRetry(() =>
+            controlRequest(
+              activeRpcForMode,
+              "session/set_mode",
+              { sessionId: activeSessionIdForMode, modeId: explicitModeId },
+              controller.signal,
+            ),
+          );
+        }
+
         if (input.model || input.reasoningEffort) {
-          await applyModelSelection(
-            rpc,
-            sessionId,
-            {
-              model: input.model ?? null,
-              reasoningEffort: input.reasoningEffort ?? null,
-            },
-            controller.signal,
-            cachedCatalog,
+          const activeRpcForModel = rpc;
+          const activeSessionIdForModel = sessionId;
+          await withOpenSessionRetry(() =>
+            applyModelSelection(
+              activeRpcForModel,
+              activeSessionIdForModel,
+              {
+                model: input.model ?? null,
+                reasoningEffort: input.reasoningEffort ?? null,
+              },
+              controller.signal,
+              cachedCatalog,
+            ),
           );
         }
 
@@ -1436,12 +1592,14 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
           return await completed.promise;
         }
 
+        let receivedChunk = false;
         unsubscribe = subscribeSession(sessionId, {
           onUpdate: (update) => {
             if (settled || controller.signal.aborted) return;
             if (update.sessionUpdate !== "agent_message_chunk") return;
             const text = update.content?.type === "text" ? update.content.text : undefined;
             if (!text) return;
+            receivedChunk = true;
             try {
               const current = segments.at(-1);
               if (current) current.text += text;
@@ -1580,6 +1738,7 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
                 { sessionId: activeSessionId, prompt: current.blocks },
                 0,
               );
+              verifiedOpen = true;
               if (settled) return;
               const parsed = promptResponseSchema.safeParse(result);
               const stopReason =
@@ -1609,6 +1768,15 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
                 finish(buildResult("failed", "Antigravity refused the request."));
                 return;
               }
+              if (stopReason === "max_tokens" || stopReason === "max_turn_requests") {
+                const limitNotice =
+                  stopReason === "max_tokens"
+                    ? "Antigravity reached the output token limit; the reply may be incomplete."
+                    : "Antigravity reached the turn request limit before finishing.";
+                notifyUnsentQueuedPrompts("turn limit reached");
+                finish(buildResult("completed", limitNotice));
+                return;
+              }
             } catch (error) {
               if (settled) return;
               if (controller.signal.aborted && controller.signal.reason === "disconnect") {
@@ -1634,6 +1802,24 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
                   ),
                 );
                 return;
+              }
+              /** 未传 mode/model 且直接复用 openSessions 时，若首条 prompt 因旧会话失效被拒则自动 resume 重试一次。 */
+              if (
+                !current.isFollowUp &&
+                input.sessionId &&
+                !verifiedOpen &&
+                !receivedChunk &&
+                error instanceof JSONRPCErrorException &&
+                error.data === "agy"
+              ) {
+                try {
+                  openSessions.delete(activeSessionId);
+                  await resumeExistingSession(activeRpc, activeSessionId);
+                  verifiedOpen = true;
+                  continue;
+                } catch {
+                  /** 自愈失败则沿用正常错误收尾。 */
+                }
               }
               if (current.isFollowUp) {
                 const notice =

@@ -2,7 +2,23 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { AgentInteraction } from "../core/types.js";
 
-/** ACP session/request_permission 的最小边界校验。 */
+const toolCallContentItemSchema = z.union([
+  z.object({
+    type: z.literal("diff"),
+    path: z.string().min(1),
+    oldText: z.string().nullish(),
+    newText: z.string(),
+  }),
+  z.object({
+    type: z.literal("content"),
+    content: z.object({
+      type: z.string(),
+      text: z.string().nullish(),
+    }),
+  }),
+]);
+
+/** ACP session/request_permission 的最小边界校验（对齐官方 ToolCallUpdate）。 */
 const permissionRequestSchema = z.object({
   sessionId: z.string().min(1),
   toolCall: z
@@ -11,6 +27,15 @@ const permissionRequestSchema = z.object({
       name: z.string().nullish(),
       title: z.string().nullish(),
       kind: z.string().nullish(),
+      locations: z
+        .array(
+          z.object({
+            path: z.string().min(1),
+            line: z.number().int().nonnegative().nullish(),
+          }),
+        )
+        .nullish(),
+      content: z.array(z.unknown()).nullish(),
       args: z.record(z.string(), z.unknown()).nullish(),
       rawInput: z.unknown().optional(),
     })
@@ -31,7 +56,12 @@ export interface AgyApprovalResponse {
   result: { outcome: { outcome: "selected"; optionId: string } };
 }
 
-/** 格式化工具参数摘要，控制展示体积，避免超长载荷阻塞 IM 投递。 */
+/** 截断超长文本，避免审批载荷超过 IM 单条消息上限。 */
+function truncateText(text: string, limit = 2_000) {
+  return text.length > limit ? `${text.slice(0, limit)}\n…(truncated)` : text;
+}
+
+/** 格式化工具参数、受影响位置与官方 ToolCallUpdate 内容预览（diff / text）。 */
 function formatToolDetails(
   toolCall: z.infer<typeof permissionRequestSchema>["toolCall"],
   cwd: string,
@@ -42,6 +72,12 @@ function formatToolDetails(
   if (heading) lines.push(heading);
   lines.push(`Directory: ${cwd}`);
   if (toolCall.title) lines.push(toolCall.title);
+  if (toolCall.locations?.length) {
+    const paths = toolCall.locations.map((loc) =>
+      loc.line != null ? `${loc.path}:${loc.line}` : loc.path,
+    );
+    lines.push(`Files: ${paths.join(", ")}`);
+  }
   const input =
     toolCall.args && Object.keys(toolCall.args).length > 0 ? toolCall.args : toolCall.rawInput;
   if (input !== undefined && input !== null) {
@@ -56,10 +92,28 @@ function formatToolDetails(
     } else {
       const serialized = typeof input === "string" ? input : JSON.stringify(input, null, 2);
       if (serialized && serialized !== "{}") {
-        lines.push(
-          serialized.length > 2_000 ? `${serialized.slice(0, 2_000)}\n…(truncated)` : serialized,
-        );
+        lines.push(truncateText(serialized));
       }
+    }
+  }
+  if (toolCall.content?.length) {
+    const previews: string[] = [];
+    for (const rawItem of toolCall.content) {
+      const parsed = toolCallContentItemSchema.safeParse(rawItem);
+      if (!parsed.success) continue;
+      if (parsed.data.type === "diff") {
+        const parts = [`Diff: ${parsed.data.path}`];
+        if (parsed.data.oldText != null) {
+          parts.push(`--- old\n${truncateText(parsed.data.oldText, 800)}`);
+        }
+        parts.push(`+++ new\n${truncateText(parsed.data.newText, 800)}`);
+        previews.push(parts.join("\n"));
+      } else if (parsed.data.content.type === "text" && parsed.data.content.text) {
+        previews.push(truncateText(parsed.data.content.text, 1_000));
+      }
+    }
+    if (previews.length) {
+      lines.push(truncateText(previews.join("\n\n"), 2_000));
     }
   }
   return lines.join("\n");

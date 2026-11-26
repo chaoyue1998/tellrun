@@ -6,6 +6,7 @@ import {
   type JSONRPCRequest,
 } from "json-rpc-2.0";
 import { z } from "zod";
+import { tellrunVersion } from "../updates.js";
 
 /** ACP stdio JSON-RPC 2.0 单帧边界校验。 */
 const rpcMessageSchema = z.object({
@@ -177,7 +178,15 @@ export function createAgyRpc(
     },
     respondError,
     async initialize() {
-      return request("initialize", { protocolVersion: 1, clientCapabilities: {} }, 30_000);
+      return request(
+        "initialize",
+        {
+          protocolVersion: 1,
+          clientInfo: { name: "tellrun", title: "Tellrun", version: tellrunVersion },
+          clientCapabilities: {},
+        },
+        30_000,
+      );
     },
     close,
   };
