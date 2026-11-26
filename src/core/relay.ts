@@ -210,7 +210,7 @@ export function createRelayService(options: {
         finished = true;
         preparing.abort();
       });
-    /** 补充输入独立于入站处理和任务完成等待，慢 RPC 不阻塞 /status 与 /stop。 */
+    /** 补充输入独立于入站处理和任务完成等待，慢 RPC 不阻塞 /status 与 /interrupt。 */
     const steering = (async () => {
       while (!finished && !stopping) {
         const input = options.state.claimTaskInput(task.id);
@@ -414,7 +414,7 @@ export function createRelayService(options: {
                 .map((item) => item.id)
                 .join(
                   ", ",
-                )})\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/usage [agent|all] — Check quota and usage limits\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/stop — Stop all background terminals in the current session\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask ${currentAgent.name} to upgrade Tellrun\nCreate or switch agents and sessions at any time. Tasks run concurrently.`;
+                )})\n/new [name] — Create and select a new session\n/list — Browse sessions, 10 per page; tap to switch\n/cwd [path] — Browse project directories or set a path; changing directories starts a new session\n/status — Status and update check\n/usage [agent|all] — Check quota and usage limits\n/last [count] — Recent finished questions and replies in the selected session\n/interrupt — Interrupt the current task; send a new message after it ends\n/model — Select model and reasoning effort\n/permissions — Select permission mode\n/cron — Manage scheduled tasks\n/restart — Restart Tellrun and reload configuration\n/update — Ask ${currentAgent.name} to upgrade Tellrun\nCreate or switch agents and sessions at any time. Tasks run concurrently.`;
             case "agent": {
               const target = message.content.args.trim().toLowerCase();
               if (!target) {
@@ -663,32 +663,6 @@ export function createRelayService(options: {
               if (message.content.args) return "Use /list without arguments.";
               const query = options.state.openList(channel.id, "session");
               if (query) controlQuery = () => loadListPage(query);
-              return;
-            }
-            case "stop": {
-              if (message.content.args) return "Use /stop without arguments.";
-              if (!currentAgent.stop)
-                return `${currentAgent.name} does not support stopping background terminals separately. Use /interrupt to interrupt a running task.`;
-              const stopAgent = currentAgent.stop;
-              /** 固定命令收到时的当前选择，不能误停其他会话的后台终端。 */
-              const { cwd, sessionId } = channel;
-              if (!sessionId) return `No ${currentAgent.name} session available yet.`;
-              controlQuery = async () => {
-                try {
-                  await stopAgent(cwd, sessionId, modelLoading.signal);
-                  if (!stopping)
-                    options.state.reply(
-                      channel.id,
-                      `Session: ${sessionId}\nBackground terminals stopped.`,
-                    );
-                } catch {
-                  if (!stopping)
-                    options.state.reply(
-                      channel.id,
-                      `Background terminal cleanup unconfirmed. Check the local ${currentAgent.name} session.`,
-                    );
-                }
-              };
               return;
             }
             case "interrupt":

@@ -1471,12 +1471,6 @@ export async function createCodexAgent(command = "codex"): Promise<Agent> {
       if (taskId !== undefined) tasks.get(taskId)?.controller.abort("disconnect");
       else for (const task of tasks.values()) task.controller.abort("disconnect");
     },
-    /** 独立控制连接直接清理指定会话的后台终端，不恢复会话或启动轮次。 */
-    async stop(cwd, sessionId, signal) {
-      await withSessionConnection(cwd, signal, async (rpc) =>
-        rpc.request("thread/backgroundTerminals/clean", { threadId: sessionId }),
-      );
-    },
     /** 中断当前轮次并等待真实终态，不退出共享后台服务。 */
     interrupt(taskId) {
       tasks.get(taskId)?.controller.abort();

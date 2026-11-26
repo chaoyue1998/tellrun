@@ -24,7 +24,6 @@ const commands = [
   { command: "usage", description: "Show quota and usage limits" },
   { command: "last", description: "Show recent questions and replies: /last [count]" },
   { command: "interrupt", description: "Interrupt the current task" },
-  { command: "stop", description: "Stop all background terminals in the current session" },
   { command: "model", description: "Select model and reasoning effort for future tasks" },
   { command: "permissions", description: "Select the permission mode for future tasks" },
   { command: "cron", description: "List, create, enable, disable, or delete scheduled tasks" },
@@ -273,7 +272,7 @@ export function createTelegramConnection(
                   },
         })) ?? "Received.";
     }
-    /** 回调提示不占用入站循环，慢网络下 /status 和 /stop 仍能立即处理。 */
+    /** 回调提示不占用入站循环，慢网络下 /status 和 /interrupt 仍能立即处理。 */
     void ctx.answerCallbackQuery({ text: reply }).catch((error: unknown) => {
       logger.warn(
         { errorType: error instanceof Error ? error.name : "UnknownError" },

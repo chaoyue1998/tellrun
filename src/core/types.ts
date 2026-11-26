@@ -234,8 +234,6 @@ export interface Agent {
   steer(taskId: number, prompt: string, attachments?: AgentAttachment[]): Promise<void>;
   /** 只断开指定任务的客户端，省略标识时断开全部；后台任务及持久状态继续保留。 */
   disconnect(taskId?: number): void;
-  /** 清理指定会话的后台终端，不取消 Agent 当前轮次；未实现的 Agent 省略此方法。 */
-  stop?: (cwd: string, sessionId: string, signal: AbortSignal) => Promise<void>;
   /** 用户明确中断时才请求取消当前轮次。 */
   interrupt(taskId: number): void;
 }

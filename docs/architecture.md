@@ -191,7 +191,7 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 7. delivery 独立发送或编辑 Telegram 消息，按失败类别重试。
 
-每批更新按 Telegram 的接收顺序处理，只保存状态、完成本地操作或发起独立查询，不等待任务执行和消息发送。命令只接受本人私聊中发给当前机器人的内容，明确回复问题的路径文本仍作为答案。控制回复使用独立通道，不等待预览、普通结果或上传结束；模型和会话查询同样不占用入站循环，后续 `/stop` 与 `/interrupt` 不等待查询结果。`/interrupt` 请求中断后，任务仍为 cancelling 时普通输入提示等待结果，任务结束后可直接接收新输入。
+每批更新按 Telegram 的接收顺序处理，只保存状态、完成本地操作或发起独立查询，不等待任务执行和消息发送。命令只接受本人私聊中发给当前机器人的内容，明确回复问题的路径文本仍作为答案。控制回复使用独立通道，不等待预览、普通结果或上传结束；模型和会话查询同样不占用入站循环，后续 `/status` 与 `/interrupt` 不等待查询结果。`/interrupt` 请求中断后，任务仍为 cancelling 时普通输入提示等待结果，任务结束后可直接接收新输入。
 
 入站持久化失败时停止拉取新批次并退出恢复。当前连接器使用 `getUpdates` 和 `handleUpdate` 显式维护 offset，整批处理成功后才推进到该批最大更新编号加一；不使用会自动删除 Webhook 的 `bot.start` 或会确认最后一次尝试消息的 `bot.stop`。收到关停信号后取消读取，等待当前处理结束，不额外确认更新。失败消息和未处理批次保留重投机会，成功但尚未确认的命令或消息也可能重投，因此不能替代已保存的事件标识去重。[Telegram 更新接收规则](https://core.telegram.org/bots/api#getupdates)、[grammY 生命周期](https://grammy.dev/ref/core/bot)
 
@@ -199,7 +199,7 @@ Telegram 通过 `Pick<CoreState, ...>` 只访问入站确认、回复领取与�
 
 当前按聊天来源与事件 ID 去重，重复事件不会重新创建任务或回复。`getUpdates` 成功返回后，先回收当前机器人中事件 ID 小于本次 offset 的去重标识，再处理新批次；请求失败或关停不回收。成功空响应时清理该机器人剩余的旧标识，避免服务端已过期的消息持续占用状态；其他机器人记录不受影响。发送成功但响应丢失时，outbox 重试可能产生重复通知。Telegram 不提供无限期保留更新的保证，长期离线后的恢复不能只依赖服务端消息队列。[Telegram 更新确认规则](https://core.telegram.org/bots/api#getupdates)
 
-控制路径包括 /status、/stop、/interrupt、审批回调、明确回复补充问题。它们不进入编码任务队列。等待审批占用当前编码任务槽，但不会占用 Node.js 事件循环。入站处理只保存必要状态并派发控制指令，不等待 Codex 完成或普通 Telegram 消息发送，避免慢请求阻塞后续控制指令。
+控制路径包括 /status、/interrupt、审批回调、明确回复补充问题。它们不进入编码任务队列。等待审批占用当前编码任务槽，但不会占用 Node.js 事件循环。入站处理只保存必要状态并派发控制指令，不等待 Codex 完成或普通 Telegram 消息发送，避免慢请求阻塞后续控制指令。
 
 /status 的模型信息通过独立连接读取，按模型名称与推理档位展示，如 GPT-6-Sol · xhigh。未手动选择时通过 config/read 读取目录有效配置，缺省值由 model/list 补齐；完整模型目录也用于解析已隐藏模型的展示名称。任务快照的模型或档位不同时分别显示。查询失败时仅回退到已保存的完整选择，否则明确显示无法读取，不使用 Default 占位。查询不恢复会话或启动轮次，关停时取消并丢弃迟到结果。
 
@@ -291,7 +291,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 每个待处理交互都有独立 UUID。Telegram callback_data 只携带该标识与选项索引，交互展示信息保存在状态文件；RPC 请求 ID、完整审批载荷、有效期定时器和映射只保留在当前连接，不能跨重启复用。按钮处理同时校验本人身份、聊天来源、原消息、任务、当前连接、有效期和未处理状态。审批选项保存为包含 ID 和名称的对象；恢复流程作废旧按钮，不重放批准。
 
-用户点击后先将选择与入站去重标识一起保存，再异步答复 callback query。交互状态从 pending 进入 ready，独立循环先保存 sending 再回传决定，随后关闭交互；普通补充输入的慢速 RPC 不阻塞该循环，异步问题的答案则等待 turn/steer 接收确认。按钮应答只关闭客户端提示，失败不会撤销或重发决定，也不阻塞 /status 和 /stop。旧按钮、重复点击或连接已经更换时只提示失效。[Telegram 按钮回调](https://core.telegram.org/bots/api#callbackquery)
+用户点击后先将选择与入站去重标识一起保存，再异步答复 callback query。交互状态从 pending 进入 ready，独立循环先保存 sending 再回传决定，随后关闭交互；普通补充输入的慢速 RPC 不阻塞该循环，异步问题的答案则等待 turn/steer 接收确认。按钮应答只关闭客户端提示，失败不会撤销或重发决定，也不阻塞 /status 和 /interrupt。旧按钮、重复点击或连接已经更换时只提示失效。[Telegram 按钮回调](https://core.telegram.org/bots/api#callbackquery)
 
 | 交互类型                           | 处理方式                                                                                                                                      |
 | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -339,7 +339,7 @@ Codex 模型、provider 和认证优先沿用服务用户已有配置。应用�
 
 普通路径为 queued → dispatching → running → completed / failed，带附件时在 queued 与 dispatching 之间增加 preparing。/status 在 preparing 阶段显示正在下载附件；/interrupt 可直接取消尚未派发的任务。等待交互时任务仍保存为 running，由关联交互的 kind、blocking 和状态推导等待语义，/status 展示待审批或待回答。存在阻塞交互时暂停输入提示，只有阻塞审批暂停预览；选择题通过独立消息等待用户选择，无论是否标记为阻塞，Codex 已产生的后续输出都继续显示，等待回答和提交答案不拦住预览。Codex 自身是否等待答案仍遵循原生协议。终态记录不可被迟到事件覆盖。
 
-`/stop` 固定命令收到时选中会话的 cwd 和 sessionId。通过独立连接调用 `thread/backgroundTerminals/clean`，只清理后台终端，不调用 thread/resume 或 turn/interrupt；无会话时明确提示，RPC 失败不报告成功。`/interrupt` 只操作当前选中会话的任务，先保存其 cancelling 状态并作废该任务的待处理按钮，再通过 `turn/interrupt` 中断活动 turn；收到实际终态后更新界面，确认中断记为 cancelled，下一条消息沿用当前会话开始新轮次。空闲时仅提示没有运行中的任务。5 秒内无法确认中断时，关闭本次连接并记录 interrupted，提示核对本机状态；保留新输入入口，后续仍通过 thread/read 检查会话是否空闲。两种控制均不清空定时等待触发。[后台终端清理](https://learn.chatgpt.com/docs/app-server#clean-background-terminals)、[中断轮次](https://learn.chatgpt.com/docs/app-server#interrupt-a-turn)
+`/interrupt` 只操作当前选中会话的任务，先保存其 cancelling 状态并作废该任务的待处理按钮，再通过 `turn/interrupt` 中断活动 turn；收到实际终态后更新界面，确认中断记为 cancelled，下一条消息沿用当前会话开始新轮次。空闲时仅提示没有运行中的任务。5 秒内无法确认中断时，关闭本次连接并记录 interrupted，提示核对本机状态；保留新输入入口，后续仍通过 thread/read 检查会话是否空闲。中断控制不清空定时等待触发。[中断轮次](https://learn.chatgpt.com/docs/app-server#interrupt-a-turn)
 
 正常关停先停止入站轮询，断开 Agent 连接后释放状态锁，Codex 后台与任务继续运行。重启后 queued 记录保留；所有已有 thread ID 与 turn ID 的任务分别重新连接并恢复跟踪，cancelling 继续提交原轮次的中断请求。尚未确认轮次 ID 的 dispatching、running 和 cancelling 进入 interrupted，提示核对本机状态，不猜测或重跑。旧交互失效，服务端重新发出的请求生成新按钮；在途补充输入标记提交不确定，不自动重发，尚未发送的输入待恢复连接后继续发送。
 
