@@ -79,15 +79,11 @@ program
             : "Enter a positive numeric user ID.",
       }),
     );
-    /** 可选 Telegram 代理；留空时省略该字段以继承运行环境，已有显式直连配置时保留空串。 */
+    /** 可选 Telegram 代理；默认与占位均为空，留空时不写入配置。 */
     const proxyUrl = requireAnswer(
       await p.text({
-        message:
-          current?.telegram.proxyUrl === ""
-            ? "Telegram proxy URL (optional, currently direct; blank to keep)"
-            : "Telegram proxy URL (optional, blank to use environment)",
-        placeholder: "http://127.0.0.1:7897",
-        initialValue: current?.telegram.proxyUrl ?? process.env.TELEGRAM_PROXY_URL?.trim() ?? "",
+        message: "Telegram proxy URL (optional)",
+        initialValue: current?.telegram.proxyUrl ?? "",
         validate: (value) =>
           configSchema.shape.telegram.shape.proxyUrl.safeParse(value).success
             ? undefined
@@ -186,13 +182,12 @@ program
         )
       : "later";
 
-    const resolvedProxyUrl =
-      proxyUrl.trim() || (current?.telegram.proxyUrl === "" ? "" : undefined);
+    const trimmedProxyUrl = proxyUrl.trim();
     const config = configSchema.parse({
       telegram: {
         token: token.trim() || current?.telegram.token,
         ownerId,
-        ...(resolvedProxyUrl !== undefined ? { proxyUrl: resolvedProxyUrl } : {}),
+        ...(trimmedProxyUrl ? { proxyUrl: trimmedProxyUrl } : {}),
       },
       defaultAgent,
       agents: agentEntries,
