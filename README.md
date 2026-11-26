@@ -12,20 +12,20 @@ Run Tellrun on your server and use Telegram on your phone or desktop to send cod
 
 [npm](https://www.npmjs.com/package/tellrun) · [GitHub](https://github.com/chaoyue1998/tellrun) · [Report an issue](https://github.com/chaoyue1998/tellrun/issues)
 
-[Quick start](#install-and-connect-codex-to-telegram) · [Telegram commands](#telegram-commands) · [Terminal commands](#terminal-commands) · [Configuration](#configuration-and-data) · [FAQ](#faq) · [Local development](#local-development)
+[Quick start](#install-and-connect-to-telegram) · [Telegram commands](#telegram-commands) · [Terminal commands](#terminal-commands) · [Configuration](#configuration-and-data) · [FAQ](#faq) · [Local development](#local-development)
 
 ## Features
 
-- **Remote coding**: send tasks in a private Telegram chat and let Codex execute them on your server.
+- **Remote coding**: send tasks in a private Telegram chat and let your coding agent execute them on your server.
 - **Images and files**: send screenshots, photos, or files with task instructions, including while a task is running.
 - **Session management**: select a project with `/cwd`, create named sessions with `/new`, and use the buttons in `/list` to select and resume conversations.
 - **Live feedback**: see typing indicators and live Markdown replies updated in place with headings, lists, tables, and code blocks, while continuing to send commands and additional instructions.
 - **Task control**: check status and the latest result, interrupt a task and continue chatting, and retain the current conversation and task state across restarts.
 - **Scheduled tasks**: create five-field cron schedules with `/cron`, using the server timezone, and receive results in Telegram.
 - **Approvals and questions**: use buttons for command, file, and permission approvals; select options or reply directly to questions, with answers submitted after all questions are answered.
-- **Permission modes**: use `/permissions` to choose one of four Codex modes, saved for subsequent tasks.
+- **Permission modes**: use `/permissions` to choose one of the active agent's permission modes, saved for subsequent tasks.
 
-## Install and connect Codex to Telegram
+## Install and connect to Telegram
 
 ### 1. Prerequisites
 
@@ -62,26 +62,26 @@ At startup, Tellrun registers an English command menu. Use the menu button besid
 | `/agent [name]`       | Switch the active coding agent (`codex`, `agy`) using buttons or by name                     |
 | `/new [name]`         | Create and select a session, with an optional name                                           |
 | `/list`               | Browse project sessions, 10 per page, with Previous / Next buttons; tap a session to switch  |
-| `/cwd`                | Show the current directory and browse Codex project directories, 10 per page                 |
+| `/cwd`                | Show the current directory and browse project directories, 10 per page                       |
 | `/cwd /absolute/path` | Change the working directory and start a new conversation                                    |
 | `/status`             | Show version updates, connection, directory, session name and ID, model, permissions, and task status |
 | `/usage [agent\|all]` | Show quota limits, reset times, and usage statistics for the active agent, a named agent, or all agents |
 | `/last [count]`       | Send recent finished turns with full questions and replies (default: 1)                             |
 | `/interrupt`          | Interrupt the task in the selected session                                 |
-| `/stop`               | Stop all background terminals in the current Codex session                                   |
+| `/stop`               | Stop all background terminals in the current session (Codex)                                 |
 | `/model`              | Show the current selection and choose model and reasoning effort                             |
 | `/permissions`        | Choose the permission mode for subsequent tasks                                              |
 | `/cron`               | List, create, delete, enable, or disable scheduled tasks                                     |
 | `/restart`            | Restart Tellrun and reload configuration while preserving session and task state             |
-| `/update`             | Ask Codex to upgrade Tellrun using the installation details                                  |
+| `/update`             | Ask the active agent to upgrade Tellrun using the installation details                       |
 | `/help`, `/start`     | Show usage instructions                                                                      |
 
 ### Session management
 
-Sessions are stored by Codex. Creating or switching sessions preserves your current model and permission settings. Use `/new`, `/list`, `/cwd`, and their buttons while tasks run. After switching, sending a message starts a task immediately in the selected session, even in the same directory. Messages in a session with an active task add to that task.
+Sessions are stored by each agent. Creating or switching sessions preserves your current model and permission settings. Use `/new`, `/list`, `/cwd`, and their buttons while tasks run. After switching, sending a message starts a task immediately in the selected session, even in the same directory. Messages in a session with an active task add to that task.
 
-- **Choose a directory**: `/cwd` collects and deduplicates project directories from non-archived Codex sessions, excluding subagents. The current directory appears first with ✓; others follow most recently used order. Browse 10 per page with Previous / Next buttons, then tap to switch. Choosing a different directory starts a new conversation; choosing the current directory keeps the session. Use `/cwd /absolute/path` to enter a new directory. Lists expire after 10 minutes. You can browse, turn pages, and switch while tasks are running. Missing or inaccessible directories report an error when selected.
-- **View and switch**: `/list` shows non-archived sessions whose working directory exactly matches the current directory, ordered by most recently updated, 10 per page. Use Previous / Next to update the same message and view the page number. Tap a session to switch; ✓ marks the current session. The list includes sessions created by Tellrun and other Codex clients, excluding subagent sessions. Lists expire after 10 minutes; use `/list` again to refresh.
+- **Choose a directory**: `/cwd` collects and deduplicates project directories from the active agent's sessions (excluding archived and subagent sessions in Codex). The current directory appears first with ✓; others follow most recently used order. Browse 10 per page with Previous / Next buttons, then tap to switch. Choosing a different directory starts a new conversation; choosing the current directory keeps the session. Use `/cwd /absolute/path` to enter a new directory. Lists expire after 10 minutes. You can browse, turn pages, and switch while tasks are running. Missing or inaccessible directories report an error when selected.
+- **View and switch**: `/list` shows sessions whose working directory exactly matches the current directory, ordered by most recently updated, 10 per page. Use Previous / Next to update the same message and view the page number. Tap a session to switch; ✓ marks the current session. The list includes sessions created by Tellrun and other clients of the active agent (excluding archived and subagent sessions in Codex). Lists expire after 10 minutes; use `/list` again to refresh.
 - **Create a session**: `/new [name]` creates and switches to a new session. The name defaults to `New session` when omitted; empty sessions are saved even before you send a message.
 - **Confirm the change**: after creating or switching sessions, wait for confirmation before sending a task. If you cannot confirm that a session was created, check `/list` before deciding whether to retry.
 - **Control tasks**: `/stop` cleans up background terminals in the selected session; `/interrupt` interrupts its task while other sessions continue. `/status` also lists other active tasks and their session names, using the same naming rules as `/list`; `/last` reads the selected session.
@@ -145,7 +145,7 @@ Run `tellrun setup` to create or update your configuration. Leave the Bot Token 
 
 | Path                         | Contents                                                                                                                 |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `~/.tellrun/config.json`     | Bot Token, authorized user ID, Codex path, and optional proxy                                                            |
+| `~/.tellrun/config.json`     | Bot Token, authorized user ID, configured agent paths, and optional proxy                                                |
 | `~/.tellrun/state.json`      | Conversation, active task, latest result, schedules and pending triggers, interactions, replies, and deduplication state |
 | `~/.tellrun/attachments/`    | Uploaded images and files, stored under unique IDs to prevent filename collisions                                        |
 | `~/.tellrun/tellrun.service` | Linux background service definition                                                                                      |
@@ -197,7 +197,7 @@ Choose to save configuration without starting a background service in the setup 
 | `npm run build` | Compile to `dist/`                               |
 | `npm start`     | Run the compiled application                     |
 
-When asking Codex to modify Tellrun itself, run `npm run build` followed by `npm start` so source changes do not trigger a restart during the task.
+When asking an agent to modify Tellrun itself, run `npm run build` followed by `npm start` so source changes do not trigger a restart during the task.
 
 ## License
 

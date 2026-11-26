@@ -21,7 +21,7 @@ export async function createAgentRegistry(config: Config): Promise<AgentRegistry
       try {
         return [type, await createAgent(type, path)] as const;
       } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+        if (error instanceof Error) {
           throw Object.assign(error, { agentType: type, agentPath: path });
         }
         throw error;

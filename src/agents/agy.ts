@@ -286,8 +286,18 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
         maxBuffer: 4_096,
         env,
       });
-  const versionText = stdout.trim().replace(/^agy\s+/i, "");
-  if (!unavailableReason && !/^\S+$/.test(versionText)) {
+  const firstLine = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean);
+  const versionText = (firstLine ?? "")
+    .replace(/^agy(?:-cli)?\s+/i, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (
+    !unavailableReason &&
+    (!versionText || versionText.length > 128 || /\p{Cc}/u.test(versionText))
+  ) {
     throw new Error("Unrecognized Antigravity CLI version.");
   }
 
@@ -315,13 +325,13 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
   }
 
   /** 将 ACP 通知和服务端请求按 sessionId 分发给对应任务或历史查询。 */
-  function createInitializedRpc(isolated = false): Promise<AgyRpc> {
+  function createInitializedRpc(): Promise<AgyRpc> {
     return new Promise((resolve, reject) => {
       let rpc: AgyRpc;
       try {
         rpc = createAgyRpc(command, env, {
           onNotification: (message) => {
-            if (isolated || message.method !== "session/update") return;
+            if (message.method !== "session/update") return;
             const parsed = sessionUpdateSchema.safeParse(message.params);
             if (!parsed.success) return;
             const targets = subscribers.get(parsed.data.sessionId);
@@ -329,10 +339,6 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
             for (const target of targets) target.onUpdate(parsed.data.update);
           },
           onRequest: (message) => {
-            if (isolated) {
-              rpc.respondError(message.id, -32601, "Unsupported request in read-only session.");
-              return;
-            }
             const sessionId =
               typeof message.params === "object" &&
               message.params !== null &&
@@ -356,7 +362,7 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
             }
           },
           onClose: (reason) => {
-            if (!isolated && sharedRpc === rpc) {
+            if (sharedRpc === rpc) {
               sharedRpc = undefined;
               openSessions.clear();
               for (const set of subscribers.values()) {
@@ -385,7 +391,7 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
     if (unavailableReason) throw new AgentError(unavailableReason);
     if (sharedRpc?.alive) return sharedRpc;
     if (!startingRpc) {
-      startingRpc = createInitializedRpc(false)
+      startingRpc = createInitializedRpc()
         .then((rpc) => {
           sharedRpc = rpc;
           return rpc;
@@ -952,8 +958,17 @@ export async function createAgyAgent(command = "agy"): Promise<Agent> {
         if (!rpc || !sessionId) {
           throw new AgentError("Antigravity session is not active.");
         }
-        const promise = rpc
-          .request("session/prompt", { sessionId, prompt: createAgyInput(prompt, attachments) }, 0)
+        const activeRpc = rpc;
+        const activeSessionId = sessionId;
+        const promise = createAgyInput(prompt, attachments)
+          .then((blocks) => {
+            if (settled || controller.signal.aborted) return undefined;
+            return activeRpc.request(
+              "session/prompt",
+              { sessionId: activeSessionId, prompt: blocks },
+              0,
+            );
+          })
           .then((result) => {
             const parsed = promptResponseSchema.safeParse(result);
             if (parsed.success && parsed.data.stopReason) {

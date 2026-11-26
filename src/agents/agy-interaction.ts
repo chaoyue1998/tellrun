@@ -26,10 +26,9 @@ const permissionRequestSchema = z.object({
     .min(1),
 });
 
-/** ACP 审批应答载荷；rejected 标记用于区分拒绝与取消。 */
+/** ACP 审批应答载荷。 */
 export interface AgyApprovalResponse {
   result: { outcome: { outcome: "selected"; optionId: string } };
-  rejected: boolean;
 }
 
 /** 格式化工具参数摘要，控制展示体积，避免超长载荷阻塞 IM 投递。 */
@@ -103,7 +102,6 @@ export function parseAgyInteraction(
     interaction.choices.push({ id: option.optionId, label: option.name || option.optionId });
     approvals.set(option.optionId, {
       result: { outcome: { outcome: "selected", optionId: option.optionId } },
-      rejected: Boolean(option.kind?.includes("reject")),
     });
   }
   if (!interaction.choices.length) {

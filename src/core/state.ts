@@ -584,11 +584,17 @@ export function createState(options: {
         });
     },
     setAgent,
-    /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照。 */
-    setSession(channelId: number, cwd: string, sessionId: string | null, reply?: string) {
+    /** 新会话或目录变化只影响后续任务，已保存任务仍使用自己的快照；指定 expectedAgent 时仅在仍激活该 Agent 时落盘。 */
+    setSession(
+      channelId: number,
+      cwd: string,
+      sessionId: string | null,
+      reply?: string,
+      expectedAgent?: string,
+    ) {
       update(() => {
         const channel = state.channels.find((channel) => channel.id === channelId);
-        if (channel) {
+        if (channel && (expectedAgent === undefined || channel.agent === expectedAgent)) {
           if (cwd !== channel.cwd || sessionId !== channel.sessionId)
             channel.sessionGeneration += 1;
           closeMenu(channelId, "agentMenu");

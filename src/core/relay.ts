@@ -400,6 +400,7 @@ export function createRelayService(options: {
                 snapshot.cwd,
                 session.id,
                 `${content.type === "command" ? "New session" : "Switched session"} (${queryAgent.name}): ${session.label}\nID: ${session.id}\nDirectory: ${snapshot.cwd}`,
+                snapshot.agent,
               );
           };
           return;

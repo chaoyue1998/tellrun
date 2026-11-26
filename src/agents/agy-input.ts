@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import type { AgentAttachment } from "../core/types.js";
 
 /** ACP 内容块；图片通过内联 Base64 传入，其他附件保留本地路径说明。 */
@@ -29,11 +29,11 @@ function detectImageMimeType(bytes: Buffer): string | undefined {
   return undefined;
 }
 
-/** 将文本与本地附件转换为 ACP session/prompt 内容块。 */
-export function createAgyInput(
+/** 将文本与本地附件异步转换为 ACP session/prompt 内容块，避免读取大图阻塞事件循环。 */
+export async function createAgyInput(
   prompt: string,
   attachments: AgentAttachment[] = [],
-): AgyContentBlock[] {
+): Promise<AgyContentBlock[]> {
   const text = attachments.length
     ? [
         prompt.trim() || "Files:",
@@ -47,7 +47,7 @@ export function createAgyInput(
   for (const attachment of attachments) {
     if (attachment.kind !== "image") continue;
     try {
-      const bytes = readFileSync(attachment.path);
+      const bytes = await readFile(attachment.path);
       const mimeType = detectImageMimeType(bytes);
       if (mimeType) blocks.push({ type: "image", data: bytes.toString("base64"), mimeType });
     } catch {

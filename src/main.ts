@@ -145,9 +145,11 @@ try {
     },
     phase === "Checking agents" && errorCode === "ENOENT"
       ? `${failedType ? agentDefinitions[failedType].label : "Agent"} executable not found${failedPath ? ` (${failedPath})` : ""}. Check ${failedType ? agentDefinitions[failedType].envVar : "CODEX_PATH / AGY_PATH"} or ~/.tellrun/config.json, or run tellrun setup.`
-      : (phase === "Loading config" || phase === "Loading state") && error instanceof Error
-        ? error.message
-        : "Service failed",
+      : phase === "Checking agents" && error instanceof Error
+        ? `${failedType ? `${agentDefinitions[failedType].label} check failed` : "Agent check failed"}${failedPath ? ` (${failedPath})` : ""}: ${error.message}`
+        : (phase === "Loading config" || phase === "Loading state") && error instanceof Error
+          ? error.message
+          : "Service failed",
   );
 } finally {
   clearReady();
